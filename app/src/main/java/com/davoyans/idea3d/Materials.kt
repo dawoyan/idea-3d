@@ -90,7 +90,7 @@ internal object MaterialStore {
 }
 
 /** A small drawing of a profile's cross-section, holes included. */
-@Composable internal fun ProfilePreview(material: Material, modifier: Modifier = Modifier) {
+@Composable internal fun ProfilePreview(material: Material, modifier: Modifier = Modifier, turnDeg: Double = 0.0) {
     Canvas(modifier) {
         val p = material.profile
         val outline: List<Vec2>; val holes: List<List<Vec2>>
@@ -102,9 +102,10 @@ internal object MaterialStore {
             else -> { outline = rect(p.widthMm, p.heightMm); holes = if (p.kind.hollow) listOf(rect(p.widthMm - 2 * p.wallMm, p.heightMm - 2 * p.wallMm)) else emptyList() }
         }
         if (outline.size < 3) return@Canvas
-        val extent = maxOf(outline.maxOf { kotlin.math.abs(it.x) }, outline.maxOf { kotlin.math.abs(it.y) }, 1e-6) * 2
+        val extent = outline.maxOf { kotlin.math.hypot(it.x, it.y) }.coerceAtLeast(1e-6) * 2
         val k = (minOf(size.width, size.height) * 0.9f / extent).toFloat()
-        fun at(v: Vec2) = Offset(size.width / 2 + (v.x * k).toFloat(), size.height / 2 - (v.y * k).toFloat())
+        val c = Math.cos(Math.toRadians(turnDeg)); val s = Math.sin(Math.toRadians(turnDeg))
+        fun at(v: Vec2) = Offset(size.width / 2 + ((v.x * c - v.y * s) * k).toFloat(), size.height / 2 - ((v.x * s + v.y * c) * k).toFloat())
         val path = Path().apply {
             fillType = PathFillType.EvenOdd
             (listOf(outline) + holes).forEach { ring -> moveTo(at(ring.first()).x, at(ring.first()).y); ring.drop(1).forEach { lineTo(at(it).x, at(it).y) }; close() }

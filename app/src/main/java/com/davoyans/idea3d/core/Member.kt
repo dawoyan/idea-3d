@@ -45,7 +45,8 @@ data class MemberProfile(val kind: ProfileKind, val widthMm: Double, val heightM
 object MemberBuilder {
     private const val ROUND_SEGMENTS = 24
 
-    fun build(name: String, a: Vec3, b: Vec3, up: Vec3, profile: MemberProfile, argb: Int): Mesh {
+    /** [turnDeg] turns the profile around the line, for example to show a 20 × 40 tube's narrow side to the front. */
+    fun build(name: String, a: Vec3, b: Vec3, up: Vec3, profile: MemberProfile, argb: Int, turnDeg: Double = 0.0): Mesh {
         profile.problem()?.let { throw MeshException(listOf(MeshIssue(name, it))) }
         val along = b - a
         if (along.length < 1e-6) throw MeshException(listOf(MeshIssue(name, "line has no length")))
@@ -54,7 +55,11 @@ object MemberBuilder {
         var v = up - u * (up dot u)
         if (v.length < 1e-6) v = (if (kotlin.math.abs(u.x) < 0.9) Vec3(1.0, 0.0, 0.0) else Vec3(0.0, 1.0, 0.0)).let { it - u * (it dot u) }
         v = v.normalized()
-        val w = u cross v
+        var w = u cross v
+        if (turnDeg != 0.0) {
+            val t = Math.toRadians(turnDeg); val c = kotlin.math.cos(t); val s = kotlin.math.sin(t)
+            val w2 = w * c + v * s; v = v * c - w * s; w = w2
+        }
         // Holes run a little past both ends so the cuts are clean.
         val extra = u * 1.0
         if (profile.kind == ProfileKind.DRAWN) {

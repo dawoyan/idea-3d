@@ -396,3 +396,16 @@ class DrawnProfileTest {
     }
 }
 
+class MemberTurnTest {
+    @Test fun turningANarrowTubeSwapsWhichSideFacesForward() {
+        val profile = MemberProfile(ProfileKind.RECT_TUBE, 40.0, 20.0, 2.0)
+        val up = Vec3(0.0, 0.0, 1.0)
+        val flat = MemberBuilder.build("A", Vec3(0.0, 0.0, 0.0), Vec3(1000.0, 0.0, 0.0), up, profile, 0)
+        val turned = MemberBuilder.build("A", Vec3(0.0, 0.0, 0.0), Vec3(1000.0, 0.0, 0.0), up, profile, 0, turnDeg = 90.0)
+        assertEquals(20.0, flat.bounds.second.z - flat.bounds.first.z, 1e-9)
+        assertEquals(40.0, turned.bounds.second.z - turned.bounds.first.z, 1e-9)
+        assertEquals(flat.signedVolume, turned.signedVolume, 1e-6)
+        assertTrue(MeshBuilder.validate(turned).isEmpty())
+    }
+}
+

@@ -171,7 +171,7 @@ private data class FeatureSnap(val point: Pt, val found: Boolean)
 private data class ScreenLine(val id: Int, val start: Offset, val end: Offset)
 private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "", val plane: ModelPlane = ModelPlane.FRONT)
 private fun MeasureLine.hasDepth() = abs(startZMm) > 0.000001 || abs(endZMm) > 0.000001
-private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null)
+private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0)
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
 private data class SelectedAlignmentObject(val guideIds: Set<Int>, val lineIds: Set<Int>, val points: List<Pt>)
 private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0, val plane: ModelPlane = ModelPlane.FRONT)
@@ -651,6 +651,7 @@ private object ProjectStore {
             guide.startThicknessMm?.let { put("startThicknessMm", it) }; guide.endThicknessMm?.let { put("endThicknessMm", it) }
             if (guide.plane != ModelPlane.FRONT) put("plane", guide.plane.name)
             guide.materialId?.let { put("material", it) }
+            if (guide.materialTurnDeg != 0.0) put("materialTurn", guide.materialTurnDeg)
         }) }
         val extrusions = JSONArray()
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
@@ -726,7 +727,7 @@ private object ProjectStore {
         val values = json.getJSONArray("lines")
         val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key, ModelPlane.of(line.optString("plane")))) } }
         val guideValues = json.optJSONArray("guides") ?: JSONArray()
-        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(20, 50, 90) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null })) } }
+        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(20, 50, 90) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0)) } }
         val figure = ComparisonFigure.entries.firstOrNull { it.name == json.optString("figure") } ?: if (!json.has("figure") && json.optBoolean("silhouette")) ComparisonFigure.STANDING else null
         val transparency = json.optInt("transparency", 0).takeIf { it in listOf(0, 10, 90, 100) } ?: 0
         val extrusionValues = json.optJSONArray("extrusions") ?: JSONArray()
@@ -852,6 +853,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var materials by remember { mutableStateOf(MaterialStore.load(context)) }
     var showMaterials by remember { mutableStateOf(false) }
     var saveMaterialShape by remember { mutableStateOf<List<GuideLine>?>(null) }
+    var showMaterialList by remember { mutableStateOf(false) }
     var showPictureEdit by remember { mutableStateOf(false) }
     var showPointDepth by remember { mutableStateOf(false) }
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
@@ -1743,6 +1745,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     fun handleDragStart(sourcePoint: Pt, hitRadius: Double) {
         if (tool == Tool.ADJUST && startForeignDrag(sourcePoint, hitRadius)) return
+        // Lines and Measure: an existing end point under the finger is moved, not drawn from.
+        if (tool == Tool.LINES && draftStart == null) closestGuideEndpoint(sourcePoint, guides, hitRadius * 1.5)?.let { e ->
+            val guide = guides.firstOrNull { it.id == e.guideId } ?: return@let
+            selectedGuideEndpoint = e; selectedGuideId = e.guideId; activeGuideEndpoint = e; activeGuideVertexPoint = if (e.isStart) guide.start else guide.end; pushUndo(); return
+        }
+        if (tool == Tool.MEASURE && draftStart == null) closestEndpoint(sourcePoint, lines, hitRadius * 1.5)?.let { e -> selectedEndpoint = e; selectedLineId = e.lineId; activePoint = e; pushUndo(); return }
         if (tool == Tool.ADJUST && selectedVertices.isNotEmpty() && selectedVertices.any { distance(sourcePoint, it) <= hitRadius * 1.5 }) {
             groupDragLast = sourcePoint; pushUndo(); return
         }
@@ -2221,7 +2229,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             extrusions = extrusions.map { if (it.id == selectedExtrusionId) { val handle = depthHandle(it, point); it.copy(handle = handle, depthMm = depthMmForHandle(it, handle, scale, unit)) } else it }
             return
         }
-        if (tool == Tool.ADJUST) activePoint?.let { endpoint ->
+        if (tool == Tool.ADJUST || tool == Tool.MEASURE) activePoint?.let { endpoint ->
             if (System.currentTimeMillis() < edgePauseUntil) return@let
             val line = lines.firstOrNull { it.id == endpoint.lineId } ?: return@let
             val (snappedPoint, alignment) = snapEndpointAlignment(line, endpoint, point, lines, levelRotation)
@@ -2248,7 +2256,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             adjustmentGuideId = null
             adjustmentFlashToken++
         }
-        if (tool == Tool.ADJUST) activeGuideEndpoint?.let { endpoint ->
+        if (tool == Tool.ADJUST || tool == Tool.LINES) activeGuideEndpoint?.let { endpoint ->
             val guide = guides.firstOrNull { it.id == endpoint.guideId } ?: return@let
             val vertex = activeGuideVertexPoint ?: if (endpoint.isStart) guide.start else guide.end
             guides = guides.map { item ->
@@ -2789,12 +2797,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     guideLengthEditId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
         var length by remember(id, guide.lengthMm, unit) { mutableStateOf(guide.lengthMm?.let { (it / unitFactorMm(unit)).toString() } ?: "") }
         var materialId by remember(id) { mutableStateOf(guide.materialId) }
+        var turn by remember(id) { mutableStateOf(guide.materialTurnDeg) }
         val value = length.replace(',', '.').toDoubleOrNull()
         val currentMm = scale?.let { s -> guidePoints(guide).zipWithNext().sumOf { (a, b) -> frontLength(a, b, s, axisScale) } * unitFactorMm(unit) }
         /** Applies the chosen material to every segment of this (broken) line. */
         fun saveMaterial() {
-            if (materialId == guide.materialId) return
-            guides = guides.map { if (sameGuideObject(it, guide)) it.copy(materialId = materialId) else it }
+            if (materialId == guide.materialId && turn == guide.materialTurnDeg) return
+            guides = guides.map { if (sameGuideObject(it, guide)) it.copy(materialId = materialId, materialTurnDeg = turn) else it }
         }
         AlertDialog(onDismissRequest = { guideLengthEditId = null }, title = { Text("Line: material and length") },
             text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2810,6 +2819,19 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         Column(Modifier.padding(start = 8.dp)) {
                             Text(material?.name ?: "None (plain line)", fontSize = 14.sp)
                             material?.let { Text(it.description, fontSize = 12.sp, color = Color(0xFF4D5A57)) }
+                        }
+                    }
+                }
+                materials.firstOrNull { it.id == materialId }?.let { chosen ->
+                    // Turn the profile around the line: the picture is the end of the bar, with the front view's depth axis up.
+                    Text("Turn around the line", fontWeight = FontWeight.Medium)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        ProfilePreview(chosen, Modifier.size(64.dp), turn)
+                        Text("${java.text.DecimalFormat("0.#").format(((turn % 360) + 360) % 360)}°", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(-90.0 to "−90°", -15.0 to "−15°", 15.0 to "+15°", 90.0 to "+90°").forEach { (step, label) ->
+                            OutlinedButton(onClick = { turn = ((turn + step) % 360 + 360) % 360 }, contentPadding = PaddingValues(horizontal = 4.dp), modifier = Modifier.weight(1f).height(38.dp)) { Text(label, fontSize = 12.sp, maxLines = 1) }
                         }
                     }
                 }
@@ -2931,7 +2953,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); Toast.makeText(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
-    }, onSaveMaterial = {
+    }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onSaveMaterial = {
         // The selected shape, or else the biggest closed shape that isn't a hole inside another one.
         val shapes = closedGuideShapes(guides)
         val chosen = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { g -> shapes.firstOrNull { path -> sameGuideObject(path.first(), g) } }
@@ -2986,6 +3008,39 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             setPlaneShapes(target.first, geometry.guides, geometry.extrusions.map { if (it.id == extrusion.id) withFacePosition(resized, faceMm, resized.depthMm ?: 0.0) else it })
             viewerEditObject = null
         }
+    }
+    if (showMaterialList) {
+        // Every line with a material, in every view: its true length (curves and depth included), grouped by material.
+        val setup = modelSetup()
+        val format = { mm: Double -> formatLength(mm, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2) }
+        val pieces = allGuides().mapNotNull { g ->
+            val material = materials.firstOrNull { it.id == g.materialId } ?: return@mapNotNull null
+            val mapping = setup.mapping(g.plane) ?: return@mapNotNull null
+            val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1)
+            val length = pts.withIndex().zipWithNext().sumOf { (a, b) ->
+                (mapping.model(b.value, g.startZMm + (g.endZMm - g.startZMm) * b.index / n) - mapping.model(a.value, g.startZMm + (g.endZMm - g.startZMm) * a.index / n)).length
+            }
+            Triple(material, g.plane, length)
+        }
+        AlertDialog(onDismissRequest = { showMaterialList = false }, title = { Text("Materials used") }, text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (pieces.isEmpty()) Text("No line has a material yet. Tap a line, then Material.")
+                pieces.groupBy { it.first.id }.values.forEach { group ->
+                    val material = group.first().first
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ProfilePreview(material, Modifier.size(36.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(material.name, fontWeight = FontWeight.Bold)
+                            Text(material.description, fontSize = 12.sp, color = Color(0xFF4D5A57))
+                        }
+                    }
+                    group.sortedByDescending { it.third }.forEachIndexed { i, (_, plane, length) ->
+                        Text("  ${i + 1}.  ${format(length)}${if (plane != ModelPlane.FRONT) "  (${plane.label})" else ""}", fontSize = 14.sp)
+                    }
+                    Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${format(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }, confirmButton = { TextButton(onClick = { showMaterialList = false }) { Text("Done") } })
     }
     saveMaterialShape?.let { shape ->
         /** The selected shape as a cross-section in millimeters, centered, with the closed shapes inside it as holes. */
@@ -3789,12 +3844,22 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
         val touch = Modifier.pointerInput(tool, bitmap, viewW, viewH, rotation, doubleTapEnabled) {
             var previousTapAt = 0L
             var previousTapPoint = Offset.Zero
+            /** In Lines and Measure, a drag that starts on an existing end point moves it, as in Adjust. */
+            fun nearEndpoint(p: Pt, zoomNow: Float, guidesNow: List<GuideLine>, linesNow: List<MeasureLine>): Boolean {
+                val r = 42.0 / (baseFit * zoomNow)
+                return when (tool) {
+                    Tool.LINES -> guidesNow.any { distance(it.start, p) < r || distance(it.end, p) < r }
+                    Tool.MEASURE -> linesNow.any { distance(it.start, p) < r || distance(it.end, p) < r }
+                    else -> false
+                }
+            }
             var tapCount = 0
             var pendingTap: kotlinx.coroutines.Job? = null
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
                 val gestureLines = latestLines.value
                 val gestureGuides = latestGuides.value
+                val noDraft = latestDraftStart.value == null
                 val downAt = System.currentTimeMillis()
                 var localZoom = latestZoom.value
                 var localPan = latestPan.value
@@ -3839,7 +3904,9 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     } else if (pressed.size == 1) {
                         val change = pressed.first()
                         val delta = change.position - change.previousPosition
-                        val dragThreshold = if (adjusting && tool == Tool.ADJUST) 0.0 else if (tool == Tool.ADJUST || tool == Tool.CROP) 1.0 else 8.0
+                        // A slow drag on an end point in Lines or Measure moves only a few pixels per event, so it needs the low threshold too.
+                val endpointGrab = (tool == Tool.LINES || tool == Tool.MEASURE) && noDraft && nearEndpoint(sourceAt(down.position, localZoom, localPan), localZoom, gestureGuides, gestureLines)
+                val dragThreshold = if (adjusting && (tool == Tool.ADJUST || endpointGrab)) 0.0 else if (tool == Tool.ADJUST || tool == Tool.CROP || endpointGrab) 1.0 else 8.0
                         if (hypot(delta.x.toDouble(), delta.y.toDouble()) > dragThreshold) {
                             holdJob?.cancel(); heldLineId = null; heldGuideId = null
                             if (tool == Tool.ADJUST && !transformed) {
@@ -3852,7 +3919,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                             } else if (tool == Tool.CROP) {
                                 if (!adjusting) { onCropStart(sourceAt(change.previousPosition, localZoom, localPan), 28.0 / (baseFit * localZoom)); adjusting = true }
                                 onCropDrag(sourceAt(change.position, localZoom, localPan))
-                            } else if (tool == Tool.LINES && !transformed && gestureGuides.any { it.id == latestSelectedGuideId.value && it.curveMid?.let { mid -> distance(sourceAt(down.position, localZoom, localPan), mid) < 42.0 / (baseFit * localZoom) } == true }) {
+                            } else if ((tool == Tool.LINES || tool == Tool.MEASURE) && !transformed && (gestureGuides.any { it.id == latestSelectedGuideId.value && it.curveMid?.let { mid -> distance(sourceAt(down.position, localZoom, localPan), mid) < 42.0 / (baseFit * localZoom) } == true } ||
+                                    noDraft && nearEndpoint(sourceAt(down.position, localZoom, localPan), localZoom, gestureGuides, gestureLines))) {
                                 if (!adjusting) { latestDragStart.value(sourceAt(down.position, localZoom, localPan), 28.0 / (baseFit * localZoom)); adjusting = true }
                                 latestDrag.value(sourceAt(change.position, localZoom, localPan), false)
                         } else if (tool != Tool.ADJUST && localZoom > 1.01f) {
@@ -4496,7 +4564,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     )
 }
 
-@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onSaveMaterial: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
+@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
     var name by remember { mutableStateOf(currentName) }
     var unit by remember { mutableStateOf(currentUnit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
@@ -4511,6 +4579,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 OutlinedButton(onClick = onExportImage) { Text("Export picture") }
                 OutlinedButton(onClick = onExport3d) { Text("Export 3D model (STL or 3MF)") }
                 OutlinedButton(onClick = onSaveMaterial) { Text("Save drawing as material") }
+                OutlinedButton(onClick = onMaterialList) { Text("Materials used (lengths)") }
                 Text("Measurement unit", fontWeight = FontWeight.Medium)
                 Box {
                     OutlinedButton(onClick = { unitMenuOpen = true }) { Text(unit) }
@@ -5025,7 +5094,7 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
         try {
             points.indices.toList().zipWithNext().map { (i, k) ->
                 val dir = (points[k] - points[i]).normalized()
-                (guide.plane to -(guide.id + 1)) to MemberBuilder.build(name, points[i] - dir * extend[i], points[k] + dir * extend[k], guide.plane.toward, material.profile, material.argb)
+                (guide.plane to -(guide.id + 1)) to MemberBuilder.build(name, points[i] - dir * extend[i], points[k] + dir * extend[k], guide.plane.toward, material.profile, material.argb, guide.materialTurnDeg)
             }
         } catch (e: MeshException) { issues?.addAll(e.issues); emptyList() }
     }
