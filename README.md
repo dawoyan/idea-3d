@@ -14,9 +14,9 @@ Download the APK from the [latest release](https://github.com/dawoyan/idea-3d/re
 - A single photo does not show depth, so Z values and thicknesses are always entered by you.
 - STL and 3MF exports use the same axes. A slicer treats Z as up, so an extruded shape lies flat with its front face on top.
 
-## Three drawing planes
+## Three drawing planes and one 3D view
 
-The editor has a **Front | Top | Profile** switch. Every plane has the same tools: lines, broken lines, curves, measuring, Adjust, split/join/cut and Make 3D.
+The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same tools: Calibrate, Measure, lines, broken lines, curves, Adjust, split/join/cut, Make 3D and Crop.
 
 | Plane | Screen axes | A closed shape is extruded along |
 |---|---|---|
@@ -24,12 +24,17 @@ The editor has a **Front | Top | Profile** switch. Every plane has the same tool
 | Top | X right, front (+Z) at the bottom | Y, down from its top face; it starts on Y = 0 |
 | Profile | front (+Z) on the left, Y up | X, left from its right face; it starts on X = 0 |
 
-- The Top and Profile canvases are blank and the size of the picture. They share X (Top) or Y (Profile) with the front drawing, and put Z = 0 across the middle as a dashed line.
-- Objects from the other planes show as grey outlines, so new shapes can be lined up with them.
-- Only the photo can be calibrated, so Calibrate and Crop appear only in Front. Top and Profile use the front scale.
-- Dialogs name the right depth axis for the plane, for example "Depth Y" in Top.
-- In the 3D viewer, any flat view can move or resize an object along its extrusion axis when that axis is visible. For example, a Top shape is raised in Front or Profile. Snapping uses every object's sides along that axis. The **Draw** button opens the editor in the plane you're looking at.
-- Projects save each item's plane. Older projects open with everything in Front.
+- **Editing shapes from other planes:** with **Adjust**, tap a grey shape to select it. Then:
+  - drag it to move it along both visible axes;
+  - drag the side handles to stretch it along the shared axis;
+  - drag the depth handles to change its front or back;
+  - drag its dots to move outline points. Points that line up in the view move together.
+
+  The new size or offset shows while dragging, each drag is one undo step, and tapping the selected shape again opens its exact values. For example, in Top you can widen a Front box or make it deeper.
+- **Blank canvases:** Top and Profile are blank and start at the picture's size. They grow to fill the screen, with no dark bands, and so does an empty scene's front canvas. Crop resizes them. Each plane stores where its canvas sits in 3D, so cropping or growing never moves anything.
+- **Calibration:** a plane uses its own calibration lines if it has any. Otherwise Top and Profile use the front scale, and an empty scene uses 1 pixel per unit. Leveling, rotation and perspective correction work on the photo, so they stay in Front.
+- **3D:** shown in place of the canvas. One finger orbits, two fingers pan and zoom, and a tap opens an object's exact values. Sizes, Front, Frame, light, Reset and Save are on one slim row. The model rebuilds after every change, including undo.
+- **Saving:** projects store each item's plane and each plane's canvas. Older projects open with everything in Front.
 
 ## What's new compared with Measure It
 
@@ -89,6 +94,7 @@ The editor has a **Front | Top | Profile** switch. Every plane has the same tool
 - **No slicer test yet.** The files have not been opened in PrusaSlicer, Cura or Bambu Studio. Open them in your slicer and check them before printing.
 - **Bosch GLM support is unchanged from Measure It** and was not tested here. No other laser device is claimed to work.
 - **Shape limits:** shapes with holes can't be exported yet; the app reports them. Overlapping solids must be merged or moved apart in Z.
-- **Calibration** exists only in the Front plane. Per-axis (X only / Y only) calibration applies to the front drawing; Top and Profile use one uniform scale.
+- **Calibration in empty scenes now counts.** Before 0.5.0, an empty scene ignored calibration lines and always used 1 pixel per unit. Older empty scenes that contain a calibration line will show different sizes. Delete that line to go back to 1 pixel per unit.
+- **Per-axis (X only / Y only) calibration** applies to the front drawing only. Top and Profile use one uniform scale.
 - **Overlap checks across planes** compare bounding boxes and only warn, because a box can overlap where the solids don't. Look in the 3D view. Overlaps within one plane are still checked exactly and block export.
 - **Perspective correction** works as in Measure It, using reference edges in the crop tool. It is not covered by automated tests.
