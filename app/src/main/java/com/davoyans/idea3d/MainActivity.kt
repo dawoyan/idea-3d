@@ -2286,16 +2286,16 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             open3dView(viewerAngle)
         }
     }
-    if (showHelp) AlertDialog(onDismissRequest = { showHelp = false }, confirmButton = { TextButton(onClick = { showHelp = false }) { Text("Done") } }, title = { Text("Measure a picture") }, text = {
-        Text("1. Import a picture.\n\n2. Calibration: tap two known points and enter their real distance. Add an optional perpendicular (90 degree) reference; its scale is averaged with the first.\n\n3. Measure: tap two points for each new dimension.\n\n4. Fine adjust: drag any endpoint while the magnifier is visible. Export saves the picture with all labels and pointers.")
+    if (showHelp) AlertDialog(onDismissRequest = { showHelp = false }, confirmButton = { TextButton(onClick = { showHelp = false }) { Text("Done") } }, title = { Text("Model in 3D") }, text = {
+        Text("Axes: X right, Y up, Z toward you in the front view. The drawing plane is Z = 0. Lengths are stored in millimeters; changing units only changes how they are shown.\n\n1. Import a photo or start an empty scene. Use the crop tool to rotate, level, crop, expand or correct perspective first.\n\n2. Calibrate: tap two points and enter their real distance. One reference sets X, Y and Z. Advanced: mark references as X only or Y only to compensate for a stretched photo. A photo cannot show depth, so enter Z values yourself.\n\n3. Draw lines, broken lines and curves; close a shape to make it a face.\n\n4. Make 3D: extrude a closed shape, then set its depth and Z position. In the 3D viewer, tap an object to edit them.\n\n5. Export: STL or 3MF in millimeters after the model passes validation. Check it in your slicer before printing.")
     })
 }
 
 @Composable private fun EmptyState(modifier: Modifier, onImport: () -> Unit) {
     Column(modifier.fillMaxSize().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-        Text("Measure from a picture", fontSize = 28.sp, fontWeight = FontWeight.Black, textAlign = TextAlign.Center)
+        Text("Model in 3D from a photo", fontSize = 28.sp, fontWeight = FontWeight.Black, textAlign = TextAlign.Center)
         Spacer(Modifier.height(10.dp))
-        Text("Calibrate one known distance, then place precise manual measurements directly on the image.", textAlign = TextAlign.Center, color = Color(0xFF505957))
+        Text("Import a photo or start an empty scene. Calibrate a known distance, draw closed shapes, extrude them and export STL or 3MF.", textAlign = TextAlign.Center, color = Color(0xFF505957))
         Spacer(Modifier.height(26.dp))
         Button(onClick = onImport, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(8.dp)) { Text("Import picture", fontWeight = FontWeight.Bold) }
     }
@@ -3897,6 +3897,15 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                     ZDirectionPicker(startBack) { startBack = it }
                     OutlinedTextField(endZ, { if (decimalInputPattern.matches(it)) endZ = it }, label = { Text("${points?.second ?: "End"} Z ($unit)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
                     ZDirectionPicker(endBack) { endBack = it }
+                    val size = value.toDoubleOrNull()
+                    val dz = zValue(startZ, startBack)?.let { a -> zValue(endZ, endBack)?.let { b -> abs(b - a) } }
+                    if (size != null && size > 0 && dz != null && dz > 0) {
+                        val projected = projectedLengthForFixedTrue(size, dz)
+                        Text(if (projected == null) "The Z difference (${formatMeasure(dz, unit)} $unit) is longer than the size. Increase the size or reduce the Z difference."
+                            else "True 3D length ${formatMeasure(size, unit)} $unit. The front view shows a shorter ${formatMeasure(projected, unit)} $unit, because √(${formatMeasure(projected, unit)}² + ${formatMeasure(dz, unit)}²) = ${formatMeasure(size, unit)}.",
+                            fontSize = 12.sp, color = if (projected == null) Color(0xFFB3261E) else Color(0xFF4D5A57))
+                    }
+                    Text("Length source: ${when (line.lengthSource) { LengthSource.CALCULATED -> "calculated from calibration"; LengthSource.MANUAL -> "entered manually"; LengthSource.MEASURED -> "measured by laser"; LengthSource.UNKNOWN -> "unknown" }}", fontSize = 12.sp, color = Color(0xFF4D5A57))
                 }
                 if (!line.isReference) OutlinedButton(onClick = { val a = zValue(startZ, startBack); val b = zValue(endZ, endBack); if (a != null && b != null) onSave(0.0, label, colorIndex, true, false, a, b) }) { Text("Set unknown") }
                 if (!line.isReference) Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
