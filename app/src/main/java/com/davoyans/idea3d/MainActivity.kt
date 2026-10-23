@@ -203,13 +203,16 @@ private class ForeignObject(
     val plane: ModelPlane, val extrusionId: Int, val name: String, val argb: Int,
     /** Triangle vertices: x, y in this canvas, the same in the object's own canvas, and whether each is on the far side. */
     val canvas: FloatArray, val own: FloatArray, val back: BooleanArray,
-    /** Outline endpoints: own canvas point to this canvas point (on the facing surface). */
-    val points: List<Pair<Pt, Pt>>,
+    /** Outline endpoints on both the facing and the far side. */
+    val points: List<ForeignPoint>,
     val across: Vec3, val depth: Vec3, val acrossMin: Double, val acrossMax: Double, val faceMm: Double, val backMm: Double, val minThicknessMm: Double,
 ) { val key get() = plane to extrusionId }
 
+/** An outline endpoint of a foreign object: where it is in its own canvas, where it shows here, and which side it is on. */
+private data class ForeignPoint(val own: Pt, val at: Pt, val back: Boolean)
 private enum class ForeignHandle { MOVE, FACE, BACK, ACROSS_MIN, ACROSS_MAX, POINTS }
-private data class ForeignDrag(val target: ForeignObject, val handle: ForeignHandle, val start: Pt, val current: Pt, val points: List<Pt> = emptyList())
+/** [points] are own-canvas endpoints being dragged; [back] says whether their far-side corners were grabbed. */
+private data class ForeignDrag(val target: ForeignObject, val handle: ForeignHandle, val start: Pt, val current: Pt, val points: List<Pt> = emptyList(), val back: Boolean = false)
 /** What the editor draws for the selected foreign object: its preview triangles, handles (anchor and outward direction) and a live value. */
 private class ForeignOverlay(val triangles: FloatArray, val handles: List<Triple<ForeignHandle, Pt, Pt>>, val points: List<Pair<Pt, Boolean>>, val label: String?)
 private const val BOSCH_COLOR_INDEX = 4
@@ -1184,10 +1187,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val depth = extrusion.plane.toward
                 val across = axes.first { abs(it dot plane.toward) < 0.5 && abs(it dot depth) < 0.5 }
                 val planeGuides = others.flatMap { it.guides }.filter { it.plane == extrusion.plane }
-                val endpoints = mutableListOf<Pair<Pt, Double>>()
-                extrusionGuides(extrusion, planeGuides).forEach { edge -> listOf(edge.start to edge.startZMm, edge.end to edge.endZMm).forEach { (p, z) -> if (endpoints.none { distance(it.first, p) < 0.5 }) endpoints += p to z } }
+                val endpoints = mutableListOf<Triple<Pt, Double, Double>>()
+                val depthMm = extrusion.depthMm ?: 0.0
+                extrusionGuides(extrusion, planeGuides).forEach { edge ->
+                    listOf(Triple(edge.start, edge.startZMm, edge.startThicknessMm ?: depthMm), Triple(edge.end, edge.endZMm, edge.endThicknessMm ?: depthMm)).forEach { e -> if (endpoints.none { distance(it.first, e.first) < 0.5 }) endpoints += e }
+                }
+                val face = facePositionMm(extrusion)
                 ForeignObject(extrusion.plane, extrusion.id, spec.name, spec.argb, canvas, ownPoints, back,
-                    endpoints.map { (p, z) -> p to here.pixel(own.model(p, facePositionMm(extrusion) + z)) }, across, depth,
+                    endpoints.flatMap { (p, z, t) -> listOf(ForeignPoint(p, here.pixel(own.model(p, face + z)), false), ForeignPoint(p, here.pixel(own.model(p, face + z - t)), true)) }, across, depth,
                     mesh.vertices.minOf { it dot across }, mesh.vertices.maxOf { it dot across },
                     mesh.vertices.take(half).maxOf { it dot depth }, mesh.vertices.drop(half).minOf { it dot depth }, spec.outline.minOf { it.thicknessMm })
             }
@@ -1255,6 +1262,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             ForeignHandle.BACK -> { across = 0.0; depth = min(depth, t.minThicknessMm - 0.1) }
             ForeignHandle.ACROSS_MIN -> { depth = 0.0; across = min(across, extent - 1.0) }
             ForeignHandle.ACROSS_MAX -> { depth = 0.0; across = max(across, 1.0 - extent) }
+            ForeignHandle.POINTS -> if (drag.back) depth = min(depth, t.minThicknessMm - 0.1)
             else -> {}
         }
         return across to depth
@@ -1267,6 +1275,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val (da, dd) = drag?.let(::foreignDelta) ?: (0.0 to 0.0)
         val kind = drag?.handle
         val shift = here.pixelDelta(target.across * da + target.depth * dd)
+        val acrossShift = here.pixelDelta(target.across * da)
         val extent = target.acrossMax - target.acrossMin
         val (anchor, k) = when (kind) { ForeignHandle.ACROSS_MIN -> target.acrossMax to (extent - da) / extent; ForeignHandle.ACROSS_MAX -> target.acrossMin to (extent + da) / extent; else -> 0.0 to 1.0 }
         fun moved(p: Pt, own: Pt?, back: Boolean?): Pt = when (kind) {
@@ -1274,7 +1283,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             ForeignHandle.MOVE -> Pt(p.x + shift.x, p.y + shift.y)
             ForeignHandle.FACE -> if (back == true) p else Pt(p.x + shift.x, p.y + shift.y)
             ForeignHandle.BACK -> if (back == false) p else Pt(p.x + shift.x, p.y + shift.y)
-            ForeignHandle.POINTS -> if (own != null && drag.points.any { distance(it, own) < 0.5 }) Pt(p.x + shift.x, p.y + shift.y) else p
+            // A facing-side point moves the whole outline point; a far-side one also slides sideways but only changes thickness in depth.
+            ForeignHandle.POINTS -> if (own == null || drag.points.none { distance(it, own) < 0.5 }) p
+                else if (!drag.back || back == true) Pt(p.x + shift.x, p.y + shift.y) else Pt(p.x + acrossShift.x, p.y + acrossShift.y)
             ForeignHandle.ACROSS_MIN, ForeignHandle.ACROSS_MAX -> { val a = here.model(p, 0.0) dot target.across; here.pixelDelta(target.across * ((anchor + (a - anchor) * k) - a)).let { Pt(p.x + it.x, p.y + it.y) } }
         }
         val triangles = FloatArray(target.canvas.size)
@@ -1287,14 +1298,15 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val across = (kind == ForeignHandle.ACROSS_MIN && handle == ForeignHandle.ACROSS_MIN) || (kind == ForeignHandle.ACROSS_MAX && handle == ForeignHandle.ACROSS_MAX)
             Triple(handle, if (follows || across) Pt(at.x + shift.x, at.y + shift.y) else at, dir)
         }
-        val points = target.points.map { (own, at) -> moved(at, own, null) to (kind == ForeignHandle.POINTS && drag.points.any { distance(it, own) < 0.5 }) }
+        val points = target.points.map { point -> moved(point.at, point.own, point.back) to (kind == ForeignHandle.POINTS && point.back == drag.back && drag.points.any { distance(it, point.own) < 0.5 }) }
         val format = { mm: Double -> formatLength(mm, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2) }
         fun signed(v: Double) = (if (v >= 0) "+" else "−") + format(abs(v))
         val acrossName = listOf("X", "Y", "Z")[listOf(target.across.x, target.across.y, target.across.z).indexOfFirst { abs(it) > 0.5 }]
         val depthName = target.plane.normalAxis.label
         val label = when (kind) {
             null -> null
-            ForeignHandle.MOVE, ForeignHandle.POINTS -> "$acrossName ${signed(da)} · $depthName ${signed(dd)}"
+            ForeignHandle.MOVE -> "$acrossName ${signed(da)} · $depthName ${signed(dd)}"
+            ForeignHandle.POINTS -> if (drag.back) "$acrossName ${signed(da)} · far side $depthName ${signed(dd)}" else "$acrossName ${signed(da)} · $depthName ${signed(dd)}"
             ForeignHandle.FACE -> "${target.name}: depth ${format(target.faceMm - target.backMm + dd)}"
             ForeignHandle.BACK -> "${target.name}: depth ${format(target.faceMm - target.backMm - dd)}"
             ForeignHandle.ACROSS_MIN -> "${target.name}: $acrossName size ${format(extent - da)}"
@@ -1304,18 +1316,27 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     fun startForeignDrag(point: Pt, hitRadius: Double): Boolean {
         val selected = selectedForeignObject()
+        /** Grabs the corner nearest [point]; corners on the same side that line up in this view move together. */
+        fun grabPoint(target: ForeignObject): Boolean {
+            val nearest = target.points.minByOrNull { distance(it.at, point) } ?: return false
+            if (distance(nearest.at, point) > hitRadius) return false
+            val group = target.points.filter { it.back == nearest.back && distance(it.at, nearest.at) < hitRadius * 0.15 }.map { it.own }
+            foreignDrag = ForeignDrag(target, ForeignHandle.POINTS, point, point, group, nearest.back)
+            return true
+        }
         if (selected != null) {
-            val nearest = selected.points.minByOrNull { distance(it.second, point) }
-            if (nearest != null && distance(nearest.second, point) <= hitRadius) {
-                val group = selected.points.filter { distance(it.second, nearest.second) < hitRadius * 0.15 }.map { it.first }
-                foreignDrag = ForeignDrag(selected, ForeignHandle.POINTS, point, point, group); return true
-            }
+            if (grabPoint(selected)) return true
             foreignHandles(selected).firstOrNull { (_, at, dir) -> distance(handlePosition(at, dir, hitRadius), point) <= hitRadius * 1.2 }?.let { (handle, _, _) ->
                 foreignDrag = ForeignDrag(selected, handle, point, point); return true
             }
             if (insideForeign(selected, point)) { foreignDrag = ForeignDrag(selected, ForeignHandle.MOVE, point, point); return true }
         }
         if (ownGeometryNear(point, hitRadius)) return false
+        // A corner of any grey shape can be dragged straight away.
+        foreign.lastOrNull { o -> o.points.any { distance(it.at, point) <= hitRadius } }?.let { target ->
+            clearOwnSelection(); selectedForeign = target.key
+            if (grabPoint(target)) return true
+        }
         val hit = foreign.lastOrNull { insideForeign(it, point) } ?: return false
         clearOwnSelection(); selectedForeign = hit.key
         foreignDrag = ForeignDrag(hit, ForeignHandle.MOVE, point, point)
@@ -1323,7 +1344,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     fun handleForeignTap(point: Pt, hitRadius: Double): Boolean {
         val selected = selectedForeignObject()
-        if (selected != null && (selected.points.any { distance(it.second, point) <= hitRadius } || foreignHandles(selected).any { (_, at, dir) -> distance(handlePosition(at, dir, hitRadius), point) <= hitRadius * 1.2 })) return true
+        if (selected != null && (selected.points.any { distance(it.at, point) <= hitRadius } || foreignHandles(selected).any { (_, at, dir) -> distance(handlePosition(at, dir, hitRadius), point) <= hitRadius * 1.2 })) return true
         if (ownGeometryNear(point, hitRadius)) { selectedForeign = null; return false }
         val hit = foreign.lastOrNull { insideForeign(it, point) }
         if (hit == null) { selectedForeign = null; return false }
@@ -1365,8 +1386,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
             ForeignHandle.POINTS -> {
                 fun near(p: Pt) = drag.points.any { distance(it, p) < 0.5 }
-                edges { g -> g.copy(start = if (near(g.start)) shifted(g.start) else g.start, end = if (near(g.end)) shifted(g.end) else g.end,
+                // Facing side: the point moves in depth with its thickness. Far side: only the thickness at the point changes.
+                if (!drag.back) edges { g -> g.copy(start = if (near(g.start)) shifted(g.start) else g.start, end = if (near(g.end)) shifted(g.end) else g.end,
                     startZMm = if (near(g.start)) g.startZMm + dd else g.startZMm, endZMm = if (near(g.end)) g.endZMm + dd else g.endZMm, lengthMm = null) }
+                else edges { g -> g.copy(start = if (near(g.start)) shifted(g.start) else g.start, end = if (near(g.end)) shifted(g.end) else g.end,
+                    startThicknessMm = if (near(g.start)) max(0.1, (g.startThicknessMm ?: depth) - dd) else g.startThicknessMm,
+                    endThicknessMm = if (near(g.end)) max(0.1, (g.endThicknessMm ?: depth) - dd) else g.endThicknessMm, lengthMm = null) }
                 extrusion
             }
         }
@@ -1625,6 +1650,15 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (tool == Tool.ADJUST && startForeignDrag(sourcePoint, hitRadius)) return
         if (tool == Tool.ADJUST && selectedVertices.isNotEmpty() && selectedVertices.any { distance(sourcePoint, it) <= hitRadius * 1.5 }) {
             groupDragLast = sourcePoint; pushUndo(); return
+        }
+        if (tool == Tool.ADJUST) {
+            // Corners can be dragged straight away, without tapping them first.
+            val heldVertex = selectedGuideEndpoint?.let { e -> guides.firstOrNull { it.id == e.guideId }?.let { if (e.isStart) it.start else it.end } }
+            val heldPoint = selectedEndpoint?.let { e -> lines.firstOrNull { it.id == e.lineId }?.let { if (e.isStart) it.start else it.end } }
+            if ((heldVertex == null || distance(sourcePoint, heldVertex) > hitRadius) && (heldPoint == null || distance(sourcePoint, heldPoint) > hitRadius)) {
+                closestGuideEndpoint(sourcePoint, guides, hitRadius)?.let { e -> clearOwnSelection(); selectedForeign = null; selectedGuideEndpoint = e; selectedGuideId = e.guideId }
+                    ?: closestEndpoint(sourcePoint, lines, hitRadius)?.let { e -> clearOwnSelection(); selectedForeign = null; selectedEndpoint = e; selectedLineId = e.lineId }
+            }
         }
         if (tool == Tool.ADJUST && selectedWholeGuideId != null) {
             val selected = guides.firstOrNull { it.id == selectedWholeGuideId }
