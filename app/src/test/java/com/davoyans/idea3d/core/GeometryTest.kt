@@ -375,3 +375,24 @@ class MemberTest {
     }
 }
 
+class DrawnProfileTest {
+    private val a = Vec3(0.0, 0.0, 0.0); private val b = Vec3(0.0, 500.0, 0.0); private val up = Vec3(0.0, 0.0, 1.0)
+    private fun square(size: Double) = listOf(Vec2(-size / 2, -size / 2), Vec2(size / 2, -size / 2), Vec2(size / 2, size / 2), Vec2(-size / 2, size / 2))
+
+    @Test fun drawnSquareWithAHoleIsATube() {
+        val profile = MemberProfile(ProfileKind.DRAWN, 40.0, 40.0, outline = square(40.0), holes = listOf(square(36.0)))
+        val mesh = MemberBuilder.build("Tube 4*4", a, b, up, profile, 0)
+        assertEquals((1600.0 - 1296.0) * 500.0, mesh.signedVolume, 1e-3)
+        assertEquals(1600.0 - 1296.0, profile.areaMm2, 1e-9)
+        assertTrue(MeshBuilder.validate(mesh).isEmpty())
+    }
+
+    @Test fun concaveDrawnOutlineIsFilledCorrectly() {
+        // An L, drawn clockwise.
+        val l = listOf(Vec2(0.0, 0.0), Vec2(0.0, 30.0), Vec2(10.0, 30.0), Vec2(10.0, 10.0), Vec2(30.0, 10.0), Vec2(30.0, 0.0))
+        val mesh = MemberBuilder.build("Angle", a, b, up, MemberProfile(ProfileKind.DRAWN, 30.0, 30.0, outline = l), 0)
+        assertEquals(500.0 * 500.0, mesh.signedVolume, 1e-3)
+        assertTrue(MeshBuilder.validate(mesh).isEmpty())
+    }
+}
+

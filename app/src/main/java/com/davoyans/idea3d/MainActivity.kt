@@ -148,6 +148,9 @@ import com.davoyans.idea3d.core.projectedLengthForFixedTrue
 import com.davoyans.idea3d.core.MeshBuilder
 import com.davoyans.idea3d.core.MeshException
 import com.davoyans.idea3d.core.MemberBuilder
+import com.davoyans.idea3d.core.MemberProfile
+import com.davoyans.idea3d.core.ProfileKind
+import com.davoyans.idea3d.core.Vec2
 import com.davoyans.idea3d.core.Csg
 import com.davoyans.idea3d.core.MeshIssue
 import com.davoyans.idea3d.core.ModelExport
@@ -176,7 +179,7 @@ private enum class JunctionKind { SPLIT_MEASUREMENT, SPLIT_GUIDE, JOIN_MEASUREME
 private data class JunctionAction(val kind: JunctionKind, val firstId: Int, val secondId: Int, val point: Pt)
 private data class JunctionArm(val lineId: Int, val endpoint: Pt, val color: Color)
 /** Joining two crossing lines on the canvas: the parts (arms) blink until two are chosen to keep. */
-private data class JoinPick(val action: JunctionAction, val arms: List<JunctionArm>, val selected: Set<Int> = emptySet(), val keepRemaining: Boolean = false)
+private data class JoinPick(val action: JunctionAction, val arms: List<JunctionArm>, val selected: Set<Int> = emptySet(), val keepRemaining: Boolean = false, val paths: List<List<Pt>> = emptyList())
 private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList(), val plane: ModelPlane = ModelPlane.FRONT, val stash: Map<ModelPlane, PlaneGeometry> = emptyMap(), val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList())
 /**
  * Where a plane's canvas sits in model space: canvas pixel ([originU], [originV]) is the plane's (0, 0) and the
@@ -848,6 +851,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var joinPick by remember { mutableStateOf<JoinPick?>(null) }
     var materials by remember { mutableStateOf(MaterialStore.load(context)) }
     var showMaterials by remember { mutableStateOf(false) }
+    var saveMaterialShape by remember { mutableStateOf<List<GuideLine>?>(null) }
     var showPictureEdit by remember { mutableStateOf(false) }
     var showPointDepth by remember { mutableStateOf(false) }
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
@@ -1462,20 +1466,27 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         } else {
             guides.filter { it.id == action.firstId || it.id == action.secondId }.flatMap { line -> listOf(line.start, line.end).filter { distance(it, action.point) >= 0.6 }.map { JunctionArm(line.id, it, guideColor(line.colorIndex)) } }
         }
-        joinPick = JoinPick(action, arms)
+        // Each part follows its line from the crossing to its end, along the curve when the line is curved.
+        val paths = arms.map { arm ->
+            val guide = if (action.kind == JunctionKind.JOIN_GUIDES) guides.firstOrNull { it.id == arm.lineId } else null
+            if (guide?.curveMid == null) listOf(action.point, arm.endpoint) else {
+                val t = guideNearestParameter(guide, action.point)
+                val to = if (distance(arm.endpoint, guide.start) <= distance(arm.endpoint, guide.end)) 0f else 1f
+                (0..24).map { i -> guidePointAt(guide, t + (to - t) * i / 24f) }
+            }
+        }
+        joinPick = JoinPick(action, arms, paths = paths)
     }
     /** Toggles the arm nearest [point]; at most two can be kept. */
     fun pickJoinArm(pick: JoinPick, point: Pt, hitRadius: Double) {
-        val center = pick.action.point
-        val index = pick.arms.indices.minByOrNull { i ->
-            val end = pick.arms[i].endpoint
-            val dx = end.x - center.x; val dy = end.y - center.y
-            val t = (((point.x - center.x) * dx + (point.y - center.y) * dy) / (dx * dx + dy * dy).coerceAtLeast(1e-6f)).coerceIn(0f, 1f)
-            distance(point, Pt(center.x + dx * t, center.y + dy * t))
-        } ?: return
-        val end = pick.arms[index].endpoint
-        val t = (((point.x - center.x) * (end.x - center.x) + (point.y - center.y) * (end.y - center.y)) / ((end.x - center.x) * (end.x - center.x) + (end.y - center.y) * (end.y - center.y)).coerceAtLeast(1e-6f)).coerceIn(0f, 1f)
-        if (distance(point, Pt(center.x + (end.x - center.x) * t, center.y + (end.y - center.y) * t)) > hitRadius * 2.5) return
+        fun segmentDistance(a: Pt, b: Pt): Double {
+            val dx = b.x - a.x; val dy = b.y - a.y
+            val t = (((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy).coerceAtLeast(1e-6f)).coerceIn(0f, 1f)
+            return distance(point, Pt(a.x + dx * t, a.y + dy * t))
+        }
+        fun armDistance(i: Int) = (pick.paths.getOrNull(i) ?: listOf(pick.action.point, pick.arms[i].endpoint)).zipWithNext().minOf { (a, b) -> segmentDistance(a, b) }
+        val index = pick.arms.indices.minByOrNull(::armDistance) ?: return
+        if (armDistance(index) > hitRadius * 2.5) return
         joinPick = pick.copy(selected = if (index in pick.selected) pick.selected - index else if (pick.selected.size < 2) pick.selected + index else pick.selected)
     }
 
@@ -2551,6 +2562,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             selectedGuideId?.let { id ->
                 if (guides.firstOrNull { it.id == id }?.let { selected -> closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), selected) } } == true) {
                     IconButton(onClick = { shapeEditId = id }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_edit_shape), contentDescription = "Edit shape") }
+                    IconButton(onClick = { saveMaterialShape = guides.firstOrNull { it.id == id }?.let { selected -> closedGuideShapes(guides).firstOrNull { path -> sameGuideObject(path.first(), selected) } } }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_save_material), contentDescription = "Save as material") }
                 }
             }
             deleteCandidateId?.let { id ->
@@ -2793,7 +2805,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 (listOf<Material?>(null) + materials).forEach { material ->
                     Row(Modifier.fillMaxWidth().clickable { materialId = material?.id }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                         RadioButton(selected = materialId == material?.id, onClick = { materialId = material?.id })
-                        if (material != null) Box(Modifier.size(16.dp).background(Color(material.argb), RoundedCornerShape(3.dp)))
+                        if (material != null) ProfilePreview(material, Modifier.size(32.dp))
                         Column(Modifier.padding(start = 8.dp)) {
                             Text(material?.name ?: "None (plain line)", fontSize = 14.sp)
                             material?.let { Text(it.description, fontSize = 12.sp, color = Color(0xFF4D5A57)) }
@@ -2966,6 +2978,51 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             viewerEditObject = null
         }
     }
+    saveMaterialShape?.let { shape ->
+        /** The selected shape as a cross-section in millimeters, centered, with the closed shapes inside it as holes. */
+        val profile = remember(shape) { runCatching {
+            val mapping = modelSetup().mapping(editPlane) ?: return@runCatching null
+            fun ring(path: List<GuideLine>) = editableContours(shapePath(path))?.singleOrNull()
+            val outer = ring(shape) ?: return@runCatching null
+            val holes = closedGuideShapes(guides).filter { it !== shape && it.none { g -> shape.any { s -> s.id == g.id } } }
+                .mapNotNull(::ring).filter { hole -> hole.all { pointInsidePolygon(it, outer) } }
+            fun mm(points: List<Pt>) = points.map { Vec2(mapping.right(it), mapping.up(it)) }
+            val outline = mm(outer)
+            val cx = (outline.minOf { it.x } + outline.maxOf { it.x }) / 2; val cy = (outline.minOf { it.y } + outline.maxOf { it.y }) / 2
+            fun centered(points: List<Vec2>) = points.map { Vec2(it.x - cx, it.y - cy) }
+            MemberProfile(ProfileKind.DRAWN, outline.maxOf { it.x } - outline.minOf { it.x }, outline.maxOf { it.y } - outline.minOf { it.y }, outline = centered(outline), holes = holes.map { centered(mm(it)) })
+        }.getOrNull() }
+        val f = java.text.DecimalFormat("0.#")
+        var name by remember(shape) { mutableStateOf(profile?.let { "Shape ${f.format(it.widthMm)}×${f.format(it.heightMm)}" } ?: "") }
+        // The real width of the cross-section; the drawing is scaled to it, keeping its proportions and holes.
+        var realWidth by remember(shape) { mutableStateOf(profile?.let { f.format(it.widthMm) } ?: "") }
+        val realWidthMm = parseLengthMm(realWidth, LengthUnit.MM)
+        val scaled = profile?.let { p ->
+            val k = (realWidthMm ?: p.widthMm) / p.widthMm
+            fun scale(points: List<Vec2>) = points.map { Vec2(it.x * k, it.y * k) }
+            p.copy(widthMm = p.widthMm * k, heightMm = p.heightMm * k, outline = scale(p.outline), holes = p.holes.map(::scale))
+        }
+        AlertDialog(onDismissRequest = { saveMaterialShape = null }, title = { Text("Save as material") }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (scaled == null) Text("This shape can't be used as a cross-section. Close its outline and make sure it doesn't cross itself.")
+                else {
+                    val preview = Material("preview", name, scaled, guideColor(shape.first().colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it })
+                    ProfilePreview(preview, Modifier.fillMaxWidth().height(110.dp))
+                    Text("${preview.description}. Closed shapes inside it become holes. The material is shared by all projects: pick it in a line's details and the line becomes this shape along its length.", fontSize = 13.sp, color = Color(0xFF4D5A57))
+                    OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text("Tube 4*4") }, singleLine = true)
+                    OutlinedTextField(realWidth, { realWidth = it }, label = { Text("Real width (mm)") }, supportingText = { Text("The drawing is scaled to this width; height and holes follow.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                }
+            }
+        }, confirmButton = {
+            TextButton(enabled = scaled != null && name.isNotBlank() && realWidthMm != null && realWidthMm > 0, onClick = {
+                val color = guideColor(shape.first().colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it }
+                materials = materials + Material(UUID.randomUUID().toString(), name.trim(), scaled!!, color)
+                MaterialStore.save(context, materials)
+                Toast.makeText(context, "Saved \"${name.trim()}\" to Materials", Toast.LENGTH_SHORT).show()
+                saveMaterialShape = null
+            }) { Text("Save") }
+        }, dismissButton = { TextButton(onClick = { saveMaterialShape = null }) { Text("Cancel") } })
+    }
     pendingCut?.let { op ->
         val tool = objectName(op.tool); val target = objectName(op.target)
         AlertDialog(onDismissRequest = { pendingCut = null }, title = { Text("Cut $target") }, text = {
@@ -3032,10 +3089,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     Column(modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Library", Modifier.weight(1f), fontSize = 26.sp, fontWeight = FontWeight.Black)
-            TextButton(onClick = onSettings) { Text("Settings") }
             Button(onClick = onImport, shape = RoundedCornerShape(8.dp)) { Text("Import picture") }
         }
-        Row { TextButton(onClick = onNewScene) { Text("New empty scene") }; TextButton(onClick = onImportProject) { Text("Import saved project") }; TextButton(onClick = onMaterials) { Text("Materials") } }
+        Row { TextButton(onClick = onNewScene) { Text("New empty scene") }; TextButton(onClick = onImportProject) { Text("Import saved project") } }
+        // Materials are shared by all projects, so they live here rather than inside one.
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onMaterials, shape = RoundedCornerShape(8.dp)) { Text("Materials") }
+            TextButton(onClick = onSettings) { Text("Settings") }
+        }
         if (projects.isEmpty()) EmptyState(Modifier.weight(1f), onImport)
         else Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             projects.forEach { project ->
@@ -3893,6 +3954,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 val center = screen(pick.action.point)
                 pick.arms.forEachIndexed { index, arm ->
                     val end = screen(arm.endpoint)
+                    val trace = (pick.paths.getOrNull(index) ?: listOf(pick.action.point, arm.endpoint)).map(::screen)
                     val kept = index in pick.selected
                     val decided = pick.selected.size == 2
                     val color = when {
@@ -3901,8 +3963,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         decided -> Color(0xFFD50000).copy(alpha = blink)
                         else -> Color(0xFFFF8F00).copy(alpha = blink)
                     }
-                    drawLine(Color.White, center, end, strokeWidth = 18f)
-                    drawLine(color, center, end, strokeWidth = 11f)
+                    trace.zipWithNext().forEach { (a, b) -> drawLine(Color.White, a, b, strokeWidth = 18f, cap = androidx.compose.ui.graphics.StrokeCap.Round) }
+                    trace.zipWithNext().forEach { (a, b) -> drawLine(color, a, b, strokeWidth = 11f, cap = androidx.compose.ui.graphics.StrokeCap.Round) }
                     drawCircle(Color.White, 22f, end); drawCircle(color, 22f, end, style = Stroke(6f))
                 }
                 drawCircle(Color(0xFF17211E), 9f, center)

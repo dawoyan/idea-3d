@@ -1,0 +1,5 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <!-- A hollow square profile with a plus: save this shape as a material. -->
+    <path android:fillColor="#FF006D67" android:pathData="M3,3h12v12H3V3zM6,6v6h6V6H6zM18,13h2v4h4v2h-4v4h-2v-4h-4v-2h4v-4z" />
+</vector>

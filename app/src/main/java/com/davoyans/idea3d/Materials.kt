@@ -31,6 +31,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.davoyans.idea3d.core.MemberProfile
 import com.davoyans.idea3d.core.ProfileKind
+import com.davoyans.idea3d.core.Vec2
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.drawscope.Stroke
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -42,6 +48,7 @@ internal data class Material(val id: String, val name: String, val profile: Memb
     /** For example "Rectangular tube 40 × 20 × 2 mm". */
     val description: String get() {
         val f = DecimalFormat("0.##")
+        if (profile.kind == ProfileKind.DRAWN) return "Drawn shape ${f.format(profile.widthMm)} × ${f.format(profile.heightMm)} mm${if (profile.holes.isNotEmpty()) ", hollow" else ""}"
         val size = if (profile.kind.round) "Ø${f.format(profile.widthMm)}" else "${f.format(profile.widthMm)} × ${f.format(profile.heightMm)}"
         return "${profile.kind.label} $size${if (profile.kind.hollow) " × ${f.format(profile.wallMm)}" else ""} mm"
     }
@@ -64,15 +71,46 @@ internal object MaterialStore {
         return runCatching {
             val array = JSONArray(f.readText())
             (0 until array.length()).map { i -> array.getJSONObject(i).let { o ->
-                Material(o.getString("id"), o.getString("name"), MemberProfile(ProfileKind.of(o.optString("kind")), o.getDouble("width"), o.optDouble("height", o.getDouble("width")), o.optDouble("wall", 0.0)), o.optInt("color", 0xFF5F6B6D.toInt()))
+                fun points(array: JSONArray?) = array?.let { a -> (0 until a.length() / 2).map { Vec2(a.getDouble(it * 2), a.getDouble(it * 2 + 1)) } }.orEmpty()
+                val holes = o.optJSONArray("holes")?.let { h -> (0 until h.length()).map { points(h.getJSONArray(it)) } }.orEmpty()
+                Material(o.getString("id"), o.getString("name"), MemberProfile(ProfileKind.of(o.optString("kind")), o.getDouble("width"), o.optDouble("height", o.getDouble("width")), o.optDouble("wall", 0.0), points(o.optJSONArray("outline")), holes), o.optInt("color", 0xFF5F6B6D.toInt()))
             } }
         }.getOrDefault(defaults)
     }
 
     fun save(context: Context, materials: List<Material>) {
         file(context).writeText(JSONArray().apply {
-            materials.forEach { m -> put(JSONObject().apply { put("id", m.id); put("name", m.name); put("kind", m.profile.kind.name); put("width", m.profile.widthMm); put("height", m.profile.heightMm); put("wall", m.profile.wallMm); put("color", m.argb) }) }
+            fun points(list: List<Vec2>) = JSONArray().apply { list.forEach { put(it.x); put(it.y) } }
+            materials.forEach { m -> put(JSONObject().apply {
+                put("id", m.id); put("name", m.name); put("kind", m.profile.kind.name); put("width", m.profile.widthMm); put("height", m.profile.heightMm); put("wall", m.profile.wallMm); put("color", m.argb)
+                if (m.profile.outline.isNotEmpty()) { put("outline", points(m.profile.outline)); put("holes", JSONArray().apply { m.profile.holes.forEach { put(points(it)) } }) }
+            }) }
         }.toString())
+    }
+}
+
+/** A small drawing of a profile's cross-section, holes included. */
+@Composable internal fun ProfilePreview(material: Material, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val p = material.profile
+        val outline: List<Vec2>; val holes: List<List<Vec2>>
+        fun rect(w: Double, h: Double) = listOf(Vec2(-w / 2, -h / 2), Vec2(w / 2, -h / 2), Vec2(w / 2, h / 2), Vec2(-w / 2, h / 2))
+        fun circle(d: Double) = (0 until 32).map { i -> val t = 2 * Math.PI * i / 32; Vec2(d / 2 * Math.cos(t), d / 2 * Math.sin(t)) }
+        when {
+            p.kind == ProfileKind.DRAWN -> { outline = p.outline; holes = p.holes }
+            p.kind.round -> { outline = circle(p.widthMm); holes = if (p.kind.hollow) listOf(circle(p.widthMm - 2 * p.wallMm)) else emptyList() }
+            else -> { outline = rect(p.widthMm, p.heightMm); holes = if (p.kind.hollow) listOf(rect(p.widthMm - 2 * p.wallMm, p.heightMm - 2 * p.wallMm)) else emptyList() }
+        }
+        if (outline.size < 3) return@Canvas
+        val extent = maxOf(outline.maxOf { kotlin.math.abs(it.x) }, outline.maxOf { kotlin.math.abs(it.y) }, 1e-6) * 2
+        val k = (minOf(size.width, size.height) * 0.9f / extent).toFloat()
+        fun at(v: Vec2) = Offset(size.width / 2 + (v.x * k).toFloat(), size.height / 2 - (v.y * k).toFloat())
+        val path = Path().apply {
+            fillType = PathFillType.EvenOdd
+            (listOf(outline) + holes).forEach { ring -> moveTo(at(ring.first()).x, at(ring.first()).y); ring.drop(1).forEach { lineTo(at(it).x, at(it).y) }; close() }
+        }
+        drawPath(path, Color(material.argb))
+        drawPath(path, Color(0xFF1A2421), style = Stroke(1.5f))
     }
 }
 
@@ -88,12 +126,12 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
             Text("Materials", Modifier.weight(1f), fontSize = 26.sp, fontWeight = FontWeight.Black)
             Button(onClick = { adding = true }, shape = RoundedCornerShape(8.dp)) { Text("Add") }
         }
-        Text("Shared by all projects. Pick one in a line's details to make that line a bar or pipe in 3D and in exports.", fontSize = 13.sp, color = Color(0xFF4D5A57))
+        Text("Shared by all projects. To make one from a drawing: in any project, draw the cross-section (a hole inside makes it hollow), select it with Adjust and tap Save as material. Then pick it in a line's details: the line becomes that bar or pipe in 3D and in exports.", fontSize = 13.sp, color = Color(0xFF4D5A57))
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             materials.forEach { material ->
                 Card(Modifier.fillMaxWidth().clickable { editing = material }, shape = RoundedCornerShape(8.dp)) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Box(Modifier.size(28.dp).background(Color(material.argb), RoundedCornerShape(6.dp)))
+                        ProfilePreview(material, Modifier.size(40.dp))
                         Column(Modifier.weight(1f)) {
                             Text(material.name, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                             Text(material.description, fontSize = 13.sp, color = Color(0xFF4D5A57))
@@ -122,8 +160,10 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
     var color by remember { mutableStateOf(initial?.argb ?: materialColors.first()) }
     var confirmDelete by remember { mutableStateOf(false) }
     fun number(s: String) = s.replace(',', '.').toDoubleOrNull()
+    val drawn = initial?.profile?.takeIf { it.kind == ProfileKind.DRAWN }
     val w = number(width); val h = if (kind.round) w else number(height); val t = if (kind.hollow) number(wall) else 0.0
-    val profile = if (w != null && h != null && t != null) MemberProfile(kind, w, h, t) else null
+    // A drawn profile keeps its outline; only its name and color change here.
+    val profile = drawn ?: if (w != null && h != null && t != null) MemberProfile(kind, w, h, t) else null
     val problem = profile?.problem()
     if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Delete ${initial?.name}?") },
         text = { Text("Lines made of it become plain lines again.") },
@@ -131,13 +171,17 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
     else AlertDialog(onDismissRequest = onDismiss, title = { Text(if (initial == null) "New material" else "Edit material") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text("Iron pipe") }, singleLine = true)
+            if (initial != null) ProfilePreview(initial.copy(argb = color), Modifier.fillMaxWidth().height(90.dp))
+            if (drawn != null) Text(initial.description, fontSize = 13.sp, color = Color(0xFF4D5A57))
+            if (drawn == null) {
             Text("Profile", fontWeight = FontWeight.Medium)
-            ProfileKind.entries.chunked(2).forEach { row ->
+            ProfileKind.entries.filter { it != ProfileKind.DRAWN }.chunked(2).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { row.forEach { k -> FilterChip(selected = kind == k, onClick = { kind = k }, label = { Text(k.label, fontSize = 13.sp) }) } }
             }
             OutlinedTextField(width, { width = it }, label = { Text(if (kind.round) "Outer diameter (mm)" else "Width (mm)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             if (!kind.round) OutlinedTextField(height, { height = it }, label = { Text("Height (mm)") }, supportingText = { Text("Along the drawing's depth axis.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             if (kind.hollow) OutlinedTextField(wall, { wall = it }, label = { Text("Wall thickness (mm)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            }
             Text("Color", fontWeight = FontWeight.Medium)
             materialColors.chunked(4).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
