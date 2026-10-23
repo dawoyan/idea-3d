@@ -129,6 +129,20 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import com.davoyans.idea3d.core.Calibration
+import com.davoyans.idea3d.core.CalibrationAxis
+import com.davoyans.idea3d.core.CalibrationReference
+import com.davoyans.idea3d.core.CalibrationStatus
+import com.davoyans.idea3d.core.LengthUnit
+import com.davoyans.idea3d.core.Mesh
+import com.davoyans.idea3d.core.formatLength
+import com.davoyans.idea3d.core.projectedLengthForFixedTrue
+import com.davoyans.idea3d.core.MeshBuilder
+import com.davoyans.idea3d.core.MeshException
+import com.davoyans.idea3d.core.MeshIssue
+import com.davoyans.idea3d.core.ModelExport
+import com.davoyans.idea3d.core.OutlinePoint
+import com.davoyans.idea3d.core.SolidSpec
 
 private enum class Tool { NONE, CALIBRATE, MEASURE, LINES, ADJUST, CROP }
 private enum class LineDrawing { STRAIGHT, BROKEN, CURVE }
@@ -139,7 +153,7 @@ private data class Pt(val x: Float, val y: Float)
 private data class CropFrame(val left: Float, val top: Float, val right: Float, val bottom: Float)
 private data class FeatureSnap(val point: Pt, val found: Boolean)
 private data class ScreenLine(val id: Int, val start: Offset, val end: Offset)
-private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0)
+private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "")
 private fun MeasureLine.hasDepth() = abs(startZMm) > 0.000001 || abs(endZMm) > 0.000001
 private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null)
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
@@ -521,6 +535,7 @@ private object ProjectStore {
             put("value", line.value); put("reference", line.isReference); put("label", line.label); put("color", line.colorIndex); put("scaleReference", line.isScaleReference); put("labelOffset", line.labelOffset)
             put("lengthSource", line.lengthSource.name)
             put("startZMm", line.startZMm); put("endZMm", line.endZMm)
+            if (line.axis.isNotEmpty()) put("axis", line.axis)
             line.pathId?.let { put("pathId", it); put("segmentIndex", line.segmentIndex) }
         }) }
         val guides = JSONArray()
@@ -596,7 +611,7 @@ private object ProjectStore {
     private fun read(file: File): SavedProject = decode(JSONObject(file.readText()), file.lastModified())
     private fun decode(json: JSONObject, fallbackTime: Long): SavedProject {
         val values = json.getJSONArray("lines")
-        val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0)) } }
+        val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key)) } }
         val guideValues = json.optJSONArray("guides") ?: JSONArray()
         val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(20, 50, 90) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 })) } }
         val figure = ComparisonFigure.entries.firstOrNull { it.name == json.optString("figure") } ?: if (!json.has("figure") && json.optBoolean("silhouette")) ComparisonFigure.STANDING else null
@@ -674,6 +689,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var curveDragLast by remember { mutableStateOf<Pt?>(null) }
     var guideDetectionRunning by remember { mutableStateOf(false) }
     var scale by remember { mutableStateOf<Double?>(null) } // pixels per selected unit
+    var axisScale by remember { mutableStateOf<Pair<Double, Double>?>(null) } // X and Y pixels per unit, only for per-axis calibration
+    var modelReport by remember { mutableStateOf<ModelReport?>(null) }
     var unit by remember { mutableStateOf("mm") }
     var defaultUnit by remember { mutableStateOf("mm") }
     var defaultColor by remember { mutableIntStateOf(preferences.getInt("default-color", 0)) }
@@ -730,13 +747,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var cropSession by remember { mutableStateOf<UndoSnapshot?>(null) }
     fun recalculate(input: List<MeasureLine>): List<MeasureLine> {
         val nextScale = if (blankScene) unitFactorMm(unit) else recomputeScale(input, unit)
+        val nextAxes = if (blankScene) null else axisScaleOf(input, unit)
         scale = nextScale
+        axisScale = nextAxes
         return input.map { line ->
             when {
                 line.isReference || line.isScaleReference -> line
                 line.lengthSource == LengthSource.UNKNOWN -> line
-                line.pathId != null -> line.copy(value = hypot(estimateBrokenSegment(line, input) ?: nextScale?.let { distance(line.start, line.end) / it } ?: 0.0, (line.endZMm - line.startZMm) / unitFactorMm(unit)))
-                nextScale != null -> line.copy(value = hypot(distance(line.start, line.end) / nextScale, (line.endZMm - line.startZMm) / unitFactorMm(unit)))
+                nextScale != null -> line.copy(value = hypot(frontLength(line.start, line.end, nextScale, nextAxes), (line.endZMm - line.startZMm) / unitFactorMm(unit)))
                 else -> line
             }
         }
@@ -870,18 +888,20 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 .onFailure { Toast.makeText(context, "Could not export project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
-    val modelExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/stl")) { uri ->
-        val staged = File(context.cacheDir, "pending-3d-export.stl")
+    fun writeStagedModel(uri: Uri?, extension: String) {
+        val staged = File(context.cacheDir, "pending-3d-export.$extension")
         if (uri != null) scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching {
-                require(staged.isFile && staged.length() >= 134) { "The prepared model is unavailable. Please export again." }
+                require(staged.isFile && staged.length() > 0) { "The prepared model is unavailable. Please export again." }
                 val stream = context.contentResolver.openOutputStream(uri) ?: error("Cannot open the selected file")
                 staged.inputStream().use { input -> stream.use { output -> input.copyTo(output) } }
             } }
-            result.onSuccess { staged.delete(); Toast.makeText(context, "3D model exported", Toast.LENGTH_LONG).show() }
+            result.onSuccess { staged.delete(); Toast.makeText(context, "${extension.uppercase()} model exported", Toast.LENGTH_LONG).show() }
                 .onFailure { Toast.makeText(context, "3D export failed: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         } else staged.delete()
     }
+    val stlExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/stl")) { writeStagedModel(it, "stl") }
+    val threeMfExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/3mf")) { writeStagedModel(it, "3mf") }
     LaunchedEffect(sharedImage) { sharedImage?.let { importPicture(it); onSharedImageConsumed() } }
     LaunchedEffect(tool, projectId, guidesDetected) {
         val image = bitmap
@@ -1001,7 +1021,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             } else {
                 pendingEnd = point
                 if (unknownSize || pictureOptions.guess && scale != null) {
-                    val line = MeasureLine(nextId(lines), draftStart!!, point, if (unknownSize) 0.0 else distance(draftStart!!, point) / scale!!, false, "", defaultColor, lengthSource = if (unknownSize) LengthSource.UNKNOWN else LengthSource.CALCULATED)
+                    val line = MeasureLine(nextId(lines), draftStart!!, point, if (unknownSize) 0.0 else frontLength(draftStart!!, point, scale!!, axisScale), false, "", defaultColor, lengthSource = if (unknownSize) LengthSource.UNKNOWN else LengthSource.CALCULATED)
                     pushUndo()
                     lines = lines + line
                     selectedLineId = line.id
@@ -1363,6 +1383,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 } else emptyList()
                 lines = lines.filterNot { it.id in removedIds }.map { replacements[it.id] ?: it } + joined + remaining
                 scale = if (blankScene) unitFactorMm(unit) else recomputeScale(lines, unit)
+                axisScale = if (blankScene) null else axisScaleOf(lines, unit)
             }
             JunctionKind.JOIN_GUIDES -> {
                 val originals = listOfNotNull(guides.firstOrNull { it.id == action.firstId }, guides.firstOrNull { it.id == action.secondId })
@@ -1789,16 +1810,17 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         ?: selectedCurveId?.let { id -> guides.firstOrNull { it.id == id }?.curveMid }
 
     fun open3dView(angle: ViewerAngle) {
-        val guideSnapshot = guides.toList(); val extrusionSnapshot = extrusions.toList(); val modelScale = scale; val modelUnit = unit; val measurementSnapshot = lines.filterNot { it.isReference }; val openedProject = projectId
+        val guideSnapshot = guides.toList(); val extrusionSnapshot = extrusions.toList(); val modelScale = scale; val modelAxes = axisScale; val modelUnit = unit; val measurementSnapshot = lines.filterNot { it.isReference }; val openedProject = projectId
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching {
                 val colors = mutableListOf<Int>()
                 val origin = DoubleArray(2)
-                val stl = buildStlModel(guideSnapshot, extrusionSnapshot, modelScale, modelUnit, colors, origin)
-                val factor = unitFactorMm(modelUnit) / modelScale!!
+                val stl = buildStlModel(guideSnapshot, extrusionSnapshot, modelScale, modelUnit, colors, origin, modelAxes)
+                val factorX = unitFactorMm(modelUnit) / (modelAxes?.first ?: modelScale!!)
+                val factorY = unitFactorMm(modelUnit) / (modelAxes?.second ?: modelScale!!)
                 val measurements = measurementSnapshot.map { line ->
                     val value = if (line.lengthSource == LengthSource.UNKNOWN) "?" else "${formatMeasure(line.value, modelUnit)}${if (line.hasDepth()) "*" else ""} $modelUnit"
-                    ViewerMeasurement(((line.start.x - origin[0]) * factor).toFloat(), ((origin[1] - line.start.y) * factor).toFloat(), ((line.end.x - origin[0]) * factor).toFloat(), ((origin[1] - line.end.y) * factor).toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), line.startZMm.toFloat(), line.endZMm.toFloat())
+                    ViewerMeasurement(((line.start.x - origin[0]) * factorX).toFloat(), ((origin[1] - line.start.y) * factorY).toFloat(), ((line.end.x - origin[0]) * factorX).toFloat(), ((origin[1] - line.end.y) * factorY).toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), line.startZMm.toFloat(), line.endZMm.toFloat())
                 }
                 ViewerMesh.fromStl(stl, colors, measurements)
             } }
@@ -1935,11 +1957,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }, { project ->
             BitmapFactory.decodeFile(ProjectStore.imageFile(context, project.id).absolutePath)?.let { loaded ->
-                blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; lines = project.lines; guides = project.guides; guidesDetected = project.guidesDetected; extrusions = project.extrusions; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference }; scale = if (project.blankScene) unitFactorMm(project.unit) else recomputeScale(project.lines, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
+                blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; lines = project.lines; guides = project.guides; guidesDetected = project.guidesDetected; extrusions = project.extrusions; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference }; scale = if (project.blankScene) unitFactorMm(project.unit) else recomputeScale(project.lines, project.unit); axisScale = if (project.blankScene) null else axisScaleOf(project.lines, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
             }
         }, { project -> ProjectStore.delete(context, project.id); library = ProjectStore.list(context) })
         else Column(Modifier.padding(padding).fillMaxSize()) {
             StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, onMeasurements = { showMeasurements = true })
+            if (!blankScene) CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
@@ -1979,11 +2002,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     if (showDistanceEntry && draftStart != null && pendingEnd != null) DistanceDialog(
         isReference = tool == Tool.CALIBRATE, referenceCount = referenceCount, unit = unit, unknownSize = unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() },
         onDismiss = { showDistanceEntry = false; pendingEnd = null; if (!pendingBrokenSegment) draftStart = null; pendingBrokenSegment = false },
-        onConfirm = { entered, label, enteredUnit, levelOnly, fromBosch ->
+        onConfirm = { entered, label, enteredUnit, levelOnly, fromBosch, axis ->
             val ref = tool == Tool.CALIBRATE
             val storedValue = entered?.times(unitFactorMm(enteredUnit))?.div(unitFactorMm(unit)) ?: 0.0
             val pathId = if (!ref && pendingBrokenSegment) activeMeasurePathId else null
-            val line = MeasureLine(nextId(lines), draftStart!!, pendingEnd!!, storedValue, ref, label, colorIndex = if (!ref && fromBosch) BOSCH_COLOR_INDEX else defaultColor, isScaleReference = !levelOnly && entered != null, pathId = pathId, segmentIndex = if (pathId != null) lines.count { it.pathId == pathId } + 1 else 0, lengthSource = if (!ref && entered == null) LengthSource.UNKNOWN else if (fromBosch) LengthSource.MEASURED else LengthSource.MANUAL)
+            val line = MeasureLine(nextId(lines), draftStart!!, pendingEnd!!, storedValue, ref, label, colorIndex = if (!ref && fromBosch) BOSCH_COLOR_INDEX else defaultColor, isScaleReference = !levelOnly && entered != null, pathId = pathId, segmentIndex = if (pathId != null) lines.count { it.pathId == pathId } + 1 else 0, lengthSource = if (!ref && entered == null) LengthSource.UNKNOWN else if (fromBosch) LengthSource.MEASURED else LengthSource.MANUAL, axis = if (ref) axis.key else "")
             pushUndo()
             val previousScale = scale
             val updated = recalculate(lines + line)
@@ -2087,8 +2110,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             confirmButton = { TextButton(enabled = value != null && value > 0, onClick = {
                 val mm = value!! * unitFactorMm(unit)
                 val oldEnd = guide.end
-                val pixelLength = guidePoints(guide).zipWithNext().sumOf { (a, b) -> distance(a, b) }
-                val factor = if (scale != null && pixelLength > 0.001) value * scale!! / pixelLength else 1.0
+                val currentLength = scale?.let { s -> guidePoints(guide).zipWithNext().sumOf { (a, b) -> frontLength(a, b, s, axisScale) } } ?: 0.0
+                val factor = if (currentLength > 1e-9) value / currentLength else 1.0
                 val newEnd = Pt((guide.start.x + (guide.end.x - guide.start.x) * factor).toFloat(), (guide.start.y + (guide.end.y - guide.start.y) * factor).toFloat())
                 pushUndo()
                 guides = guides.map { item ->
@@ -2169,9 +2192,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             var start = line.start; var end = line.end
             val moveStart = startMm != line.startZMm && endMm == line.endZMm
             if ((depthChanged || lengthEdited && line.hasDepth()) && fixed && scale != null) {
-                val oldLength = distance(start, end)
-                if (oldLength < 0.00001) { Toast.makeText(context, "Cannot set direction for a zero-length line", Toast.LENGTH_LONG).show(); return@save }
-                val projection = kotlin.math.sqrt((value * value - dz * dz).coerceAtLeast(0.0)) * scale!!
+                val oldLength = frontLength(start, end, scale!!, axisScale)
+                if (distance(start, end) < 0.00001) { Toast.makeText(context, "Cannot set direction for a zero-length line", Toast.LENGTH_LONG).show(); return@save }
+                val projection = projectedLengthForFixedTrue(value, dz) ?: 0.0
                 val ratio = (projection / oldLength).toFloat()
                 if (moveStart) start = Pt(end.x + (start.x - end.x) * ratio, end.y + (start.y - end.y) * ratio)
                 else end = Pt(start.x + (end.x - start.x) * ratio, start.y + (end.y - start.y) * ratio)
@@ -2200,19 +2223,27 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             selectedLineId = null; showLineEdit = false
         })
     }
+    modelReport?.let { report ->
+        val safeName = projectName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Idea3D" }
+        ModelReportDialog(report, unit, onDismiss = { modelReport = null }, onStl = { modelReport = null; stlExporter.launch("$safeName.stl") }, on3mf = { modelReport = null; threeMfExporter.launch("$safeName.3mf") })
+    }
     if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); Toast.makeText(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onExport3d = {
         val exportGuidesSnapshot = guides.toList(); val exportExtrusionsSnapshot = extrusions.toList()
-        val exportScale = scale; val exportUnit = unit; val exportName = projectName
+        val exportScale = scale; val exportUnit = unit; val exportAxes = axisScale
+        modelReport = ModelReport.Checking
         scope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching {
-                val model = buildStlModel(exportGuidesSnapshot, exportExtrusionsSnapshot, exportScale, exportUnit)
-                File(context.cacheDir, "pending-3d-export.stl").writeBytes(model)
+            val result = withContext(Dispatchers.Default) { runCatching {
+                val meshes = buildMeshes(exportGuidesSnapshot, exportExtrusionsSnapshot, exportScale, exportUnit, axisScale = exportAxes)
+                File(context.cacheDir, "pending-3d-export.stl").writeBytes(ModelExport.stl(meshes))
+                File(context.cacheDir, "pending-3d-export.3mf").writeBytes(ModelExport.threeMf(meshes))
+                meshes
             } }
-            result.onSuccess {
-                modelExporter.launch(exportName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Measure_It" } + ".stl")
-            }.onFailure { Toast.makeText(context, "3D export: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+            modelReport = result.fold(
+                onSuccess = { ModelReport.Ready(it) },
+                onFailure = { error -> ModelReport.Problems((error as? MeshException)?.issues ?: listOf(MeshIssue("Model", error.localizedMessage ?: "could not be built"))) },
+            )
         }
     }, onDismiss = { showPictureEdit = false }, onSave = { name, nextUnit, precision, options ->
         projectName = name
@@ -2435,6 +2466,46 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
         if (cursor.moveToFirst()) result = cursor.getString(0).substringBeforeLast('.')
     }
     return result
+}
+
+@Composable private fun CalibrationBanner(calibration: Calibration) {
+    val warning = calibration.status is CalibrationStatus.Contradictory || calibration.status is CalibrationStatus.Incomplete
+    if (!warning && calibration.status !is CalibrationStatus.PerAxis) return
+    Text(calibration.explanation(), Modifier.fillMaxWidth().background(if (warning) Color(0xFFFFE3E0) else Color(0xFFFFF4D6)).padding(horizontal = 14.dp, vertical = 6.dp), fontSize = 12.sp, color = if (warning) Color(0xFF8A1C12) else Color(0xFF5C4400))
+}
+
+private sealed class ModelReport {
+    data object Checking : ModelReport()
+    data class Problems(val issues: List<MeshIssue>) : ModelReport()
+    data class Ready(val meshes: List<Mesh>) : ModelReport()
+}
+
+@Composable private fun ModelReportDialog(report: ModelReport, unit: String, onDismiss: () -> Unit, onStl: () -> Unit, on3mf: () -> Unit) {
+    val lengthUnit = LengthUnit.of(unit)
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(when (report) { ModelReport.Checking -> "Checking model"; is ModelReport.Problems -> "Can't export yet"; is ModelReport.Ready -> "Export 3D model" }) }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (report) {
+                ModelReport.Checking -> Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(12.dp)); Text("Building and validating meshes…") }
+                is ModelReport.Problems -> {
+                    Text("Fix these before exporting:")
+                    report.issues.forEach { Text("• ${it.objectName} ${it.message}", fontSize = 14.sp) }
+                }
+                is ModelReport.Ready -> {
+                    report.meshes.forEach { mesh ->
+                        val (min, max) = mesh.bounds
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(12.dp).background(Color(mesh.argb), RoundedCornerShape(3.dp))); Spacer(Modifier.width(8.dp))
+                            Text("${mesh.name}: ${formatLength(max.x - min.x, lengthUnit)} X × ${formatLength(max.y - min.y, lengthUnit)} Y × ${formatLength(max.z - min.z, lengthUnit)} Z", fontSize = 14.sp)
+                        }
+                    }
+                    Text("Checked: closed surfaces, outward normals, positive thickness and no overlapping objects. Files are written in millimeters. Only 3D objects are included, not the photo, guides or measurements.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+                    Text("STL stores geometry only. 3MF also keeps each object's color. Open the file in your slicer and check it before printing.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+                }
+            }
+        }
+    }, confirmButton = {
+        if (report is ModelReport.Ready) Row { TextButton(onClick = onStl) { Text("STL") }; TextButton(onClick = on3mf) { Text("3MF") } }
+    }, dismissButton = { TextButton(onClick = onDismiss) { Text(if (report is ModelReport.Ready) "Cancel" else "Close") } })
 }
 
 @Composable private fun StatusStrip(tool: Tool, scale: Double?, count: Int, refs: Int, onMeasurements: () -> Unit) {
@@ -3332,14 +3403,15 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     if (references.isEmpty()) Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Text("No calibration lines yet", color = Color(0xFF68726F)) }
     else Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 8.dp)) {
         references.forEachIndexed { index, line -> Row(Modifier.fillMaxWidth().clickable { onSelect(line) }.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(10.dp).background(Color(0xFFFFD400), RoundedCornerShape(5.dp))); Spacer(Modifier.width(8.dp)); Text(if (line.label.isBlank()) if (line.isScaleReference) "Calibration ${index + 1}" else "Level" else line.label, Modifier.weight(1f), fontWeight = FontWeight.Medium); Text(if (line.isScaleReference) "${formatMeasure(line.value, unit)} $unit" else "Level", fontWeight = FontWeight.Bold)
+            Box(Modifier.size(10.dp).background(Color(0xFFFFD400), RoundedCornerShape(5.dp))); Spacer(Modifier.width(8.dp)); Text(if (line.label.isBlank()) if (line.isScaleReference) "Calibration ${index + 1}" else "Level" else line.label, Modifier.weight(1f), fontWeight = FontWeight.Medium); Text(if (line.isScaleReference) "${formatMeasure(line.value, unit)} $unit${CalibrationAxis.of(line.axis).takeIf { it != CalibrationAxis.UNIFORM }?.let { " (${it.label})" } ?: ""}" else "Level", fontWeight = FontWeight.Bold)
         } }
     }
 }
 
-@Composable private fun DistanceDialog(isReference: Boolean, referenceCount: Int, unit: String, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, onDismiss: () -> Unit, onConfirm: (Double?, String, String, Boolean, Boolean) -> Unit) {
+@Composable private fun DistanceDialog(isReference: Boolean, referenceCount: Int, unit: String, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, onDismiss: () -> Unit, onConfirm: (Double?, String, String, Boolean, Boolean, CalibrationAxis) -> Unit) {
     val context = LocalContext.current
     var value by remember { mutableStateOf("") }; var label by remember { mutableStateOf("") }
+    var axis by remember { mutableStateOf(CalibrationAxis.UNIFORM) }
     var enteredUnit by remember { mutableStateOf(unit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
     var levelOnly by remember { mutableStateOf(false) }
@@ -3381,6 +3453,19 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                     Checkbox(checked = levelOnly, onCheckedChange = { levelOnly = it })
                     Text("Level only (no distance)")
                 }
+                if (!levelOnly) {
+                    Text("Applies to")
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        CalibrationAxis.entries.forEach { candidate ->
+                            FilterChip(selected = axis == candidate, onClick = { axis = candidate }, label = { Text(candidate.label) })
+                        }
+                    }
+                    Text(when (axis) {
+                        CalibrationAxis.UNIFORM -> "One scale for X, Y and Z. Recommended."
+                        CalibrationAxis.X -> "Advanced: only the horizontal (X) part of this line is used. Add a Y reference too. Use this only to compensate for a stretched photo."
+                        CalibrationAxis.Y -> "Advanced: only the vertical (Y) part of this line is used. Add an X reference too. Use this only to compensate for a stretched photo."
+                    }, fontSize = 12.sp, color = Color(0xFF4D5A57))
+                }
             }
             if (!isReference) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { onUnknownSize(!unknownSize) }) {
                 Checkbox(checked = unknownSize, onCheckedChange = onUnknownSize)
@@ -3397,7 +3482,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
             if (boschReadingUsed) Text("Laser measurement received.", fontSize = 12.sp, color = Color(0xFF1565C0), fontWeight = FontWeight.Bold)
             OutlinedTextField(label, { label = it }, label = { Text("Label (optional)") }, singleLine = true)
         }
-    }, confirmButton = { TextButton(onClick = { if (isReference && levelOnly) onConfirm(null, label, enteredUnit, true, false) else if (!isReference && unknownSize) onConfirm(null, label, unit, false, false) else value.toDoubleOrNull()?.takeIf { it > 0 }?.let { onConfirm(it, label, if (isReference) enteredUnit else unit, false, boschReadingUsed) } }, enabled = (isReference && levelOnly) || (!isReference && unknownSize) || value.toDoubleOrNull()?.let { it > 0 } == true) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    }, confirmButton = { TextButton(onClick = { if (isReference && levelOnly) onConfirm(null, label, enteredUnit, true, false, CalibrationAxis.UNIFORM) else if (!isReference && unknownSize) onConfirm(null, label, unit, false, false, CalibrationAxis.UNIFORM) else value.toDoubleOrNull()?.takeIf { it > 0 }?.let { onConfirm(it, label, if (isReference) enteredUnit else unit, false, boschReadingUsed, axis) } }, enabled = (isReference && levelOnly) || (!isReference && unknownSize) || value.toDoubleOrNull()?.let { it > 0 } == true) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable private fun ShapePairPreview(first: List<GuideLine>, second: List<GuideLine>) {
@@ -3901,31 +3986,36 @@ private fun closedGuideShapes(guides: List<GuideLine>): List<List<GuideLine>> =
 
 private fun shapePoints(path: List<GuideLine>): List<Pt> = path.flatMap { guidePoints(it).dropLast(1) }
 
-// STL has no units or colors; coordinates are written in millimeters for slicers.
-private data class StlShape(val path: android.graphics.Path, val contour: List<Pt>, val depth: Double, val z: Double, val color: Int, val edges: List<GuideLine>)
-private data class MeshPoint(val x: Double, val y: Double, val z: Double, val thickness: Double)
-private fun buildStlModel(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, triangleColors: MutableList<Int>? = null, originOut: DoubleArray? = null): ByteArray {
+// Printable geometry is built by the tested core (com.davoyans.idea3d.core) in model millimeters:
+// X right, Y up, Z toward the front-view viewer. The drawn picture is the front surface and
+// thickness extends behind it.
+private data class StlShape(val contour: List<Pt>, val depth: Double, val z: Double, val color: Int, val edges: List<GuideLine>)
+private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null): List<SolidSpec> {
     val pixelsPerUnit = scale?.takeIf { it.isFinite() && it > 0 } ?: error("Set a calibration length before exporting")
     val shapes = drawableGuideShapes(guides)
     require(shapes.isNotEmpty()) { "Draw a closed shape and add 3D depth first" }
-    val models = shapes.map { shape ->
+    val issues = mutableListOf<MeshIssue>()
+    val models = shapes.mapIndexedNotNull { index, shape ->
+        val name = "Shape ${index + 1}"
         val extrusion = extrusions.firstOrNull { ex -> extrusionGuides(ex, guides).any { g -> shape.any { it.id == g.id } } }
-            ?: error("Every closed shape needs 3D depth before export")
-        val depth = extrusion.depthMm?.takeIf { it.isFinite() && it > 0 } ?: error("Set a positive Z depth for every 3D shape")
+        if (extrusion == null) { issues += MeshIssue(name, "has no 3D depth yet; use Make 3D or exclude it"); return@mapIndexedNotNull null }
+        val depth = extrusion.depthMm?.takeIf { it.isFinite() && it > 0 }
+        if (depth == null) { issues += MeshIssue(name, "needs a positive Z depth"); return@mapIndexedNotNull null }
         val path = shapePath(shape)
         attachedRegions(shape, guides).forEach { region ->
             val part = android.graphics.Path().apply {
                 region.points.firstOrNull()?.let { moveTo(it.x, it.y); region.points.drop(1).forEach { p -> lineTo(p.x, p.y) }; close() }
             }
-            require(path.op(part, android.graphics.Path.Op.UNION)) { "Could not combine attached shape regions" }
+            if (!path.op(part, android.graphics.Path.Op.UNION)) issues += MeshIssue(name, "attached regions could not be combined")
         }
-        val contours = editableContours(path) ?: error("Shapes with holes are not supported for 3D export")
-        require(contours.size == 1) { "Shape must have one continuous outline" }
+        val contours = editableContours(path)
+        if (contours == null) { issues += MeshIssue(name, "has a hole; holes are not supported for 3D export yet"); return@mapIndexedNotNull null }
+        if (contours.size != 1) { issues += MeshIssue(name, "must have one continuous outline (found ${contours.size})"); return@mapIndexedNotNull null }
         val edges = extrusionGuides(extrusion, guides)
         val contour = contours.single()
         val endpoints = edges.flatMap { listOf(it.start, it.end) }
-        val enriched = contour.indices.flatMap { index ->
-            val a = contour[index]; val b = contour[(index + 1) % contour.size]
+        val enriched = contour.indices.flatMap { i ->
+            val a = contour[i]; val b = contour[(i + 1) % contour.size]
             val dx = (b.x - a.x).toDouble(); val dy = (b.y - a.y).toDouble(); val length2 = dx * dx + dy * dy
             val interior = if (length2 <= 1e-10) emptyList() else endpoints.mapNotNull { p ->
                 val t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2
@@ -3936,92 +4026,33 @@ private fun buildStlModel(guides: List<GuideLine>, extrusions: List<Extrusion>, 
             }.sortedBy { it.first }.fold(mutableListOf<Pair<Double, Pt>>()) { acc, point -> if (acc.none { distance(it.second, point.second) < 0.01 }) acc.add(point); acc }
             listOf(a) + interior.map { it.second }
         }
-        StlShape(path, enriched, depth, extrusion.positionZMm, guideColor(shape.first().colorIndex).toArgb(), edges)
+        name to StlShape(enriched, depth, extrusion.positionZMm, guideColor(shape.first().colorIndex).toArgb(), edges)
     }
-    for (i in models.indices) for (j in 0 until i) {
-        fun range(model: StlShape): Pair<Double, Double> {
-            val offsets = model.edges.flatMap { listOf(it.startZMm, it.endZMm) } + 0.0
-            val thickness = model.edges.flatMap { listOfNotNull(it.startThicknessMm, it.endThicknessMm) }.maxOrNull()?.coerceAtLeast(model.depth) ?: model.depth
-            return (model.z + offsets.min() - thickness) to (model.z + offsets.max())
-        }
-        val a = range(models[i]); val b = range(models[j])
-        if (a.second <= b.first || b.second <= a.first) continue
-        val intersection = android.graphics.Path()
-        require(intersection.op(models[i].path, models[j].path, android.graphics.Path.Op.INTERSECT)) { "Could not check overlapping shapes" }
-        val bounds = android.graphics.RectF(); intersection.computeBounds(bounds, true)
-        require(bounds.isEmpty) { "Merge overlapping solids or move them apart in Z before exporting" }
-    }
-    val mmPerPixel = unitFactorMm(unit) / pixelsPerUnit
-    val originX = models.minOf { model -> model.contour.minOf { it.x } }.toDouble()
-    val originY = models.maxOf { model -> model.contour.maxOf { it.y } }.toDouble()
+    if (issues.isNotEmpty()) throw MeshException(issues)
+    val mmPerPixelX = axisScale?.first?.let { unitFactorMm(unit) / it } ?: (unitFactorMm(unit) / pixelsPerUnit)
+    val mmPerPixelY = axisScale?.second?.let { unitFactorMm(unit) / it } ?: (unitFactorMm(unit) / pixelsPerUnit)
+    val originX = models.minOf { (_, model) -> model.contour.minOf { it.x } }.toDouble()
+    val originY = models.maxOf { (_, model) -> model.contour.maxOf { it.y } }.toDouble()
     originOut?.let { it[0] = originX; it[1] = originY }
-    val triangles = ByteArrayOutputStream()
-    var triangleCount = 0
-    var currentColor = AndroidColor.BLACK
-    fun triangle(a: Triple<Double, Double, Double>, b: Triple<Double, Double, Double>, c: Triple<Double, Double, Double>) {
-        val ux = b.first - a.first; val uy = b.second - a.second; val uz = b.third - a.third
-        val vx = c.first - a.first; val vy = c.second - a.second; val vz = c.third - a.third
-        val nx = uy * vz - uz * vy; val ny = uz * vx - ux * vz; val nz = ux * vy - uy * vx
-        val magnitude = kotlin.math.sqrt(nx * nx + ny * ny + nz * nz)
-        require(magnitude > 1e-12) { "Shape contains a degenerate triangle" }
-        val record = ByteBuffer.allocate(50).order(ByteOrder.LITTLE_ENDIAN)
-        record.putFloat((nx / magnitude).toFloat()); record.putFloat((ny / magnitude).toFloat()); record.putFloat((nz / magnitude).toFloat())
-        listOf(a, b, c).forEach { point ->
-            require(point.first.isFinite() && point.second.isFinite() && point.third.isFinite()) { "Model coordinates are invalid" }
-            record.putFloat(point.first.toFloat()); record.putFloat(point.second.toFloat()); record.putFloat(point.third.toFloat())
-        }
-        record.putShort(0); triangles.write(record.array()); triangleCount++; triangleColors?.add(currentColor)
-    }
-    models.forEach { (_, contour, depth, z, color, edges) ->
-        currentColor = color
-        val points = contour.map { p ->
-            val edge = edges.minByOrNull { distance(p, guidePointAt(it, guideNearestParameter(it, p))) } ?: error("Missing shape boundary")
+    return models.map { (name, model) ->
+        val outline = model.contour.map { p ->
+            val edge = model.edges.minByOrNull { distance(p, guidePointAt(it, guideNearestParameter(it, p))) } ?: error("Missing shape boundary")
             val t = guideNearestParameter(edge, p).toDouble()
             val pointZ = edge.startZMm * (1 - t) + edge.endZMm * t
-            val thickness = (edge.startThicknessMm ?: depth) * (1 - t) + (edge.endThicknessMm ?: depth) * t
-            MeshPoint((p.x - originX) * mmPerPixel, (originY - p.y) * mmPerPixel, z + pointZ, thickness)
-        }.toMutableList()
-        fun cross(a: MeshPoint, b: MeshPoint, c: MeshPoint) = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-        var changed = true
-        while (changed && points.size > 3) {
-            changed = false
-            for (i in points.indices) {
-                val a = points[(i + points.size - 1) % points.size]; val b = points[i]; val c = points[(i + 1) % points.size]
-                val ac = hypot(a.x - c.x, a.y - c.y)
-                val t = if (ac > 1e-9) hypot(a.x - b.x, a.y - b.y) / ac else 0.0
-                val linear = abs(b.z - (a.z * (1 - t) + c.z * t)) < 1e-6 && abs(b.thickness - (a.thickness * (1 - t) + c.thickness * t)) < 1e-6
-                if (hypot(a.x - b.x, a.y - b.y) < 1e-7 || abs(cross(a, b, c)) < 1e-10 && linear) { points.removeAt(i); changed = true; break }
-            }
+            val thickness = (edge.startThicknessMm ?: model.depth) * (1 - t) + (edge.endThicknessMm ?: model.depth) * t
+            OutlinePoint((p.x - originX) * mmPerPixelX, (originY - p.y) * mmPerPixelY, model.z + pointZ, thickness)
         }
-        require(points.size >= 3) { "Shape outline is too small" }
-        val area = points.indices.sumOf { i -> val a = points[i]; val b = points[(i + 1) % points.size]; a.x * b.y - b.x * a.y }
-        require(abs(area) > 1e-10) { "Shape outline has no area" }
-        if (area < 0) points.reverse()
-        // The drawn picture is the front surface; extrusion extends behind it.
-        fun vertex(i: Int, top: Boolean) = Triple(points[i].x, points[i].y, points[i].z - if (top) 0.0 else points[i].thickness)
-        val remaining = points.indices.toMutableList()
-        while (remaining.size > 3) {
-            var ear = -1
-            for (i in remaining.indices) {
-                val a = remaining[(i + remaining.size - 1) % remaining.size]; val b = remaining[i]; val c = remaining[(i + 1) % remaining.size]
-                if (cross(points[a], points[b], points[c]) <= 1e-10) continue
-                val contains = remaining.any { p -> p != a && p != b && p != c && cross(points[a], points[b], points[p]) >= -1e-10 && cross(points[b], points[c], points[p]) >= -1e-10 && cross(points[c], points[a], points[p]) >= -1e-10 }
-                if (!contains) { ear = i; triangle(vertex(a, true), vertex(b, true), vertex(c, true)); triangle(vertex(c, false), vertex(b, false), vertex(a, false)); break }
-            }
-            require(ear >= 0) { "Cannot export a self-intersecting or invalid shape" }
-            remaining.removeAt(ear)
-        }
-        val (a, b, c) = remaining
-        triangle(vertex(a, true), vertex(b, true), vertex(c, true)); triangle(vertex(c, false), vertex(b, false), vertex(a, false))
-        points.indices.forEach { i ->
-            val next = (i + 1) % points.size
-            triangle(vertex(i, false), vertex(next, false), vertex(next, true))
-            triangle(vertex(i, false), vertex(next, true), vertex(i, true))
-        }
+        SolidSpec(name, outline, model.color)
     }
-    val header = ByteBuffer.allocate(84).order(ByteOrder.LITTLE_ENDIAN)
-    header.put("Idea 3D binary STL (millimeters)".toByteArray(Charsets.US_ASCII)); header.position(80); header.putInt(triangleCount)
-    return header.array() + triangles.toByteArray()
+}
+
+private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null): List<Mesh> =
+    MeshBuilder.buildAll(buildSolidSpecs(guides, extrusions, scale, unit, originOut, axisScale))
+
+private fun buildStlModel(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, triangleColors: MutableList<Int>? = null, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null): ByteArray {
+    val meshes = buildMeshes(guides, extrusions, scale, unit, originOut, axisScale)
+    triangleColors?.let { colors -> meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } } }
+    return ModelExport.stl(meshes)
 }
 
 private fun shapePath(shape: List<GuideLine>): android.graphics.Path = android.graphics.Path().apply {
@@ -4426,23 +4457,32 @@ private fun detectStrongGuideLines(source: Bitmap): List<GuideLine> {
     }
     return accepted.mapIndexed { index, (_, _, segment) -> GuideLine(index + 1, segment.first, segment.second, manual = false) }
 }
+private fun calibrationOf(lines: List<MeasureLine>, unit: String): Calibration =
+    Calibration.from(lines.filter { it.isReference && it.isScaleReference }.map { line ->
+        CalibrationReference((line.end.x - line.start.x).toDouble(), (line.end.y - line.start.y).toDouble(), line.value * unitFactorMm(unit), CalibrationAxis.of(line.axis))
+    })
+
 private fun recomputeScale(lines: List<MeasureLine>, unit: String): Double? {
     // Calibration is the source of truth whenever one or more calibration lines exist.
-    val calibrationScale = lines.filter { it.isReference && it.isScaleReference }
-        .map { distance(it.start, it.end) / it.value }
-        .average()
-        .takeIf { !it.isNaN() }
-    if (calibrationScale != null) return calibrationScale
+    val calibration = calibrationOf(lines, unit)
+    if (calibration.status != CalibrationStatus.Missing) {
+        // Contradictory references still yield their average so nothing is lost, but the editor flags them.
+        return if (calibration.status is CalibrationStatus.Incomplete) null else calibration.meanPxPerMm?.times(unitFactorMm(unit))
+    }
     val manualReference = lines.lastOrNull { !it.isReference && it.isScaleReference && it.value > abs(it.endZMm - it.startZMm) / unitFactorMm(unit) }
     return manualReference?.let { distance(it.start, it.end) / kotlin.math.sqrt(it.value * it.value - Math.pow((it.endZMm - it.startZMm) / unitFactorMm(unit), 2.0)) }
 }
-private fun estimateBrokenSegment(line: MeasureLine, lines: List<MeasureLine>): Double? {
-    val references = lines.filter { it.isReference && it.isScaleReference && it.value > 0.0 }
-    val horizontal = references.filter { isHorizontalCalibration(it) }.map { distance(it.start, it.end) / it.value }.average()
-    val vertical = references.filterNot { isHorizontalCalibration(it) }.map { distance(it.start, it.end) / it.value }.average()
-    if (!horizontal.isFinite() || !vertical.isFinite() || horizontal <= 0.0 || vertical <= 0.0) return null
-    return hypot((line.end.x - line.start.x) / horizontal, (line.end.y - line.start.y) / vertical)
+
+/** X and Y pixels per unit when the user explicitly calibrated the axes separately. */
+private fun axisScaleOf(lines: List<MeasureLine>, unit: String): Pair<Double, Double>? {
+    val calibration = calibrationOf(lines, unit)
+    if (!calibration.isPerAxis) return null
+    return calibration.pxPerMmX!! * unitFactorMm(unit) to calibration.pxPerMmY!! * unitFactorMm(unit)
 }
+
+private fun frontLength(start: Pt, end: Pt, scale: Double, axes: Pair<Double, Double>?): Double =
+    if (axes == null) distance(start, end) / scale else hypot((end.x - start.x) / axes.first, (end.y - start.y) / axes.second)
+
 private fun nextId(lines: List<MeasureLine>) = (lines.maxOfOrNull { it.id } ?: 0) + 1
 private fun closestEndpoint(point: Pt, lines: List<MeasureLine>, maxDistance: Double): Endpoint? = lines.flatMap { listOf(Endpoint(it.id, true) to it.start, Endpoint(it.id, false) to it.end) }.minByOrNull { distance(point, it.second) }?.takeIf { distance(point, it.second) <= maxDistance }?.first
 private fun distanceToLine(point: Pt, line: MeasureLine): Double {
