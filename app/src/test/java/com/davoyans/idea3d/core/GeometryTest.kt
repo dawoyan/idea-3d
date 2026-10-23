@@ -306,3 +306,42 @@ class PlaneTest {
     }
 }
 
+class CsgTest {
+    private fun cube(x: Double, y: Double, z: Double, size: Double) = MeshBuilder.extrude(SolidSpec("Cube", listOf(
+        OutlinePoint(x, y, z + size, size), OutlinePoint(x + size, y, z + size, size), OutlinePoint(x + size, y + size, z + size, size), OutlinePoint(x, y + size, z + size, size)), 0))
+
+    @Test fun cuttingACornerRemovesItsVolumeAndStaysClosed() {
+        val result = Csg.subtract(cube(0.0, 0.0, 0.0, 10.0), cube(5.0, 5.0, 5.0, 10.0))
+        assertEquals(875.0, result.signedVolume, 1e-6)
+        assertTrue(MeshBuilder.validate(result).isEmpty())
+    }
+
+    @Test fun cuttingAHoleThroughLeavesATube() {
+        val result = Csg.subtract(cube(0.0, 0.0, 0.0, 10.0), MeshBuilder.extrude(SolidSpec("Pin", listOf(
+            OutlinePoint(4.0, 4.0, 20.0, 30.0), OutlinePoint(6.0, 4.0, 20.0, 30.0), OutlinePoint(6.0, 6.0, 20.0, 30.0), OutlinePoint(4.0, 6.0, 20.0, 30.0)), 0)))
+        assertEquals(1000.0 - 40.0, result.signedVolume, 1e-6)
+        assertTrue(MeshBuilder.validate(result).isEmpty())
+    }
+
+    @Test fun joiningOverlappingSolidsCountsTheSharedPartOnce() {
+        val result = Csg.union(cube(0.0, 0.0, 0.0, 10.0), cube(5.0, 5.0, 5.0, 10.0))
+        assertEquals(2000.0 - 125.0, result.signedVolume, 1e-6)
+        assertTrue(MeshBuilder.validate(result).isEmpty())
+    }
+
+    @Test fun combinerRemovesUsedToolsUnlessKept() {
+        val a = cube(0.0, 0.0, 0.0, 10.0); val b = cube(5.0, 5.0, 5.0, 10.0); val c = cube(20.0, 0.0, 0.0, 5.0)
+        val cut = SolidCombiner.apply(listOf(a, b, c), listOf(SolidOperation(0, 1, join = false)))
+        assertEquals(875.0, cut[0]!!.signedVolume, 1e-6); assertNull(cut[1]); assertNotNull(cut[2])
+        val kept = SolidCombiner.apply(listOf(a, b), listOf(SolidOperation(0, 1, join = false, keepTool = true)))
+        assertNotNull(kept[1])
+    }
+
+    @Test fun solidsFromDifferentPlanesCanBeCut() {
+        val slab = MeshBuilder.extrude(SolidSpec("Slab", listOf(OutlinePoint(0.0, 0.0, 10.0, 10.0), OutlinePoint(10.0, 0.0, 10.0, 10.0), OutlinePoint(10.0, -10.0, 10.0, 10.0), OutlinePoint(0.0, -10.0, 10.0, 10.0)), 0, ModelPlane.TOP))
+        val result = Csg.subtract(slab, cube(-1.0, -1.0, -5.0, 6.0))
+        assertTrue(result.signedVolume < 1000.0 && result.signedVolume > 0)
+        assertTrue(MeshBuilder.validate(result).isEmpty())
+    }
+}
+

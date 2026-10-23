@@ -146,6 +146,8 @@ import com.davoyans.idea3d.core.MeshIssue
 import com.davoyans.idea3d.core.ModelExport
 import com.davoyans.idea3d.core.OutlinePoint
 import com.davoyans.idea3d.core.SolidSpec
+import com.davoyans.idea3d.core.SolidCombiner
+import com.davoyans.idea3d.core.SolidOperation
 import com.davoyans.idea3d.core.Vec3
 
 private enum class Tool { NONE, CALIBRATE, MEASURE, LINES, ADJUST, CROP }
@@ -166,7 +168,7 @@ private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: P
 private enum class JunctionKind { SPLIT_MEASUREMENT, SPLIT_GUIDE, JOIN_MEASUREMENTS, JOIN_GUIDES, JOIN_MEASURE_ENDPOINTS, JOIN_GUIDE_ENDPOINTS, MERGE_SHAPE_GUIDE, CLOSE_GUIDE_PATH, SHAPE_OVERLAP, CUT_SHAPE_LINE }
 private data class JunctionAction(val kind: JunctionKind, val firstId: Int, val secondId: Int, val point: Pt)
 private data class JunctionArm(val lineId: Int, val endpoint: Pt, val color: Color)
-private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList(), val plane: ModelPlane = ModelPlane.FRONT, val stash: Map<ModelPlane, PlaneGeometry> = emptyMap(), val frames: Map<ModelPlane, PlaneFrame> = emptyMap())
+private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList(), val plane: ModelPlane = ModelPlane.FRONT, val stash: Map<ModelPlane, PlaneGeometry> = emptyMap(), val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList())
 /**
  * Where a plane's canvas sits in model space: canvas pixel ([originU], [originV]) is the plane's (0, 0) and the
  * canvas is [width] x [height] pixels. Cropping or growing a canvas moves the origin with the drawing, so the
@@ -183,6 +185,9 @@ private fun defaultFrame(plane: ModelPlane, width: Int, height: Int) = when (pla
 private class ModelSetup(val frames: Map<ModelPlane, PlaneFrame>, val scales: Map<ModelPlane, Double?>, val axisScale: Pair<Double, Double>?, val unit: String) {
     fun mapping(plane: ModelPlane) = frames[plane]?.let { planeMapping(plane, it, scales[plane], unit, if (plane == ModelPlane.FRONT) axisScale else null) }
 }
+
+/** A 3D cut or join between two objects, each named by its drawing plane and object id. A kept cut tool stays in the model. */
+private data class SolidOp(val target: Pair<ModelPlane, Int>, val tool: Pair<ModelPlane, Int>, val join: Boolean, val keepTool: Boolean = false)
 
 /** Geometry of a drawing plane that is not the one being edited; items keep their [ModelPlane] tag. */
 private data class PlaneGeometry(val lines: List<MeasureLine> = emptyList(), val guides: List<GuideLine> = emptyList(), val extrusions: List<Extrusion> = emptyList())
@@ -213,6 +218,8 @@ private data class ForeignPoint(val own: Pt, val at: Pt, val back: Boolean)
 private enum class ForeignHandle { MOVE, FACE, BACK, ACROSS_MIN, ACROSS_MAX, POINTS }
 /** [points] are own-canvas endpoints being dragged; [back] says whether their far-side corners were grabbed. */
 private data class ForeignDrag(val target: ForeignObject, val handle: ForeignHandle, val start: Pt, val current: Pt, val points: List<Pt> = emptyList(), val back: Boolean = false)
+/** A selected outline point (or points that line up) of a foreign object, kept by key so it survives rebuilds. */
+private data class ForeignPointSelection(val key: Pair<ModelPlane, Int>, val points: List<Pt>, val back: Boolean)
 /** What the editor draws for the selected foreign object: its preview triangles, handles (anchor and outward direction) and a live value. */
 private class ForeignOverlay(val triangles: FloatArray, val handles: List<Triple<ForeignHandle, Pt, Pt>>, val points: List<Pair<Pt, Boolean>>, val label: String?)
 private const val BOSCH_COLOR_INDEX = 4
@@ -230,7 +237,7 @@ private enum class ComparisonFigure(val description: String, val sizeMm: Double,
     STANDING("Standing person", 1700.0, 0.28f), SITTING("Sitting person", 1250.0, 0.75f), TOP("Person viewed from above", 500.0, 1f)
 }
 private data class PictureOptions(val figure: ComparisonFigure? = null, val sum: Boolean = false, val legend: Boolean = false, val guess: Boolean = false, val transparency: Int = 0)
-private data class SavedProject(val id: String, val name: String, val unit: String, val lines: List<MeasureLine>, val guides: List<GuideLine> = emptyList(), val guidesDetected: Boolean = false, val capturedAt: Long, val rotation: Float = 0f, val options: PictureOptions = PictureOptions(), val extrusions: List<Extrusion> = emptyList(), val blankScene: Boolean = false, val frames: Map<ModelPlane, PlaneFrame> = emptyMap())
+private data class SavedProject(val id: String, val name: String, val unit: String, val lines: List<MeasureLine>, val guides: List<GuideLine> = emptyList(), val guidesDetected: Boolean = false, val capturedAt: Long, val rotation: Float = 0f, val options: PictureOptions = PictureOptions(), val extrusions: List<Extrusion> = emptyList(), val blankScene: Boolean = false, val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList())
 
 /** Words for the depth axis of the plane being edited, so dialogs say Z, Y or X as appropriate. */
 private object DepthWords {
@@ -634,7 +641,7 @@ private object ProjectStore {
         }) }
         val extrusions = JSONArray()
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
-        File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene); put("frames", JSONObject().apply { project.frames.forEach { (plane, f) -> put(plane.name, JSONObject().apply { put("u", f.originU); put("v", f.originV); put("w", f.width); put("h", f.height) }) } }) }.toString())
+        File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene); put("frames", JSONObject().apply { project.frames.forEach { (plane, f) -> put(plane.name, JSONObject().apply { put("u", f.originU); put("v", f.originV); put("w", f.width); put("h", f.height) }) } }); put("solidOps", JSONArray().apply { project.solidOps.forEach { op -> put(JSONObject().apply { put("targetPlane", op.target.first.name); put("target", op.target.second); put("toolPlane", op.tool.first.name); put("tool", op.tool.second); put("join", op.join); put("keepTool", op.keepTool) }) } }) }.toString())
     }
     private fun trash(context: Context) = File(directory(context), "trash").apply { mkdirs() }
     private fun projectFiles(dir: File, id: String) = listOf("$id.json", "$id.jpg", "$id-thumb.png").map { File(dir, it) }
@@ -713,7 +720,8 @@ private object ProjectStore {
         val extrusions = buildList { for (index in 0 until extrusionValues.length()) { val item = extrusionValues.getJSONObject(index); val ids = item.getJSONArray("guides"); add(Extrusion(item.getInt("id"), (0 until ids.length()).map { ids.getInt(it) }, Pt(item.getDouble("ox").toFloat(), item.getDouble("oy").toFloat()), Pt(item.getDouble("hx").toFloat(), item.getDouble("hy").toFloat()), Pt(item.getDouble("vx").toFloat(), item.getDouble("vy").toFloat()), Pt(item.optDouble("sunX", item.getDouble("vx") * 0.3).toFloat(), item.optDouble("sunY", item.getDouble("vy")).toFloat()), item.takeIf { it.has("depthMm") }?.optDouble("depthMm")?.takeIf { it.isFinite() && it >= 0 }, item.optDouble("positionZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, ModelPlane.of(item.optString("plane")))) } }
         return SavedProject(json.getString("id"), json.getString("name"), json.optString("unit", "mm"), lines, guides, json.optBoolean("guidesDetected", false), json.optLong("capturedAt", fallbackTime), json.optDouble("rotation", 0.0).toFloat(), PictureOptions(figure, json.optBoolean("sum"), json.optBoolean("legend"), json.optBoolean("guess"), transparency), extrusions, json.optBoolean("blankScene", false), json.optJSONObject("frames")?.let { frames ->
             ModelPlane.entries.mapNotNull { plane -> frames.optJSONObject(plane.name)?.let { f -> plane to PlaneFrame(f.getDouble("u"), f.getDouble("v"), f.getInt("w"), f.getInt("h")) } }.toMap()
-        }.orEmpty())
+        }.orEmpty(), json.optJSONArray("solidOps")?.let { ops -> (0 until ops.length()).map { i -> ops.getJSONObject(i).let { o ->
+            SolidOp(ModelPlane.of(o.optString("targetPlane")) to o.getInt("target"), ModelPlane.of(o.optString("toolPlane")) to o.getInt("tool"), o.optBoolean("join"), o.optBoolean("keepTool")) } } }.orEmpty())
     }
 }
 
@@ -853,6 +861,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     fun allGuides() = ModelPlane.entries.flatMap { planeGeometry(it).guides }
     fun allExtrusions() = ModelPlane.entries.flatMap { planeGeometry(it).extrusions }
     var planeFrames by remember { mutableStateOf(emptyMap<ModelPlane, PlaneFrame>()) }
+    var solidOps by remember { mutableStateOf(emptyList<SolidOp>()) }
     /** The front canvas is the picture; Top and Profile canvases start at the picture's size and can be cropped or grown. */
     fun frameOf(plane: ModelPlane): PlaneFrame {
         val width = bitmap?.width ?: 1; val height = bitmap?.height ?: 1
@@ -871,9 +880,22 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         bitmap?.let { image -> if (editPlane == ModelPlane.FRONT) image else Bitmap.createBitmap(editFrame.width, editFrame.height, Bitmap.Config.RGB_565).apply { eraseColor(AndroidColor.WHITE) } }
     }
     var foreign by remember { mutableStateOf<List<ForeignObject>>(emptyList()) }
+    // The same names the 3D view and export use ("Shape 1", "Top Shape 2"), for dialogs and hints.
+    val objectNames = remember(guides, extrusions, planeStash, planeFrames, scale, unit, editPlane) {
+        runCatching {
+            val objects = mutableListOf<Extrusion>()
+            val specs = buildSolidSpecs(allGuides(), allExtrusions(), modelSetup(), objects, strict = false)
+            objects.zip(specs).associate { (e, spec) -> (e.plane to e.id) to spec.name }
+        }.getOrDefault(emptyMap())
+    }
     var selectedForeign by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
     var foreignDrag by remember { mutableStateOf<ForeignDrag?>(null) }
     var foreignDialog by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
+    var selectedForeignPoint by remember { mutableStateOf<ForeignPointSelection?>(null) }
+    // Choosing the second object of a 3D cut or join: (join, first object).
+    var solidPick by remember { mutableStateOf<Pair<Boolean, Pair<ModelPlane, Int>>?>(null) }
+    var pendingCut by remember { mutableStateOf<SolidOp?>(null) }
+    var movePointDialog by remember { mutableStateOf(false) }
     var editorViewSize by remember { mutableStateOf(Size.Zero) }
     // Set when a plane or project opens; the view zooms to its content once the other planes' shapes are known.
     var fitPending by remember { mutableStateOf(true) }
@@ -892,7 +914,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
     }
     fun pushUndo(includeImage: Boolean = false) {
-        val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames)
+        val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps)
         undoHistory = undoHistory + snapshot
     }
     fun changePictureUnit(nextUnit: String) {
@@ -985,7 +1007,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
     }
     fun startCrop() {
-        val snapshot = UndoSnapshot(if (editPlane == ModelPlane.FRONT) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames)
+        val snapshot = UndoSnapshot(if (editPlane == ModelPlane.FRONT) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps)
         val canvas = planeCanvas ?: return
         cropSession = snapshot; cropFrame = CropFrame(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat()); tool = Tool.CROP; draftStart = null; pendingEnd = null
     }
@@ -1079,7 +1101,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             bitmap = BitmapFactory.decodeFile(destination.absolutePath)
             projectId = id; projectName = imageDisplayName(context, uri).ifBlank { "Picture ${library.size + 1}" }
             projectCapturedAt = imageCaptureTime(destination)
-            unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); planeFrames = emptyMap(); lines = emptyList(); guides = emptyList(); guidesDetected = false; extrusions = emptyList(); selectedExtrusionId = null; scale = null; referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
+            unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); planeFrames = emptyMap(); solidOps = emptyList(); lines = emptyList(); guides = emptyList(); guidesDetected = false; extrusions = emptyList(); selectedExtrusionId = null; scale = null; referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
             tool = Tool.NONE; zoom = 1f; pan = Offset.Zero; levelRotation = 0f; undoHistory = emptyList(); selectedLineId = null; selectedEndpoint = null
             ProjectStore.save(context, SavedProject(id, imageDisplayName(context, uri).ifBlank { "Picture ${library.size + 1}" }, unit, emptyList(), emptyList(), false, projectCapturedAt, levelRotation))
             library = ProjectStore.list(context)
@@ -1089,7 +1111,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val image = Bitmap.createBitmap(2000, 2000, Bitmap.Config.ARGB_8888).apply { eraseColor(AndroidColor.WHITE) }
         ProjectStore.imageFile(context, id).outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
         blankScene = true; bitmap = image; projectId = id; projectName = "Scene ${library.count { it.blankScene } + 1}"; projectCapturedAt = System.currentTimeMillis()
-        unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); planeFrames = emptyMap(); lines = emptyList(); guides = emptyList(); guidesDetected = true; extrusions = emptyList(); selectedExtrusionId = null
+        unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); planeFrames = emptyMap(); solidOps = emptyList(); lines = emptyList(); guides = emptyList(); guidesDetected = true; extrusions = emptyList(); selectedExtrusionId = null
         scale = unitFactorMm(unit); referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
         tool = Tool.NONE; zoom = 1f; pan = Offset.Zero; levelRotation = 0f; undoHistory = emptyList(); selectedLineId = null; selectedEndpoint = null; selectedVertices = emptyList()
         selectedGuideId = null; selectedGuideEndpoint = null; selectedWholeGuideId = null; selectedWholeLineId = null; selectedCurveId = null; selectedLabelId = null
@@ -1142,10 +1164,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     LaunchedEffect(projectId, scale, unit) {
         if (projectId != null && scale != null) extrusions = extrusions.map { extrusion -> extrusion.depthMm?.let { extrusionWithDepth(extrusion, it, scale, unit) } ?: extrusion }
     }
-    LaunchedEffect(projectId, projectName, lines, guides, guidesDetected, unit, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene, editPlane, planeStash, planeFrames) {
+    LaunchedEffect(projectId, projectName, lines, guides, guidesDetected, unit, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene, editPlane, planeStash, planeFrames, solidOps) {
         scale = scaleFor(lines, editPlane)
         val front = planeGeometry(ModelPlane.FRONT)
-        projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, allLines(), allGuides(), guidesDetected, projectCapturedAt, levelRotation, pictureOptions, allExtrusions(), blankScene, planeFrames)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, front.guides, front.lines) }; library = ProjectStore.list(context) }
+        projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, allLines(), allGuides(), guidesDetected, projectCapturedAt, levelRotation, pictureOptions, allExtrusions(), blankScene, planeFrames, solidOps)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, front.guides, front.lines) }; library = ProjectStore.list(context) }
     }
     /** Zooms and centers the canvas on everything in this plane, including shapes from the other planes. */
     fun fitView() {
@@ -1298,7 +1320,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val across = (kind == ForeignHandle.ACROSS_MIN && handle == ForeignHandle.ACROSS_MIN) || (kind == ForeignHandle.ACROSS_MAX && handle == ForeignHandle.ACROSS_MAX)
             Triple(handle, if (follows || across) Pt(at.x + shift.x, at.y + shift.y) else at, dir)
         }
-        val points = target.points.map { point -> moved(point.at, point.own, point.back) to (kind == ForeignHandle.POINTS && point.back == drag.back && drag.points.any { distance(it, point.own) < 0.5 }) }
+        val chosen = selectedForeignPoint?.takeIf { it.key == target.key }
+        val points = target.points.map { point -> moved(point.at, point.own, point.back) to ((kind == ForeignHandle.POINTS && point.back == drag.back && drag.points.any { distance(it, point.own) < 0.5 }) ||
+            (chosen != null && point.back == chosen.back && chosen.points.any { distance(it, point.own) < 0.5 })) }
         val format = { mm: Double -> formatLength(mm, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2) }
         fun signed(v: Double) = (if (v >= 0) "+" else "−") + format(abs(v))
         val acrossName = listOf("X", "Y", "Z")[listOf(target.across.x, target.across.y, target.across.z).indexOfFirst { abs(it) > 0.5 }]
@@ -1344,6 +1368,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     fun handleForeignTap(point: Pt, hitRadius: Double): Boolean {
         val selected = selectedForeignObject()
+        // Tapping a dot selects that point (and the ones lined up with it) for the arrows and exact moves.
+        selected?.points?.filter { distance(it.at, point) <= hitRadius }?.minByOrNull { distance(it.at, point) }?.let { nearest ->
+            selectedForeignPoint = ForeignPointSelection(selected.key, selected.points.filter { it.back == nearest.back && distance(it.at, nearest.at) < hitRadius * 0.15 }.map { it.own }, nearest.back)
+            return true
+        }
+        selectedForeignPoint = null
         if (selected != null && (selected.points.any { distance(it.at, point) <= hitRadius } || foreignHandles(selected).any { (_, at, dir) -> distance(handlePosition(at, dir, hitRadius), point) <= hitRadius * 1.2 })) return true
         if (ownGeometryNear(point, hitRadius)) { selectedForeign = null; return false }
         val hit = foreign.lastOrNull { insideForeign(it, point) }
@@ -1352,8 +1382,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         return true
     }
     /** Applies a finished drag to the object's own plane as one undo step. */
-    fun applyForeignEdit(drag: ForeignDrag) {
-        val (da, dd) = foreignDelta(drag)
+    /** Moves part of a foreign object by [da] along the shared axis and [dd] along its depth axis (millimeters). */
+    fun applyForeignChange(drag: ForeignDrag, da: Double, dd: Double) {
         if (abs(da) < 1e-9 && abs(dd) < 1e-9) return
         val t = drag.target
         val setup = modelSetup(); val own = setup.mapping(t.plane) ?: return
@@ -1397,7 +1427,55 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
         setPlaneShapes(t.plane, nextGuides, geometry.extrusions.map { if (it.id == extrusion.id) next else it })
     }
+    fun applyForeignEdit(drag: ForeignDrag) { val (da, dd) = foreignDelta(drag); applyForeignChange(drag, da, dd) }
+    /** Moves the selected foreign point(s) by [da] / [dd] millimeters and keeps them selected. */
+    fun moveForeignPoint(selection: ForeignPointSelection, da: Double, dd: Double) {
+        val target = foreign.firstOrNull { it.key == selection.key } ?: return
+        val anchor = target.points.firstOrNull { it.back == selection.back && selection.points.any { p -> distance(p, it.own) < 0.5 } }?.at ?: return
+        applyForeignChange(ForeignDrag(target, ForeignHandle.POINTS, anchor, anchor, selection.points, selection.back), da, if (selection.back) min(dd, target.minThicknessMm - 0.1) else dd)
+        val shift = modelSetup().mapping(target.plane)?.pixelDelta(target.across * da) ?: return
+        selectedForeignPoint = selection.copy(points = selection.points.map { Pt(it.x + shift.x, it.y + shift.y) })
+    }
+    /** One arrow step moves a foreign point by one display step along whichever visible axis the arrow points at. */
+    fun nudgeForeignPoint(selection: ForeignPointSelection, dx: Float, dy: Float) {
+        val target = foreign.firstOrNull { it.key == selection.key } ?: return
+        val here = modelSetup().mapping(editPlane) ?: return
+        val move = here.modelDelta(dx.toDouble(), dy.toDouble())
+        val step = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble())
+        val a = move dot target.across; val d = move dot target.depth
+        if (abs(a) >= abs(d)) moveForeignPoint(selection, Math.signum(a) * step, 0.0) else moveForeignPoint(selection, 0.0, Math.signum(d) * step)
+    }
+
+    fun ownObjectAt(point: Pt): Pair<ModelPlane, Int>? {
+        val shape = closedGuideShapes(guides).lastOrNull { pointInsidePolygon(point, shapePoints(it)) } ?: return null
+        val extrusion = extrusions.firstOrNull { e -> extrusionGuides(e, guides).any { g -> shape.any { it.id == g.id } } } ?: return null
+        return editPlane to extrusion.id
+    }
+    fun objectAt(point: Pt): Pair<ModelPlane, Int>? = ownObjectAt(point) ?: foreign.lastOrNull { insideForeign(it, point) }?.key
+    fun ownSelectedObject(): Pair<ModelPlane, Int>? {
+        val id = selectedWholeGuideId ?: return null
+        return extrusions.firstOrNull { e -> extrusionGuides(e, guides).any { it.id == id } }?.let { editPlane to it.id }
+    }
+    fun objectName(key: Pair<ModelPlane, Int>): String = objectNames[key] ?: "Shape"
+    /** Starts a 3D cut (or join) of [target]; the next object tapped, in the canvas or the 3D view, is the other one. */
+    fun startSolidOp(join: Boolean, target: Pair<ModelPlane, Int>) { solidPick = join to target }
+    fun finishSolidOp(other: Pair<ModelPlane, Int>?) {
+        val (join, target) = solidPick ?: return
+        solidPick = null
+        if (other == null) return
+        if (other == target) { Toast.makeText(context, "Pick a different object", Toast.LENGTH_SHORT).show(); return }
+        val op = SolidOp(target, other, join)
+        if (join) { pushUndo(); solidOps = solidOps + op } else pendingCut = op
+    }
+    /** Lists the cuts and joins [key] takes part in, each with a way to undo it. */
+    fun solidOpsOf(key: Pair<ModelPlane, Int>): List<Pair<String, () -> Unit>> = solidOps.filter { it.target == key || it.tool == key }.map { op ->
+        val text = if (op.target == key) { if (op.join) "Joined with ${objectName(op.tool)}" else "Cut by ${objectName(op.tool)}${if (op.keepTool) " (kept)" else ""}" }
+            else { if (op.join) "Joined into ${objectName(op.target)}" else "Cuts ${objectName(op.target)}${if (op.keepTool) "" else " (hidden in 3D)"}" }
+        text to { pushUndo(); solidOps = solidOps - op }
+    }
+
     fun handleTap(point: Pt, hitRadius: Double) {
+        solidPick?.let { finishSolidOp(objectAt(point)); return }
         when (tool) {
             Tool.NONE -> {
                 val selected = selectableMeasurement(point, lines, hitRadius)
@@ -2214,6 +2292,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     fun handleDragCancel() { foreignDrag = null; selectionStart = null; selectionEnd = null; handleDragEnd() }
     fun nudgeSelected(dx: Float, dy: Float) {
+        selectedForeignPoint?.let { nudgeForeignPoint(it, dx, dy); return }
         if (selectedVertices.isNotEmpty()) { pushUndo(); transformSelectedVertices { Pt(it.x + dx, it.y + dy) }; return }
         selectedCurveId?.let { id ->
             val guide = guides.firstOrNull { it.id == id } ?: return@let
@@ -2310,7 +2389,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         selectedExtrusionId = null; selectedCurveId = null; selectedVertices = emptyList(); selectedLineId = null; selectedEndpoint = null; selectedGuideId = null; selectedGuideEndpoint = null
         selectedWholeGuideId = null; selectedWholeLineId = null; selectedLabelId = null; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null
         if (tool == Tool.CALIBRATE || tool == Tool.CROP) tool = Tool.NONE
-        selectedForeign = null; foreignDrag = null
+        selectedForeign = null; foreignDrag = null; selectedForeignPoint = null; solidPick = null
         zoom = 1f; pan = Offset.Zero; fitPending = true
     }
 
@@ -2320,25 +2399,22 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             bitmap = restored
             projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { restored.compress(Bitmap.CompressFormat.PNG, 100, it) } }
         }
-        editPlane = previous.plane; planeStash = previous.stash; planeFrames = previous.frames
+        editPlane = previous.plane; planeStash = previous.stash; planeFrames = previous.frames; solidOps = previous.solidOps
         lines = recalculate(previous.lines).map { line -> previous.lines.firstOrNull { it.id == line.id && (it.lengthSource == LengthSource.MANUAL || it.lengthSource == LengthSource.MEASURED) }?.let { line.copy(value = it.value) } ?: line }; guides = previous.guides; guidesDetected = previous.guidesDetected; extrusions = previous.extrusions; selectedExtrusionId = selectedExtrusionId?.takeIf { id -> extrusions.any { it.id == id } }; levelRotation = previous.rotation; unit = previous.unit; tool = previous.tool; referenceCount = lines.count { it.isReference }
         undoHistory = undoHistory.dropLast(1)
     }
 
     /** Builds the 3D model from every plane and shows it in place of the canvas. The camera and frame stay put across rebuilds. */
     fun open3dView() {
-        val guideSnapshot = allGuides(); val extrusionSnapshot = allExtrusions(); val setup = modelSetup(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
+        val guideSnapshot = allGuides(); val extrusionSnapshot = allExtrusions(); val opsSnapshot = solidOps; val setup = modelSetup(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
         val frame = viewerModel?.frame
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching {
                 val colors = mutableListOf<Int>()
-                val objects = mutableListOf<Extrusion>()
-                val specs = buildSolidSpecs(guideSnapshot, extrusionSnapshot, setup, objects)
-                // Intersecting objects are shown with a warning so they can be moved apart; export still refuses them.
-                val issues = mutableListOf<MeshIssue>()
-                val meshes = specs.mapNotNull { spec -> try { MeshBuilder.extrude(spec).also { issues += MeshBuilder.validate(it) } } catch (e: MeshException) { issues += e.issues; null } }
-                if (issues.any { it.blocking }) throw MeshException(issues)
-                val warnings = MeshBuilder.overlapIssues(specs).map { it.toString() }
+                // Intersecting objects are shown with a warning so they can be moved apart or joined; export still refuses them.
+                val model = buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false)
+                val meshes = model.meshes
+                val warnings = model.warnings.map { it.toString() }
                 meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
                 val stl = ModelExport.stl(meshes)
                 val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { index } }.toIntArray()
@@ -2348,7 +2424,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     val a = mapping.model(line.start, line.startZMm); val b = mapping.model(line.end, line.endZMm)
                     ViewerMeasurement(a.x.toFloat(), a.y.toFloat(), b.x.toFloat(), b.y.toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), a.z.toFloat(), b.z.toFloat())
                 }
-                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame) to objects.map { it.plane to it.id }
+                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame) to model.objects
             } }
             if (projectId != openedProject) return@launch
             result.onSuccess { (mesh, ids) -> viewerModel = mesh; viewerObjects = ids; show3d = true }
@@ -2356,8 +2432,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
-    LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, unit) { if (show3d) open3dView() }
+    LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, solidOps, unit) { if (show3d) open3dView() }
     fun leave3d() { show3d = false; viewerModel = null; viewerEditObject = null }
+    /** Switches to the view a foreign object was drawn in and selects it there, where all drawing tools apply. */
+    fun openInOwnView(key: Pair<ModelPlane, Int>) {
+        leave3d(); switchPlane(key.first); tool = Tool.ADJUST
+        extrusions.firstOrNull { it.id == key.second }?.let { e -> extrusionGuides(e, guides).firstOrNull()?.let { selectedWholeGuideId = it.id; selectedGuideId = it.id } }
+    }
 
     BackHandler(enabled = presentation || bitmap != null || showSettings) {
         when {
@@ -2378,7 +2459,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan },
                 onDoubleTap = { setPresentation(false) }, doubleTapEnabled = true,
                 onJunction = { junctionAction = it }, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
-                selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null), onNudge = ::nudgeSelected
+                selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null), onNudge = ::nudgeSelected
             )
             IconButton(onClick = { setPresentation(false) }, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).background(Color(0xCC17211E), CircleShape)) {
                 Icon(painterResource(R.drawable.ic_fullscreen_exit), contentDescription = "Exit full screen", tint = Color.White)
@@ -2430,6 +2511,19 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
             if (tool == Tool.ADJUST && panOnEmptyDrag) IconButton(onClick = { panOnEmptyDrag = false }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_select_area), contentDescription = "Select points in an area") }
             if (tool == Tool.ADJUST && selectedExtrusionId != null) IconButton(onClick = { extrusionEditId = selectedExtrusionId }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_cube), contentDescription = "Edit 3D depth") }
+            // A shape from another view: exact values, 3D cut and join, or open it where it was drawn for every 2D tool.
+            if (tool == Tool.ADJUST) selectedForeignObject()?.let { target ->
+                if (selectedForeignPoint != null) IconButton(onClick = { movePointDialog = true }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_move_point), contentDescription = "Move point by an exact size") }
+                IconButton(onClick = { foreignDialog = target.key }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_cube), contentDescription = "Exact position and depth") }
+                IconButton(onClick = { startSolidOp(false, target.key) }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_scissors), contentDescription = "Cut it in 3D with another object") }
+                IconButton(onClick = { startSolidOp(true, target.key) }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_join), contentDescription = "Join it in 3D with another object") }
+                IconButton(onClick = { openInOwnView(target.key) }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_open_plane), contentDescription = "Edit in the view it was drawn in") }
+            }
+            if (tool == Tool.ADJUST && selectedForeign == null && (selectedGuideEndpoint != null || selectedEndpoint != null)) IconButton(onClick = { movePointDialog = true }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_move_point), contentDescription = "Move point by an exact size") }
+            if (tool == Tool.ADJUST && selectedForeign == null && selectedGuideEndpoint == null && selectedCurveId == null) ownSelectedObject()?.let { key ->
+                IconButton(onClick = { startSolidOp(false, key) }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_scissors), contentDescription = "Cut it in 3D with another object") }
+                IconButton(onClick = { startSolidOp(true, key) }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_join), contentDescription = "Join it in 3D with another object") }
+            }
             if (tool == Tool.ADJUST && selectedGuideId != null && selectedVertices.isEmpty()) {
                 IconButton(onClick = { guideLengthEditId = selectedGuideId }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_measure_straight), contentDescription = "Set line length") }
                 IconButton(onClick = { pointKind = PointKind.BREAKPOINT }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_point_break), contentDescription = "Add breakpoint", tint = if (pointKind == PointKind.BREAKPOINT) Color(0xFF006D67) else Color.Gray) }
@@ -2481,7 +2575,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }, { project ->
             BitmapFactory.decodeFile(ProjectStore.imageFile(context, project.id).absolutePath)?.let { loaded ->
-                blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; editPlane = ModelPlane.FRONT; planeFrames = project.frames; fitPending = true
+                blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; editPlane = ModelPlane.FRONT; planeFrames = project.frames; solidOps = project.solidOps; fitPending = true
                 planeStash = ModelPlane.entries.filter { it != ModelPlane.FRONT }.associateWith { plane -> PlaneGeometry(project.lines.filter { it.plane == plane }, project.guides.filter { it.plane == plane }, project.extrusions.filter { it.plane == plane }) }.filterValues { it != PlaneGeometry() }
                 lines = project.lines.filter { it.plane == ModelPlane.FRONT }; guides = project.guides.filter { it.plane == ModelPlane.FRONT }; guidesDetected = project.guidesDetected; extrusions = project.extrusions.filter { it.plane == ModelPlane.FRONT }; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference && it.plane == ModelPlane.FRONT }; scale = recomputeScale(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit) ?: if (project.blankScene) unitFactorMm(project.unit) else null; axisScale = axisScaleOf(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
             }
@@ -2495,6 +2589,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         })
         else Column(Modifier.padding(padding).fillMaxSize()) {
             val editHint = when {
+                solidPick != null -> solidPick!!.let { (join, target) -> if (join) "Tap the object to join with ${objectName(target)}. Tap empty space to cancel" else "Tap the object that cuts ${objectName(target)}. Tap empty space to cancel" }
+                selectedForeignPoint != null -> "Arrows move the point one step · the move button moves it by an exact size · drag a dot to move freely"
                 show3d -> "3D: drag to orbit, two fingers to pan and zoom, tap a shape for exact sizes"
                 tool == Tool.ADJUST && selectedForeign != null -> "Drag the shape to move it · round handles resize · dots move points · tap it again for exact sizes"
                 tool == Tool.ADJUST && foreign.isNotEmpty() && selectedEndpoint == null && selectedGuideEndpoint == null && selectedWholeGuideId == null -> "Tap a shape to select it. Grey shapes were drawn in another view and can be moved and resized here"
@@ -2508,7 +2604,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, initialSun = ((extrusions.firstOrNull()?.sun?.x ?: ((bitmap?.width ?: 1) * 0.15f)) / (bitmap?.width ?: 1)).coerceIn(0f, 1f), onSunChange = { position ->
                 val width = bitmap?.width ?: 1
                 if (extrusions.any { abs(it.sun.x - position * width) > 0.01f }) { pushUndo(); extrusions = extrusions.map { it.copy(sun = Pt(position * width, 0f)) } }
-            }, onEditObject = { viewerEditObject = it }, modifier = Modifier.fillMaxWidth().weight(1f))
+            }, onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index }, modifier = Modifier.fillMaxWidth().weight(1f))
             else {
             CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -2518,7 +2614,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan }, onDoubleTap = { }, doubleTapEnabled = false,
                 onJunction = { junctionAction = it }, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
-                selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null), onNudge = ::nudgeSelected
+                selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null), onNudge = ::nudgeSelected
             )
             }
             // Leveling and perspective correction work on the photo, so they belong to the front plane.
@@ -2781,11 +2877,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); Toast.makeText(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onExport3d = {
         val exportGuidesSnapshot = allGuides(); val exportExtrusionsSnapshot = allExtrusions()
-        val exportSetup = modelSetup()
+        val exportSetup = modelSetup(); val exportOps = solidOps
         modelReport = ModelReport.Checking
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching {
-                val meshes = buildMeshes(exportGuidesSnapshot, exportExtrusionsSnapshot, exportSetup)
+                val meshes = buildMeshes(exportGuidesSnapshot, exportExtrusionsSnapshot, exportOps, exportSetup)
                 File(context.cacheDir, "pending-3d-export.stl").writeBytes(ModelExport.stl(meshes))
                 File(context.cacheDir, "pending-3d-export.3mf").writeBytes(ModelExport.threeMf(meshes))
                 meshes
@@ -2815,7 +2911,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val extrusion = geometry?.extrusions?.firstOrNull { it.id == target.second }
         val name = viewerModel?.objectNames?.getOrNull(index) ?: "Object"
         if (target == null || geometry == null || extrusion == null) viewerEditObject = null
-        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, onDismiss = { viewerEditObject = null }, onRemove3d = {
+        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, solidOpsOf(target), onCut = { viewerEditObject = null; startSolidOp(false, target) }, onJoin = { viewerEditObject = null; startSolidOp(true, target) }, onDismiss = { viewerEditObject = null }, onRemove3d = {
             pushUndo()
             setPlaneShapes(target.first, geometry.guides, geometry.extrusions.filterNot { it.id == extrusion.id })
             viewerEditObject = null
@@ -2827,12 +2923,42 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             viewerEditObject = null
         }
     }
+    pendingCut?.let { op ->
+        val tool = objectName(op.tool); val target = objectName(op.target)
+        AlertDialog(onDismissRequest = { pendingCut = null }, title = { Text("Cut $target") }, text = {
+            Text("$tool is cut out of $target in 3D. Keep $tool as an object too, or use it up? It stays editable in its view either way, and you can undo.")
+        }, confirmButton = {
+            Row {
+                TextButton(onClick = { pushUndo(); solidOps = solidOps + op.copy(keepTool = true); pendingCut = null }) { Text("Keep it") }
+                TextButton(onClick = { pushUndo(); solidOps = solidOps + op; pendingCut = null }) { Text("Use it up") }
+            }
+        }, dismissButton = { TextButton(onClick = { pendingCut = null }) { Text("Cancel") } })
+    }
+    if (movePointDialog) {
+        val foreignPoint = selectedForeignPoint
+        val target = foreignPoint?.let { selection -> foreign.firstOrNull { it.key == selection.key } }
+        if (foreignPoint != null && target != null) {
+            val across = listOf("X", "Y", "Z")[listOf(target.across.x, target.across.y, target.across.z).indexOfFirst { abs(it) > 0.5 }]
+            val depth = target.plane.normalAxis.label
+            MovePointDialog(unit, "$across +", if (foreignPoint.back) "$depth + (far side: changes thickness)" else "$depth +", onDismiss = { movePointDialog = false }) { a, b ->
+                moveForeignPoint(foreignPoint, a, b); movePointDialog = false
+            }
+        } else {
+            // The canvas axes of this plane, named by the model axis they show.
+            val (labelA, vectorA) = if (editPlane == ModelPlane.PROFILE) "Z + (toward the front, left)" to Vec3(0.0, 0.0, 1.0) else "X + (right)" to Vec3(1.0, 0.0, 0.0)
+            val (labelB, vectorB) = if (editPlane == ModelPlane.TOP) "Z + (toward the front, down)" to Vec3(0.0, 0.0, 1.0) else "Y + (up)" to Vec3(0.0, 1.0, 0.0)
+            MovePointDialog(unit, labelA, labelB, onDismiss = { movePointDialog = false }) { a, b ->
+                modelSetup().mapping(editPlane)?.pixelDelta(vectorA * a + vectorB * b)?.let { nudgeSelected(it.x, it.y) }
+                movePointDialog = false
+            }
+        }
+    }
     foreignDialog?.let { target ->
         val geometry = planeGeometry(target.first)
         val extrusion = geometry.extrusions.firstOrNull { it.id == target.second }
         val name = foreign.firstOrNull { it.key == target }?.name ?: "Object"
         if (extrusion == null) foreignDialog = null
-        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, onDismiss = { foreignDialog = null }, onRemove3d = {
+        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, solidOpsOf(target), onCut = { foreignDialog = null; startSolidOp(false, target) }, onJoin = { foreignDialog = null; startSolidOp(true, target) }, onDismiss = { foreignDialog = null }, onRemove3d = {
             pushUndo()
             setPlaneShapes(target.first, geometry.guides, geometry.extrusions.filterNot { it.id == extrusion.id })
             foreignDialog = null; selectedForeign = null
@@ -3049,7 +3175,23 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
 }
 
 /** Sets an object's front-face Z (positive toward the viewer) and, only when edited, its depth. */
-@Composable private fun ObjectDepthDialog(name: String, plane: ModelPlane, zMm: Double, depthMm: Double?, unit: String, onDismiss: () -> Unit, onRemove3d: () -> Unit, onSave: (Double, Double?) -> Unit) {
+/** Moves the selected point by exact distances along two named axes; empty fields mean no move. */
+@Composable private fun MovePointDialog(unit: String, labelA: String, labelB: String, onDismiss: () -> Unit, onApply: (Double, Double) -> Unit) {
+    val lengthUnit = LengthUnit.of(unit)
+    var a by remember { mutableStateOf("") }
+    var b by remember { mutableStateOf("") }
+    val aMm = if (a.isBlank()) 0.0 else parseLengthMm(a, lengthUnit)
+    val bMm = if (b.isBlank()) 0.0 else parseLengthMm(b, lengthUnit)
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Move point by") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(a, { a = it }, label = { Text("$labelA (${lengthUnit.symbol})") }, supportingText = { Text("Use a minus sign to move the other way.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+            OutlinedTextField(b, { b = it }, label = { Text("$labelB (${lengthUnit.symbol})") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+        }
+    }, confirmButton = { TextButton(enabled = aMm != null && bMm != null && (aMm != 0.0 || bMm != 0.0), onClick = { onApply(aMm!!, bMm!!) }) { Text("Move") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+@Composable private fun ObjectDepthDialog(name: String, plane: ModelPlane, zMm: Double, depthMm: Double?, unit: String, operations: List<Pair<String, () -> Unit>> = emptyList(), onCut: (() -> Unit)? = null, onJoin: (() -> Unit)? = null, onDismiss: () -> Unit, onRemove3d: () -> Unit, onSave: (Double, Double?) -> Unit) {
     val (faceLabel, faceHint) = when (plane) {
         ModelPlane.FRONT -> "Front face Z" to "Positive Z comes toward you in the front view; 0 is the drawing plane."
         ModelPlane.TOP -> "Top face Y" to "Drawn in the Top view, so it is extruded down along Y. 0 is the bottom of the front drawing."
@@ -3071,6 +3213,14 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
             OutlinedTextField(z, { z = it }, label = { Text("$faceLabel (${lengthUnit.symbol})") }, supportingText = { Text(faceHint) }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
             OutlinedTextField(depth, { depth = it; depthEdited = true }, label = { Text("Depth behind that face (${lengthUnit.symbol})") }, supportingText = { Text(if (depthEdited) "Thickness will change." else "Kept as is unless you change it.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             zValue?.let { front -> (depthValue)?.let { d -> Text("Occupies $axis ${formatLength(front - d, lengthUnit)} to ${formatLength(front, lengthUnit)}.", fontSize = 12.sp, color = Color(0xFF4D5A57)) } }
+            // 3D cuts and joins: start one (then tap the other object), or undo an existing one.
+            if (onCut != null || onJoin != null) Row {
+                onCut?.let { TextButton(onClick = it) { Text("Cut with…") } }
+                onJoin?.let { TextButton(onClick = it) { Text("Join with…") } }
+            }
+            operations.forEach { (text, remove) ->
+                Row(verticalAlignment = Alignment.CenterVertically) { Text(text, fontSize = 13.sp, modifier = Modifier.weight(1f)); TextButton(onClick = remove) { Text("Undo") } }
+            }
             TextButton(onClick = { confirmRemove = true }) { Text("Remove 3D (keep shape)") }
         }
     }, confirmButton = { TextButton(enabled = valid, onClick = { onSave(zValue!!, if (depthEdited) depthValue else null) }) { Text("Apply") } },
@@ -3130,7 +3280,8 @@ private sealed class ModelReport {
 @Composable private fun StatusStrip(tool: Tool, scale: Double?, count: Int, refs: Int, drawingEnd: Boolean = false, hint: String? = null, axes: String = "", onFit: (() -> Unit)? = null, onMeasurements: () -> Unit) {
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 14.dp, vertical = 6.dp)) {
         val status = when { drawingEnd -> "Tap the end point"; tool == Tool.NONE -> "Choose a tool"; tool == Tool.CROP -> "Adjust crop, then confirm"; tool == Tool.LINES -> "Tap points to draw a guide"; tool == Tool.ADJUST -> "Select a point, line or label"; tool == Tool.CALIBRATE -> "Tap two points to calibrate"; else -> "Tap two points to measure" }
-        Text(hint ?: status, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        // Always two lines tall, so a changing hint never resizes (and re-fits) the canvas below.
+        Text(hint ?: status, fontWeight = FontWeight.Bold, fontSize = 14.sp, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("$count measurements", modifier = Modifier.clickable(onClick = onMeasurements).padding(vertical = 4.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF006E67))
             Text("  |  $refs ref${if (refs == 1) "" else "s"}", fontSize = 12.sp, color = Color(0xFF4D5A57), maxLines = 1)
@@ -4784,8 +4935,34 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
     return specs
 }
 
-private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, setup: ModelSetup): List<Mesh> {
-    val meshes = MeshBuilder.buildAll(buildSolidSpecs(guides, extrusions, setup))
+/** The finished model: one mesh per remaining object, after cuts and joins, with what to warn about. */
+private class ModelBuild(val meshes: List<Mesh>, val objects: List<Pair<ModelPlane, Int>>, val warnings: List<MeshIssue>)
+
+/**
+ * Builds every plane's solids and applies the 3D cuts and joins. With [strict], anything that would make a bad
+ * print (including objects that overlap without being joined) throws; otherwise overlaps come back as warnings.
+ */
+private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean): ModelBuild {
+    val objects = mutableListOf<Extrusion>()
+    val specs = buildSolidSpecs(guides, extrusions, setup, objects)
+    val issues = mutableListOf<MeshIssue>()
+    val raw = specs.map { spec -> try { MeshBuilder.extrude(spec) } catch (e: MeshException) { issues += e.issues; null } }
+    if (issues.any { it.blocking }) throw MeshException(issues)
+    val keys = objects.map { it.plane to it.id }
+    val operations = ops.mapNotNull { op -> val target = keys.indexOf(op.target); val tool = keys.indexOf(op.tool); if (target < 0 || tool < 0 || target == tool) null else SolidOperation(target, tool, op.join, op.keepTool) }
+    val combined = SolidCombiner.apply(raw.map { it!! }, operations)
+    combined.forEach { mesh -> if (mesh != null) issues += MeshBuilder.validate(mesh) }
+    if (issues.any { it.blocking }) throw MeshException(issues)
+    val removed = combined.indices.filter { combined[it] == null }
+    val ignore = operations.map { it.target to it.tool }.toSet() + removed.flatMap { r -> specs.indices.map { r to it } }
+    val overlaps = MeshBuilder.overlapIssues(specs, ignore)
+    if (strict && overlaps.any { it.blocking }) throw MeshException(overlaps)
+    val kept = combined.indices.filter { combined[it] != null }
+    return ModelBuild(kept.map { combined[it]!! }, kept.map { keys[it] }, issues + overlaps)
+}
+
+private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup): List<Mesh> {
+    val meshes = buildModel(guides, extrusions, ops, setup, strict = true).meshes
     // Printable files start at X = 0 and Y = 0; Z keeps the drawing plane at 0.
     val minX = meshes.minOf { m -> m.vertices.minOf { it.x } }; val minY = meshes.minOf { m -> m.vertices.minOf { it.y } }
     return meshes.map { m -> m.copy(vertices = m.vertices.map { Vec3(it.x - minX, it.y - minY, it.z) }) }

@@ -188,10 +188,12 @@ object MeshBuilder {
      * different planes are compared by bounding box and only warned about, since the box can overlap
      * where the solids themselves don't.
      */
-    fun overlapIssues(specs: List<SolidSpec>): List<MeshIssue> {
+    fun overlapIssues(specs: List<SolidSpec>, ignore: Set<Pair<Int, Int>> = emptySet()): List<MeshIssue> {
         val issues = mutableListOf<MeshIssue>()
         fun zRange(s: SolidSpec) = s.outline.minOf { it.z - it.thicknessMm } to s.outline.maxOf { it.z }
         for (i in specs.indices) for (j in i + 1 until specs.size) {
+            // Pairs that are cut or joined on purpose are allowed to overlap.
+            if ((i to j) in ignore || (j to i) in ignore) continue
             val a = specs[i]; val b = specs[j]
             if (a.plane != b.plane) {
                 val (al, ah) = a.bounds(); val (bl, bh) = b.bounds()

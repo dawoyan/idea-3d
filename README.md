@@ -31,6 +31,13 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
   - drag its dots to move outline points. Each corner has a dot on the facing side, which moves the point, and one on the far side, which slides it and changes the thickness there. Dots that line up in the view move together. A grey shape's corner can be grabbed even before it is selected.
 
   The new size or offset shows while dragging, each drag is one undo step, and tapping the selected shape again opens its exact values. For example, in Top you can widen a Front box or make it deeper.
+- **The same Adjust in every view:**
+  - **Points:** tap a point, including a dot on a grey shape. The arrow pad moves it one display step at a time (for example 1 mm), and the move button (four arrows) moves it by distances you type along the axes shown.
+  - **Grey shapes:** selecting one also offers exact values, **3D Cut**, **3D Join**, and **Open in its view**. That last one switches to the view the shape was drawn in, where split line by point, join shapes and 2D cut apply to it.
+- **3D Cut and Join:** select a shape, tap the scissors (cut) or the joined-squares icon (join), then tap the other object. This works in any view, including the 3D tab, and the shapes can be from different views.
+  - **Cut** removes the second object from the first, for example a hole through a box. You choose whether the cutting object stays in the model or is used up; either way it stays editable in its view.
+  - **Join** merges overlapping objects into one printable solid.
+  - The exact-values dialog lists every cut and join an object is part of, each with Undo. Results are checked like any solid: closed, outward-facing and with volume.
 - **Moving points:** in every plane, with **Adjust**, a corner of your own drawing can be dragged straight away, with no tap first.
 - **Fit:** each plane opens zoomed to everything in it, including shapes from the other planes, so every corner and handle is on screen. **Fit** in the status bar does this again, and pinching can zoom out further. Blank canvases also grow to hold everything drawn on them. The status bar says what to tap and drag in each step.
 - **Blank canvases:** Top and Profile are blank and start at the picture's size. They grow to fill the screen, with no dark bands, and so does an empty scene's front canvas. Crop resizes them. Each plane stores where its canvas sits in 3D, so cropping or growing never moves anything.
