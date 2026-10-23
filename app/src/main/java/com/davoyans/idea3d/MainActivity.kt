@@ -860,7 +860,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var showFinder by remember { mutableStateOf(false) }
     // Canvas area to zoom to once a plane switch has settled (from the finder).
     var pendingFocus by remember { mutableStateOf<FloatArray?>(null) }
-    var ghostLines by remember { mutableStateOf<List<FloatArray>>(emptyList()) }
+    var ghostLines by remember { mutableStateOf<List<Pair<Pair<ModelPlane, Int>, FloatArray>>>(emptyList()) }
+    // The line selected before switching views: highlighted in the other views and selected again on return.
+    var crossViewSelection by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
     var showPictureEdit by remember { mutableStateOf(false) }
     var showPointDepth by remember { mutableStateOf(false) }
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
@@ -983,6 +985,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         guides.forEach { g -> listOfNotNull(g.start, g.end, g.curveMid).forEach { add(it.x, it.y) } }
         lines.forEach { l -> add(l.start.x, l.start.y); add(l.end.x, l.end.y) }
         foreign.forEach { o -> var i = 0; while (i + 1 < o.canvas.size) { add(o.canvas[i], o.canvas[i + 1]); i += 2 } }
+        ghostLines.forEach { (_, pts) -> var i = 0; while (i + 1 < pts.size) { add(pts[i], pts[i + 1]); i += 2 } }
         return if (minX.isFinite()) floatArrayOf(minX, minY, maxX, maxY) else null
     }
     fun isBlankCanvas() = editPlane != ModelPlane.FRONT || blankScene
@@ -1178,7 +1181,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val pts = if (g.curveMid == null) listOf(g.start, g.end) else (0..16).map { guidePointAt(g, it / 16f) }
                 val out = FloatArray(pts.size * 2)
                 pts.forEachIndexed { i, p -> val t = if (pts.size > 1) i.toDouble() / (pts.size - 1) else 0.0; val q = here.pixel(own.model(p, g.startZMm + (g.endZMm - g.startZMm) * t)); out[i * 2] = q.x; out[i * 2 + 1] = q.y }
-                out
+                (g.plane to g.id) to out
             }
         }.getOrDefault(emptyList()) }
         memberGhosts = withContext(Dispatchers.Default) { runCatching {
@@ -2429,6 +2432,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     /** Puts the current plane's geometry aside and edits [next]; nothing is lost and undo still covers both. */
     fun switchPlane(next: ModelPlane) {
         if (next == editPlane) return
+        (selectedWholeGuideId ?: selectedGuideId)?.let { id -> if (guides.any { it.id == id }) crossViewSelection = editPlane to id }
         val stash = planeStash.toMutableMap()
         stash[editPlane] = planeGeometry(editPlane)
         val loaded = stash.remove(next) ?: PlaneGeometry()
@@ -2439,6 +2443,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         selectedWholeGuideId = null; selectedWholeLineId = null; selectedLabelId = null; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null
         if (tool == Tool.CALIBRATE || tool == Tool.CROP) tool = Tool.NONE
         selectedForeign = null; foreignDrag = null; selectedForeignPoint = null; solidPick = null; joinPick = null
+        crossViewSelection?.takeIf { it.first == next && guides.any { g -> g.id == it.second } }?.let { selectedWholeGuideId = it.second; selectedGuideId = it.second }
         zoom = 1f; pan = Offset.Zero; fitPending = true
     }
 
@@ -2504,7 +2509,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), ghostLines = ghostLines, onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), ghostLines = ghostLines, highlightGhost = crossViewSelection, onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan },
                 onDoubleTap = { setPresentation(false) }, doubleTapEnabled = true,
@@ -2576,9 +2581,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 IconButton(onClick = { startSolidOp(false, key) }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_scissors), contentDescription = "Cut it in 3D with another object") }
                 IconButton(onClick = { startSolidOp(true, key) }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_join), contentDescription = "Join it in 3D with another object") }
             }
-            // A named button so the line's material (and length) is easy to find.
-            if ((tool == Tool.ADJUST || tool == Tool.NONE) && selectedGuideId != null && selectedVertices.isEmpty() && selectedForeign == null)
-                TextButton(onClick = { guideLengthEditId = selectedGuideId }, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("Material", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
             if (tool == Tool.ADJUST && selectedGuideId != null && selectedVertices.isEmpty()) {
                 IconButton(onClick = { pointKind = PointKind.BREAKPOINT }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_point_break), contentDescription = "Add breakpoint", tint = if (pointKind == PointKind.BREAKPOINT) Color(0xFF006D67) else Color.Gray) }
                 IconButton(onClick = { pointKind = PointKind.CURVE }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_point_curve), contentDescription = "Add curve point", tint = if (pointKind == PointKind.CURVE) Color(0xFF006D67) else Color.Gray) }
@@ -2600,11 +2602,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             guideDeleteCandidateId?.let { id ->
                 Button(onClick = { deleteGuide(id) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E)), contentPadding = PaddingValues(horizontal = 10.dp)) { Text("Delete", fontSize = 12.sp) }
             }
-            if (selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) IconButton(onClick = {
+            // Crop is for photos; blank canvases have no edge to crop.
+            if (!isBlankCanvas() && selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) IconButton(onClick = {
                 startCrop()
             }) { Icon(painterResource(R.drawable.ic_crop), contentDescription = "Crop picture") }
-            // Finds any line, shape or object in any view.
-            if (tool != Tool.ADJUST && selectedVertices.isEmpty()) IconButton(onClick = { showFinder = true }, modifier = Modifier.size(48.dp)) { Icon(painterResource(R.drawable.ic_finder), contentDescription = "Find lines and shapes") }
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
@@ -2658,7 +2659,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 else -> null
             }
             val axesHint = if (show3d) "" else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
-            StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, hint = editHint, axes = axesHint, onFit = if (show3d) null else ({ fitView() }), onMeasurements = { showMeasurements = true })
+            StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, hint = editHint, axes = axesHint, onFit = if (show3d) null else ({ fitView() }), onFind = { showFinder = true },
+                onEditSelection = (selectedWholeGuideId ?: selectedGuideId)?.takeIf { selectedForeign == null && !show3d && guides.any { g -> g.id == it } }?.let { id -> { guideLengthEditId = id } }, onMeasurements = { showMeasurements = true })
             PlaneSwitcher(editPlane, show3d, onPlane = { leave3d(); switchPlane(it) }, on3d = ::open3dView)
             val model = viewerModel
             if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, initialSun = ((extrusions.firstOrNull()?.sun?.x ?: ((bitmap?.width ?: 1) * 0.15f)) / (bitmap?.width ?: 1)).coerceIn(0f, 1f), onSunChange = { position ->
@@ -2670,7 +2672,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), ghostLines = ghostLines, onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), ghostLines = ghostLines, highlightGhost = crossViewSelection, onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan }, onDoubleTap = { }, doubleTapEnabled = false,
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
@@ -3063,6 +3065,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         if (item.plane != editPlane) { switchPlane(item.plane); pendingFocus = item.bounds } else fitView(item.bounds)
                         tool = Tool.ADJUST; clearOwnSelection(); selectedForeign = null
                         selectedWholeGuideId = item.guideIds.first(); selectedGuideId = item.guideIds.first()
+                        crossViewSelection = item.plane to item.guideIds.first()
                     }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Canvas(Modifier.size(44.dp).background(Color(0xFFF2F5F4), RoundedCornerShape(6.dp))) {
                             val b = item.bounds
@@ -3520,15 +3523,19 @@ private sealed class ModelReport {
     }, dismissButton = { TextButton(onClick = onDismiss) { Text(if (report is ModelReport.Ready) "Cancel" else "Close") } })
 }
 
-@Composable private fun StatusStrip(tool: Tool, scale: Double?, count: Int, refs: Int, drawingEnd: Boolean = false, hint: String? = null, axes: String = "", onFit: (() -> Unit)? = null, onMeasurements: () -> Unit) {
+@Composable private fun StatusStrip(tool: Tool, scale: Double?, count: Int, refs: Int, drawingEnd: Boolean = false, hint: String? = null, axes: String = "", onFit: (() -> Unit)? = null, onFind: (() -> Unit)? = null, onEditSelection: (() -> Unit)? = null, onMeasurements: () -> Unit) {
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 14.dp, vertical = 6.dp)) {
         val status = when { drawingEnd -> "Tap the end point"; tool == Tool.NONE -> "Choose a tool"; tool == Tool.CROP -> "Adjust crop, then confirm"; tool == Tool.LINES -> "Tap points to draw a guide"; tool == Tool.ADJUST -> "Select a point, line or label"; tool == Tool.CALIBRATE -> "Tap two points to calibrate"; else -> "Tap two points to measure" }
         // Always two lines tall, so a changing hint never resizes (and re-fits) the canvas below.
         Text(hint ?: status, fontWeight = FontWeight.Bold, fontSize = 14.sp, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("$count measurements", modifier = Modifier.clickable(onClick = onMeasurements).padding(vertical = 4.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF006E67))
-            Text("  |  $refs ref${if (refs == 1) "" else "s"}", fontSize = 12.sp, color = Color(0xFF4D5A57), maxLines = 1)
-            Text(axes, fontSize = 11.sp, color = Color(0xFF4D5A57), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.End, modifier = Modifier.weight(1f).padding(horizontal = 6.dp))
+            Text("  |  $refs ref${if (refs == 1) "" else "s"}${if (axes.isNotEmpty()) "  ·  $axes" else ""}", fontSize = 12.sp, color = Color(0xFF4D5A57), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            Spacer(Modifier.weight(1f))
+            @Composable fun Pill(label: String, filled: Boolean = false, onClick: () -> Unit) = Text(label, modifier = Modifier.padding(start = 6.dp).background(if (filled) Color(0xFF006E67) else Color.Transparent, RoundedCornerShape(12.dp)).border(1.dp, Color(0xFF006E67), RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 3.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (filled) Color.White else Color(0xFF006E67), maxLines = 1)
+            // The selected line's size and material, and finding anything in any view, are always one tap away here.
+            onEditSelection?.let { Pill("Size & material", filled = true, onClick = it) }
+            onFind?.let { Pill("Find", onClick = it) }
             // Brings everything in this plane back into view.
             if (onFit != null) Text("Fit", modifier = Modifier.border(1.dp, Color(0xFF006E67), RoundedCornerShape(12.dp)).clickable(onClick = onFit).padding(horizontal = 12.dp, vertical = 3.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF006E67))
         }
@@ -3796,7 +3803,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), ghostLines: List<FloatArray> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), highlightGhost: Pair<ModelPlane, Int>? = null, foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -4078,9 +4085,12 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     else drawLine(zeroColor, Offset(left + imageW / 2f, top), Offset(left + imageW / 2f, top + imageH), strokeWidth = 3f, pathEffect = dash)
                 }
                 // Lines drawn in the other views, grey, above the Z = 0 line (a front line lies right on it seen from Top or Profile).
-                ghostLines.forEach { pts ->
+                ghostLines.forEach { (key, pts) ->
+                    val chosen = key == highlightGhost
                     var i = 0
-                    while (i + 3 < pts.size) { drawLine(Color(0xFF6E7A76), Offset(left + pts[i] * fit, top + pts[i + 1] * fit), Offset(left + pts[i + 2] * fit, top + pts[i + 3] * fit), strokeWidth = 5f, cap = androidx.compose.ui.graphics.StrokeCap.Round); i += 2 }
+                    while (i + 3 < pts.size) { drawLine(if (chosen) Color(0xFF1565C0) else Color(0xFF6E7A76), Offset(left + pts[i] * fit, top + pts[i + 1] * fit), Offset(left + pts[i + 2] * fit, top + pts[i + 3] * fit), strokeWidth = if (chosen) 10f else 5f, cap = androidx.compose.ui.graphics.StrokeCap.Round); i += 2 }
+                    // A line seen end-on is a single point here: mark it so it can't vanish.
+                    if (chosen || pts.size >= 4 && hypot((pts[pts.size - 2] - pts[0]).toDouble(), (pts[pts.size - 1] - pts[1]).toDouble()) * fit < 6) drawCircle(if (chosen) Color(0xFF1565C0) else Color(0xFF6E7A76), if (chosen) 12f else 8f, Offset(left + pts[0] * fit, top + pts[1] * fit))
                 }
                 foreignOverlay?.let { overlay ->
                     // The selected object from another plane, its handles and its outline points.
