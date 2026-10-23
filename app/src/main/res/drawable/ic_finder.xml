@@ -1,0 +1,5 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <!-- A list with a magnifier: find a line, shape or object. -->
+    <path android:fillColor="#FF006D67" android:pathData="M3,5h10v2H3V5zM3,9h7v2H3V9zM3,13h5v2H3v-2zM15.5,9a4.5,4.5 0,1 1,-2.6 8.17l-3.2,3.2 -1.41,-1.41 3.2,-3.2A4.5,4.5 0,0 1,15.5 9zM15.5,11a2.5,2.5 0,1 0,0 5a2.5,2.5 0,0 0,0 -5z" />
+</vector>
