@@ -345,3 +345,33 @@ class CsgTest {
     }
 }
 
+class MemberTest {
+    private val a = Vec3(0.0, 0.0, 0.0); private val b = Vec3(1000.0, 0.0, 0.0); private val up = Vec3(0.0, 0.0, 1.0)
+
+    @Test fun rectangularBarHasItsFullVolume() {
+        val mesh = MemberBuilder.build("Bar", a, b, up, MemberProfile(ProfileKind.RECT_BAR, 40.0, 20.0), 0)
+        assertEquals(40.0 * 20.0 * 1000.0, mesh.signedVolume, 1e-3)
+        assertTrue(MeshBuilder.validate(mesh).isEmpty())
+        val (low, high) = mesh.bounds
+        assertEquals(20.0, high.z - low.z, 1e-9); assertEquals(40.0, high.y - low.y, 1e-9)
+    }
+
+    @Test fun rectangularTubeIsHollowAndClosed() {
+        val profile = MemberProfile(ProfileKind.RECT_TUBE, 40.0, 20.0, 2.0)
+        val mesh = MemberBuilder.build("Pipe", a, b, up, profile, 0)
+        assertEquals(profile.areaMm2 * 1000.0, mesh.signedVolume, 1e-3)
+        assertEquals((40.0 * 20.0 - 36.0 * 16.0), profile.areaMm2, 1e-9)
+        assertTrue(MeshBuilder.validate(mesh).isEmpty())
+    }
+
+    @Test fun roundTubeFollowsASlantedLine() {
+        val mesh = MemberBuilder.build("Round", Vec3(0.0, 0.0, 0.0), Vec3(300.0, 400.0, 0.0), up, MemberProfile(ProfileKind.ROUND_TUBE, 25.0, 25.0, 2.0), 0)
+        assertTrue(mesh.signedVolume > 0); assertTrue(MeshBuilder.validate(mesh).isEmpty())
+    }
+
+    @Test fun impossibleProfilesAreRejected() {
+        assertNotNull(MemberProfile(ProfileKind.RECT_TUBE, 10.0, 10.0, 6.0).problem())
+        try { MemberBuilder.build("Bad", a, a, up, MemberProfile(ProfileKind.RECT_BAR, 10.0, 10.0), 0); fail() } catch (e: MeshException) { }
+    }
+}
+

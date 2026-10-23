@@ -34,6 +34,7 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
 - **The same Adjust in every view:**
   - **Points:** tap a point, including a dot on a grey shape. The arrow pad moves it one display step at a time (for example 1 mm), and the move button (four arrows) moves it by distances you type along the axes shown.
   - **Grey shapes:** selecting one also offers exact values, **3D Cut**, **3D Join**, and **Open in its view**. That last one switches to the view the shape was drawn in, where split line by point, join shapes and 2D cut apply to it.
+- **Materials:** **Materials** on the main screen lists bars and pipes shared by all projects. Each has a name, a profile (rectangular or round, tube or bar), sizes, wall thickness and a color, and the list starts with a few examples such as a rectangular iron pipe 40 × 20 × 2 mm. In a line's **Line details** (the line icon in Adjust), pick a material: the whole line, including every segment of a broken line, becomes that bar or pipe in 3D and in STL/3MF export. The part is centered on the line, its height runs along the view's depth axis, and curves follow in short straight pieces.
 - **Joining crossing lines** happens on the drawing instead of a numbered dialog. Double-tap the crossing and the four parts blink. Tap the two to keep: they turn green and the parts to delete blink red. **Keep the other parts** keeps the rest instead, and **Finish** joins.
 - **3D Cut and Join:** select a shape, tap the scissors (cut) or the joined-squares icon (join), then tap the other object. This works in any view, including the 3D tab, and the shapes can be from different views.
   - **Cut** removes the second object from the first, for example a hole through a box. You choose whether the cutting object stays in the model or is used up; either way it stays editable in its view.
@@ -99,6 +100,8 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
 - **Independent file check:** the exported files were checked with a separate stdlib Python script. Both had zero open edges, consistent orientation, positive volume, the expected 925.93 × 1481.48 × 20 mm size and Z from −5 to 15 mm.
 
 ## Limits
+
+- **Bar and pipe corners:** where two lines with a material meet, the pieces overlap at the corner; they aren't mitered.
 
 - **No physical device test yet.** Not checked: touch feel, long-press, pinch smoothness and Bluetooth.
 - **No slicer test yet.** The files have not been opened in PrusaSlicer, Cura or Bambu Studio. Open them in your slicer and check them before printing.
