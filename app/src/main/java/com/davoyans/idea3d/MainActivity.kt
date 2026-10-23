@@ -2549,8 +2549,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 IconButton(onClick = { startSolidOp(false, key) }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_scissors), contentDescription = "Cut it in 3D with another object") }
                 IconButton(onClick = { startSolidOp(true, key) }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_join), contentDescription = "Join it in 3D with another object") }
             }
+            // A named button so the line's material (and length) is easy to find.
+            if ((tool == Tool.ADJUST || tool == Tool.NONE) && selectedGuideId != null && selectedVertices.isEmpty() && selectedForeign == null)
+                TextButton(onClick = { guideLengthEditId = selectedGuideId }, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("Material", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
             if (tool == Tool.ADJUST && selectedGuideId != null && selectedVertices.isEmpty()) {
-                IconButton(onClick = { guideLengthEditId = selectedGuideId }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_measure_straight), contentDescription = "Line details: length and material") }
                 IconButton(onClick = { pointKind = PointKind.BREAKPOINT }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_point_break), contentDescription = "Add breakpoint", tint = if (pointKind == PointKind.BREAKPOINT) Color(0xFF006D67) else Color.Gray) }
                 IconButton(onClick = { pointKind = PointKind.CURVE }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_point_curve), contentDescription = "Add curve point", tint = if (pointKind == PointKind.CURVE) Color(0xFF006D67) else Color.Gray) }
                 if (selectedGuideEndpoint != null || selectedCurveId != null) IconButton(onClick = ::deleteSelectedGuidePoint, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_delete_point), contentDescription = "Delete selected point", tint = Color(0xFFB3261E)) }
@@ -2569,7 +2571,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 Button(onClick = { deleteMeasurement(id) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E)), contentPadding = PaddingValues(horizontal = 10.dp)) { Text("Delete", fontSize = 12.sp) }
             }
             guideDeleteCandidateId?.let { id ->
-                if (tool != Tool.ADJUST) IconButton(onClick = { guideLengthEditId = id }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_measure_straight), contentDescription = "Set line length") }
                 Button(onClick = { deleteGuide(id) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E)), contentPadding = PaddingValues(horizontal = 10.dp)) { Text("Delete", fontSize = 12.sp) }
             }
             if (selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) IconButton(onClick = {
@@ -2795,7 +2796,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             if (materialId == guide.materialId) return
             guides = guides.map { if (sameGuideObject(it, guide)) it.copy(materialId = materialId) else it }
         }
-        AlertDialog(onDismissRequest = { guideLengthEditId = null }, title = { Text("Line details") },
+        AlertDialog(onDismissRequest = { guideLengthEditId = null }, title = { Text("Line: material and length") },
             text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 currentMm?.let { Text("Now ${formatLength(it, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2)}", fontSize = 13.sp, color = Color(0xFF4D5A57)) }
                 OutlinedTextField(length, { if (decimalInputPattern.matches(it)) length = it }, label = { Text("Length ($unit)") }, placeholder = { Text("Keep as is") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
@@ -2930,6 +2931,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); Toast.makeText(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
+    }, onSaveMaterial = {
+        // The selected shape, or else the biggest closed shape that isn't a hole inside another one.
+        val shapes = closedGuideShapes(guides)
+        val chosen = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { g -> shapes.firstOrNull { path -> sameGuideObject(path.first(), g) } }
+            ?: shapes.filter { shape -> shapes.none { other -> other !== shape && shapePoints(shape).all { pointInsidePolygon(it, shapePoints(other)) } } }
+                .maxByOrNull { shape -> val p = shapePoints(shape); abs(p.indices.sumOf { i -> val a = p[i]; val b = p[(i + 1) % p.size]; (a.x * b.y - b.x * a.y).toDouble() }) }
+        if (chosen == null) Toast.makeText(context, "Draw a closed shape first: the outline of the cross-section, with any holes inside it.", Toast.LENGTH_LONG).show()
+        else { showPictureEdit = false; saveMaterialShape = chosen }
     }, onExport3d = {
         val exportGuidesSnapshot = allGuides(); val exportExtrusionsSnapshot = allExtrusions()
         val exportSetup = modelSetup(); val exportOps = solidOps; val exportMaterials = materials.associateBy { it.id }
@@ -4487,7 +4496,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     )
 }
 
-@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
+@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onSaveMaterial: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
     var name by remember { mutableStateOf(currentName) }
     var unit by remember { mutableStateOf(currentUnit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
@@ -4501,6 +4510,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 OutlinedTextField(name, { name = it }, label = { Text("Picture name") }, singleLine = true)
                 OutlinedButton(onClick = onExportImage) { Text("Export picture") }
                 OutlinedButton(onClick = onExport3d) { Text("Export 3D model (STL or 3MF)") }
+                OutlinedButton(onClick = onSaveMaterial) { Text("Save drawing as material") }
                 Text("Measurement unit", fontWeight = FontWeight.Medium)
                 Box {
                     OutlinedButton(onClick = { unitMenuOpen = true }) { Text(unit) }
