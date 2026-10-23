@@ -30,6 +30,13 @@ Download the APK from the [latest release](https://github.com/dawoyan/idea-3d/re
   - An axis indicator uses the same X/Y/Z colors in every view.
   - In the flat views, one finger pans; in the 3D view, one finger orbits.
   - Tapping an object sets its front-face Z and depth, or removes its 3D form while keeping the shape. These edits can be undone.
+  - **Top and Profile views are editors for depth (Z).** Tap a shape to select it. Then:
+    - drag the shape to move it forward or back in Z;
+    - drag the round front or back handle to change its depth from that side;
+    - drag a dot to move outline points in Z, which slants or tilts the shape. Points that line up in the view move together.
+  - While dragging, the new value is shown live. Edits snap to Z = 0, to other objects' front and back faces, and to the current unit step.
+  - Each drag is one undo step, and the viewer has its own Undo button. The camera stays put after an edit.
+  - Overlapping objects are shown with a warning instead of closing the viewer, so you can move them apart. Export still refuses them.
 - **Measurement editor:** shows the true 3D length, the shorter front-view length and the Pythagoras relation. It explains when a Z change conflicts with a fixed length and shows where the length came from.
 - **Library:** thumbnails include the drawn shapes. Deleted projects can be restored with Undo.
 - **Bug fixes:**
@@ -65,5 +72,5 @@ Download the APK from the [latest release](https://github.com/dawoyan/idea-3d/re
 - **No slicer test yet.** The files have not been opened in PrusaSlicer, Cura or Bambu Studio. Open them in your slicer and check them before printing.
 - **Bosch GLM support is unchanged from Measure It** and was not tested here. No other laser device is claimed to work.
 - **Shape limits:** shapes with holes can't be exported yet; the app reports them. Overlapping solids must be merged or moved apart in Z.
-- **Flat-view editing:** the Top and Profile views edit only Z position and depth. Drawing still happens in the front editor.
+- **Flat-view editing:** the Top and Profile views edit Z: position, depth and per-point Z. X and Y, drawing and calibration still happen in the front editor.
 - **Perspective correction** works as in Measure It, using reference edges in the crop tool. It is not covered by automated tests.

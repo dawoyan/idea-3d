@@ -768,6 +768,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
     val snackbarHost = remember { SnackbarHostState() }
     var viewerExtrusionIds by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var viewerHandlePoints by remember { mutableStateOf<List<Pt>>(emptyList()) }
+    var viewerUndoBase by remember { mutableIntStateOf(0) }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
     var viewerAngle by remember { mutableStateOf(ViewerAngle.THREE_D) }
     var showViewMenu by remember { mutableStateOf(false) }
@@ -1843,27 +1845,87 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         ?: selectedGuideEndpoint?.let { endpoint -> guides.firstOrNull { it.id == endpoint.guideId }?.let { if (endpoint.isStart) it.start else it.end } }
         ?: selectedCurveId?.let { id -> guides.firstOrNull { it.id == id }?.curveMid }
 
-    fun open3dView(angle: ViewerAngle) {
+    fun restoreLastUndo() {
+        val previous = undoHistory.lastOrNull() ?: return
+        previous.image?.let { restored ->
+            bitmap = restored
+            projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { restored.compress(Bitmap.CompressFormat.PNG, 100, it) } }
+        }
+        lines = recalculate(previous.lines).map { line -> previous.lines.firstOrNull { it.id == line.id && (it.lengthSource == LengthSource.MANUAL || it.lengthSource == LengthSource.MEASURED) }?.let { line.copy(value = it.value) } ?: line }; guides = previous.guides; guidesDetected = previous.guidesDetected; extrusions = previous.extrusions; selectedExtrusionId = selectedExtrusionId?.takeIf { id -> extrusions.any { it.id == id } }; levelRotation = previous.rotation; unit = previous.unit; tool = previous.tool; referenceCount = lines.count { it.isReference }
+        undoHistory = undoHistory.dropLast(1)
+    }
+
+    /** Builds the viewer model. An open viewer keeps its frame so edits don't move the camera; [revertOnFailure] undoes an edit the model can't show. */
+    fun open3dView(angle: ViewerAngle, revertOnFailure: Boolean = false) {
         val guideSnapshot = guides.toList(); val extrusionSnapshot = extrusions.toList(); val modelScale = scale; val modelAxes = axisScale; val modelUnit = unit; val measurementSnapshot = lines.filterNot { it.isReference }; val openedProject = projectId
+        val frame = viewerModel?.frame
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching {
                 val colors = mutableListOf<Int>()
                 val origin = DoubleArray(2)
                 val extrusionIds = mutableListOf<Int>()
-                val meshes = buildMeshes(guideSnapshot, extrusionSnapshot, modelScale, modelUnit, origin, modelAxes, extrusionIds)
+                val specs = buildSolidSpecs(guideSnapshot, extrusionSnapshot, modelScale, modelUnit, origin, modelAxes, extrusionIds)
+                // The viewer shows intersecting objects (with a warning) so they can be moved apart in Top or Profile; export still refuses them.
+                val issues = mutableListOf<MeshIssue>()
+                val meshes = specs.mapNotNull { spec -> try { MeshBuilder.extrude(spec).also { issues += MeshBuilder.validate(it) } } catch (e: MeshException) { issues += e.issues; null } }
+                if (issues.any { it.blocking }) throw MeshException(issues)
+                val warnings = MeshBuilder.overlapIssues(specs).map { it.toString() }
                 meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
                 val stl = ModelExport.stl(meshes)
                 val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { index } }.toIntArray()
+                // Extruded meshes list front vertices first, then the matching back vertices.
+                val vertexBack = meshes.flatMap { mesh -> val n = mesh.vertices.size / 2; mesh.triangles.flatMap { t -> listOf(t.a >= n, t.b >= n, t.c >= n) } }.toBooleanArray()
                 val factorX = unitFactorMm(modelUnit) / (modelAxes?.first ?: modelScale!!)
                 val factorY = unitFactorMm(modelUnit) / (modelAxes?.second ?: modelScale!!)
+                val handlePoints = mutableListOf<Pt>()
+                val handles = extrusionIds.flatMapIndexed { index, id ->
+                    val extrusion = extrusionSnapshot.first { it.id == id }
+                    val edges = extrusionGuides(extrusion, guideSnapshot)
+                    val points = mutableListOf<Pair<Pt, Double>>()
+                    edges.forEach { edge -> listOf(edge.start to edge.startZMm, edge.end to edge.endZMm).forEach { (p, z) -> if (points.none { distance(it.first, p) < 0.5 }) points += p to z } }
+                    points.map { (p, z) -> handlePoints += p; ViewerHandle(index, ((p.x - origin[0]) * factorX).toFloat(), ((origin[1] - p.y) * factorY).toFloat(), (extrusion.positionZMm + z).toFloat()) }
+                }
                 val measurements = measurementSnapshot.map { line ->
                     val value = if (line.lengthSource == LengthSource.UNKNOWN) "?" else "${formatMeasure(line.value, modelUnit)}${if (line.hasDepth()) "*" else ""} $modelUnit"
                     ViewerMeasurement(((line.start.x - origin[0]) * factorX).toFloat(), ((origin[1] - line.start.y) * factorY).toFloat(), ((line.end.x - origin[0]) * factorX).toFloat(), ((origin[1] - line.end.y) * factorY).toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), line.startZMm.toFloat(), line.endZMm.toFloat())
                 }
-                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }) to extrusionIds
+                Triple(ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, vertexBack, handles, specs.map { spec -> spec.outline.minOf { it.thicknessMm }.toFloat() }, warnings, frame), extrusionIds.toList(), handlePoints.toList())
             } }
-            if (projectId == openedProject) result.onSuccess { viewerAngle = angle; viewerModel = it.first; viewerExtrusionIds = it.second }.onFailure { Toast.makeText(context, "3D view: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+            if (projectId != openedProject) return@launch
+            result.onSuccess { (mesh, ids, points) ->
+                if (viewerModel == null) viewerUndoBase = undoHistory.size
+                viewerAngle = angle; viewerModel = mesh; viewerExtrusionIds = ids; viewerHandlePoints = points
+            }.onFailure { error ->
+                if (revertOnFailure && undoHistory.size > viewerUndoBase) {
+                    restoreLastUndo()
+                    Toast.makeText(context, "Change not applied: ${error.localizedMessage}", Toast.LENGTH_LONG).show()
+                    open3dView(angle)
+                } else Toast.makeText(context, "3D view: ${error.localizedMessage}", Toast.LENGTH_LONG).show()
+            }
         }
+    }
+
+    /** Applies a drag from the Top or Profile view to the model, as one undo step. */
+    fun applyViewerEdit(edit: ViewerEdit) {
+        val extrusion = viewerExtrusionIds.getOrNull(edit.objectIndex)?.let { id -> extrusions.firstOrNull { it.id == id } }
+        val depth = extrusion?.depthMm
+        if (extrusion == null || depth == null) { open3dView(viewerAngle); return }
+        val d = edit.deltaMm
+        val edgeIds = extrusionGuides(extrusion, guides).map { it.id }.toSet()
+        pushUndo()
+        // Front moves with Z position; back = front - thickness, so a back-only change is a thickness change.
+        fun thicker(by: Double) { guides = guides.map { g -> if (g.id !in edgeIds) g else g.copy(startThicknessMm = g.startThicknessMm?.plus(by), endThicknessMm = g.endThicknessMm?.plus(by)) } }
+        when (edit.kind) {
+            ViewerEditKind.MOVE -> extrusions = extrusions.map { if (it.id == extrusion.id) it.copy(positionZMm = it.positionZMm + d) else it }
+            ViewerEditKind.FRONT -> { extrusions = extrusions.map { if (it.id == extrusion.id) extrusionWithDepth(it, depth + d, scale, unit).copy(positionZMm = it.positionZMm + d) else it }; thicker(d) }
+            ViewerEditKind.BACK -> { extrusions = extrusions.map { if (it.id == extrusion.id) extrusionWithDepth(it, depth - d, scale, unit) else it }; thicker(-d) }
+            ViewerEditKind.POINTS -> {
+                val points = edit.handles.mapNotNull { viewerHandlePoints.getOrNull(it) }
+                fun near(p: Pt) = points.any { distance(it, p) < 0.5 }
+                guides = guides.map { g -> if (g.id !in edgeIds) g else g.copy(startZMm = if (near(g.start)) g.startZMm + d else g.startZMm, endZMm = if (near(g.end)) g.endZMm + d else g.endZMm) }
+            }
+        }
+        open3dView(viewerAngle, revertOnFailure = true)
     }
 
     BackHandler(enabled = presentation || bitmap != null || showSettings) {
@@ -1922,15 +1984,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             IconButton(onClick = {
                 selectedVertices = emptyList()
                 if (draftStart != null) { draftStart = null; pendingEnd = null }
-                else if (undoHistory.isNotEmpty()) {
-                    val previous = undoHistory.last()
-                    previous.image?.let { restored ->
-                        bitmap = restored
-                        projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { restored.compress(Bitmap.CompressFormat.PNG, 100, it) } }
-                    }
-                    lines = recalculate(previous.lines).map { line -> previous.lines.firstOrNull { it.id == line.id && (it.lengthSource == LengthSource.MANUAL || it.lengthSource == LengthSource.MEASURED) }?.let { line.copy(value = it.value) } ?: line }; guides = previous.guides; guidesDetected = previous.guidesDetected; extrusions = previous.extrusions; selectedExtrusionId = selectedExtrusionId?.takeIf { id -> extrusions.any { it.id == id } }; levelRotation = previous.rotation; unit = previous.unit; tool = previous.tool; referenceCount = lines.count { it.isReference }
-                    undoHistory = undoHistory.dropLast(1)
-                }
+                else if (undoHistory.isNotEmpty()) restoreLastUndo()
                 else if (lines.isNotEmpty()) {
                     lines = lines.dropLast(1)
                     referenceCount = lines.count { it.isReference }
@@ -2308,7 +2362,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     viewerModel?.let { mesh -> ThreeDViewerDialog(mesh, viewerAngle, initialSun = ((extrusions.firstOrNull()?.sun?.x ?: ((bitmap?.width ?: 1) * 0.15f)) / (bitmap?.width ?: 1)).coerceIn(0f, 1f), onSunChange = { position ->
         val width = bitmap?.width ?: 1
         if (extrusions.any { abs(it.sun.x - position * width) > 0.01f }) { pushUndo(); extrusions = extrusions.map { it.copy(sun = Pt(position * width, 0f)) } }
-    }, onAngleChange = { viewerAngle = it }, onEditObject = { viewerEditObject = it }, onClose = { viewerModel = null; viewerEditObject = null; showPictureEdit = false }) }
+    }, onAngleChange = { viewerAngle = it }, onEditObject = { viewerEditObject = it }, onClose = { viewerModel = null; viewerEditObject = null; showPictureEdit = false },
+        format = { formatLength(it, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2) }, stepMm = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble()),
+        onEdit = ::applyViewerEdit, canUndo = undoHistory.size > viewerUndoBase, onUndo = { restoreLastUndo(); open3dView(viewerAngle) }) }
     viewerEditObject?.let { index ->
         val extrusion = viewerExtrusionIds.getOrNull(index)?.let { id -> extrusions.firstOrNull { it.id == id } }
         val name = viewerModel?.objectNames?.getOrNull(index) ?: "Object"
