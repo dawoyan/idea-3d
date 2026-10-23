@@ -53,16 +53,17 @@ import kotlin.math.roundToLong
 internal data class ViewerMeasurement(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val label: String, val color: Int, val z1: Float = 0f, val z2: Float = 0f)
 internal enum class ViewerAngle(val yaw: Float, val pitch: Float, val label: String, val orthographic: Boolean) {
     FRONT(0f, 0f, "Front", true), TOP(0f, 90f, "Top", true), PROFILE(-90f, 0f, "Profile", true), THREE_D(30f, 25f, "3D", false);
-    /** Top and Profile look along a plane that contains Z, so depth can be edited directly there. */
-    val showsDepth get() = this == TOP || this == PROFILE
+    /** Model axis this flat view looks along (0 = X, 1 = Y, 2 = Z); objects extruded along any other axis can be resized here. */
+    val lookAxis: Int? get() = when (this) { FRONT -> 2; TOP -> 1; PROFILE -> 0; THREE_D -> null }
 }
+private val axisNames = listOf("X", "Y", "Z")
 
 /** An editable outline vertex of an object, in model millimeters (z is the front surface). */
 internal data class ViewerHandle(val objectIndex: Int, val x: Float, val y: Float, val z: Float)
 
 internal enum class ViewerEditKind { MOVE, FRONT, BACK, POINTS }
 
-/** A Z edit made by dragging in the Top or Profile view. [handles] index [ViewerMesh.handles] for [ViewerEditKind.POINTS]. */
+/** A depth edit along the object's extrusion axis, made by dragging in a flat view. [handles] index [ViewerMesh.handles] for [ViewerEditKind.POINTS]. */
 internal data class ViewerEdit(val objectIndex: Int, val kind: ViewerEditKind, val deltaMm: Double, val handles: List<Int> = emptyList())
 
 /** Maps model millimeters to the viewer's normalized space. Reused across rebuilds so edits don't make the view jump. */
@@ -87,18 +88,23 @@ internal class ViewerCamera(initial: ViewerAngle) {
 internal class ViewerMesh private constructor(
     val vertices: FloatBuffer, val baseVertices: FloatArray, val normals: FloatBuffer, val colors: FloatBuffer, val baseColors: FloatArray, val count: Int,
     val picturePlane: FloatBuffer, val frontArrow: FloatBuffer, val measurements: List<ViewerMeasurement>, val triangleObjects: IntArray, val objectNames: List<String>,
-    /** Per drawn vertex: true when it belongs to the back surface. */
+    /** Per drawn vertex: true when it belongs to the far surface. */
     val vertexBack: BooleanArray, val handles: List<ViewerHandle>, val frame: ViewerFrame,
-    val objectFront: FloatArray, val objectBack: FloatArray, val objectCenterX: FloatArray, val objectCenterY: FloatArray,
+    /** Extrusion axis of each object (0 = X, 1 = Y, 2 = Z) and its facing and far sides along it. */
+    val objectAxis: IntArray, val objectFront: FloatArray, val objectBack: FloatArray,
+    /** Bounding box of each object, three values per object. */
+    val objectLow: FloatArray, val objectHigh: FloatArray,
     val objectMinThicknessMm: FloatArray, val warnings: List<String>,
 ) {
-    fun frontMm(o: Int) = frame.toMm(objectFront[o], 2).toDouble()
-    fun backMm(o: Int) = frame.toMm(objectBack[o], 2).toDouble()
+    fun frontMm(o: Int) = frame.toMm(objectFront[o], objectAxis[o]).toDouble()
+    fun backMm(o: Int) = frame.toMm(objectBack[o], objectAxis[o]).toDouble()
+    fun center(o: Int) = FloatArray(3) { (objectLow[o * 3 + it] + objectHigh[o * 3 + it]) / 2f }
 
     companion object {
         fun fromStl(
             bytes: ByteArray, triangleColors: List<Int>, measurements: List<ViewerMeasurement> = emptyList(), triangleObjects: IntArray = IntArray(0), objectNames: List<String> = emptyList(),
             vertexBack: BooleanArray = BooleanArray(0), handles: List<ViewerHandle> = emptyList(), minThicknessMm: List<Float> = emptyList(), warnings: List<String> = emptyList(), frame: ViewerFrame? = null,
+            objectAxes: List<Int> = emptyList(),
         ): ViewerMesh {
             val data = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
             require(bytes.size >= 84) { "Invalid 3D model" }
@@ -140,21 +146,20 @@ internal class ViewerMesh private constructor(
             val objects = triangleObjects.takeIf { it.size == count } ?: IntArray(count) { -1 }
             val back = vertexBack.takeIf { it.size == count * 3 }
             val objectCount = objectNames.size
+            val axes = IntArray(objectCount) { objectAxes.getOrNull(it)?.takeIf { axis -> axis in 0..2 } ?: 2 }
             val front = FloatArray(objectCount) { Float.NEGATIVE_INFINITY }; val rear = FloatArray(objectCount) { Float.POSITIVE_INFINITY }
-            val minX = FloatArray(objectCount) { Float.POSITIVE_INFINITY }; val maxX = FloatArray(objectCount) { Float.NEGATIVE_INFINITY }
-            val minY = FloatArray(objectCount) { Float.POSITIVE_INFINITY }; val maxY = FloatArray(objectCount) { Float.NEGATIVE_INFINITY }
+            val lowBox = FloatArray(objectCount * 3) { Float.POSITIVE_INFINITY }; val highBox = FloatArray(objectCount * 3) { Float.NEGATIVE_INFINITY }
             for (v in 0 until count * 3) {
                 val o = objects[v / 3]; if (o !in 0 until objectCount) continue
-                val x = vertices[v * 3]; val y = vertices[v * 3 + 1]; val z = vertices[v * 3 + 2]
-                if (back == null || !back[v]) front[o] = maxOf(front[o], z)
-                if (back == null || back[v]) rear[o] = minOf(rear[o], z)
-                minX[o] = minOf(minX[o], x); maxX[o] = maxOf(maxX[o], x); minY[o] = minOf(minY[o], y); maxY[o] = maxOf(maxY[o], y)
+                val depth = vertices[v * 3 + axes[o]]
+                if (back == null || !back[v]) front[o] = maxOf(front[o], depth)
+                if (back == null || back[v]) rear[o] = minOf(rear[o], depth)
+                repeat(3) { axis -> lowBox[o * 3 + axis] = minOf(lowBox[o * 3 + axis], vertices[v * 3 + axis]); highBox[o * 3 + axis] = maxOf(highBox[o * 3 + axis], vertices[v * 3 + axis]) }
             }
             val normalizedHandles = handles.map { ViewerHandle(it.objectIndex, space.toUnit(it.x, 0), space.toUnit(it.y, 1), space.toUnit(it.z, 2)) }
             return ViewerMesh(
                 buffer(vertices), vertices.copyOf(), buffer(normals), buffer(colors), colors, count * 3, buffer(plane), buffer(arrow), normalizedMeasurements, objects, objectNames,
-                back ?: BooleanArray(count * 3), normalizedHandles, space, front, rear,
-                FloatArray(objectCount) { (minX[it] + maxX[it]) / 2f }, FloatArray(objectCount) { (minY[it] + maxY[it]) / 2f },
+                back ?: BooleanArray(count * 3), normalizedHandles, space, axes, front, rear, lowBox, highBox,
                 FloatArray(objectCount) { minThicknessMm.getOrNull(it) ?: ((front[it] - rear[it]) * space.mmPerUnit) }, warnings,
             )
         }
@@ -254,7 +259,9 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
     private var committed = false
     init { setEGLContextClientVersion(1); setRenderer(modelRenderer); renderMode = RENDERMODE_WHEN_DIRTY }
 
-    private val editable get() = onEdit != null && camera.angle.showsDepth && mesh.objectNames.isNotEmpty()
+    /** An object can be resized in a flat view that doesn't look straight along its extrusion axis. */
+    private fun editable(o: Int) = onEdit != null && camera.angle.lookAxis.let { it != null && it != mesh.objectAxis[o] }
+    private val editing get() = onEdit != null && camera.angle.lookAxis != null && mesh.objectNames.isNotEmpty()
 
     fun reset() { camera.reset(); refresh() }
     fun setAngle(next: ViewerAngle) { camera.look(next); cancelDrag(); refresh() }
@@ -279,10 +286,10 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
         return floatArrayOf((out[0] / out[3] + 1f) * width / 2f, (1f - out[1] / out[3]) * height / 2f, out[2] / out[3])
     }
 
-    /** Screen direction of +Z (unit vector) and how many pixels one normalized unit spans. */
-    private fun zAxisOnScreen(): Triple<Float, Float, Float> {
+    /** Screen direction of a model axis (unit vector) and how many pixels one normalized unit spans. */
+    private fun axisOnScreen(axis: Int): Triple<Float, Float, Float> {
         val combined = viewMatrix(camera, width, height)
-        val a = project(0f, 0f, 0f, combined); val b = project(0f, 0f, 1f, combined)
+        val a = project(0f, 0f, 0f, combined); val b = project(if (axis == 0) 1f else 0f, if (axis == 1) 1f else 0f, if (axis == 2) 1f else 0f, combined)
         val length = hypot(b[0] - a[0], b[1] - a[1]).coerceAtLeast(0.0001f)
         return Triple((b[0] - a[0]) / length, (b[1] - a[1]) / length, length)
     }
@@ -306,17 +313,23 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
         return best?.takeIf { it >= 0 }
     }
 
-    /** Front and back depth handles sit just outside the object along Z so they never cover its points. */
+    /** Center of [o] moved to [depth] along its extrusion axis, on screen. */
+    private fun projectAlong(o: Int, depth: Float): FloatArray {
+        val c = mesh.center(o); c[mesh.objectAxis[o]] = depth
+        return project(c[0], c[1], c[2])
+    }
+
+    /** Facing and far depth handles sit just outside the object along its axis so they never cover its points. */
     private fun faceHandles(o: Int): Pair<FloatArray, FloatArray> {
-        val (ux, uy, _) = zAxisOnScreen()
+        val (ux, uy, _) = axisOnScreen(mesh.objectAxis[o])
         val offset = 26f * density
-        val front = project(mesh.objectCenterX[o], mesh.objectCenterY[o], mesh.objectFront[o])
-        val back = project(mesh.objectCenterX[o], mesh.objectCenterY[o], mesh.objectBack[o])
+        val front = projectAlong(o, mesh.objectFront[o])
+        val back = projectAlong(o, mesh.objectBack[o])
         return floatArrayOf(front[0] + ux * offset, front[1] + uy * offset) to floatArrayOf(back[0] - ux * offset, back[1] - uy * offset)
     }
 
     private fun hitTarget(x: Float, y: Float): DragTarget? {
-        selected?.let { o ->
+        selected?.takeIf(::editable)?.let { o ->
             val reach = 24f * density
             val points = mesh.handles.indices.filter { mesh.handles[it].objectIndex == o }.map { i -> val h = mesh.handles[i]; i to project(h.x, h.y, h.z) }
             points.minByOrNull { hypot(it.second[0] - x, it.second[1] - y) }?.takeIf { hypot(it.second[0] - x, it.second[1] - y) <= reach }?.let { nearest ->
@@ -328,7 +341,7 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
             val toFront = hypot(front[0] - x, front[1] - y); val toBack = hypot(back[0] - x, back[1] - y)
             if (minOf(toFront, toBack) <= reach) return DragTarget(o, if (toFront <= toBack) ViewerEditKind.FRONT else ViewerEditKind.BACK)
         }
-        return pickObject(x, y)?.let { DragTarget(it, ViewerEditKind.MOVE) }
+        return pickObject(x, y)?.takeIf(::editable)?.let { DragTarget(it, ViewerEditKind.MOVE) }
     }
 
     /** Z values (mm) that the dragged part currently has, and what they can snap to. */
@@ -336,12 +349,18 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
         ViewerEditKind.MOVE -> listOf(mesh.frontMm(t.objectIndex), mesh.backMm(t.objectIndex))
         ViewerEditKind.FRONT -> listOf(mesh.frontMm(t.objectIndex))
         ViewerEditKind.BACK -> listOf(mesh.backMm(t.objectIndex))
-        ViewerEditKind.POINTS -> listOf(mesh.frame.toMm(mesh.handles[t.handles.first()].z, 2).toDouble())
+        ViewerEditKind.POINTS -> listOf(handleDepthMm(t.handles.first(), t.objectIndex))
+    }
+
+    private fun handleDepthMm(index: Int, o: Int): Double {
+        val h = mesh.handles[index]; val axis = mesh.objectAxis[o]
+        return mesh.frame.toMm(listOf(h.x, h.y, h.z)[axis], axis).toDouble()
     }
 
     private fun updateDrag(x: Float, y: Float) {
         val t = target ?: return
-        val (ux, uy, pixelsPerUnit) = zAxisOnScreen()
+        val axis = mesh.objectAxis[t.objectIndex]
+        val (ux, uy, pixelsPerUnit) = axisOnScreen(axis)
         val mmPerPixel = mesh.frame.mmPerUnit / pixelsPerUnit
         var delta = ((x - downX) * ux + (y - downY) * uy) * mmPerPixel.toDouble()
         val minThickness = 0.1
@@ -352,9 +371,11 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
         }
         delta = clamp(delta)
         val targets = buildList {
-            add(0.0 to "Z = 0")
+            add(0.0 to "${axisNames[axis]} = 0")
+            // Other objects' extents along the same axis, whichever plane they were drawn in.
             mesh.objectNames.indices.filter { it != t.objectIndex }.forEach { o ->
-                add(mesh.frontMm(o) to "${mesh.objectNames[o]} front"); add(mesh.backMm(o) to "${mesh.objectNames[o]} back")
+                add(mesh.frame.toMm(mesh.objectHigh[o * 3 + axis], axis).toDouble() to "${mesh.objectNames[o]} ${if (axis == 2) "front" else if (axis == 1) "top" else "right side"}")
+                add(mesh.frame.toMm(mesh.objectLow[o * 3 + axis], axis).toDouble() to "${mesh.objectNames[o]} ${if (axis == 2) "back" else if (axis == 1) "bottom" else "left side"}")
             }
         }
         val reach = 10f * density * mmPerPixel
@@ -370,18 +391,19 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
 
     private fun preview(t: DragTarget?, deltaMm: Double) {
         val d = (deltaMm / mesh.frame.mmPerUnit).toFloat()
-        val groups = t?.takeIf { it.kind == ViewerEditKind.POINTS }?.handles?.map { mesh.handles[it] }.orEmpty()
+        val groups = t?.takeIf { it.kind == ViewerEditKind.POINTS }?.handles?.map { mesh.handles[it].let { h -> floatArrayOf(h.x, h.y, h.z) } }.orEmpty()
+        mesh.baseVertices.copyInto(current)
         for (v in 0 until mesh.count) {
-            val i = v * 3 + 2
-            current[i] = mesh.baseVertices[i]
             if (t == null || mesh.triangleObjects[v / 3] != t.objectIndex) continue
+            val axis = mesh.objectAxis[t.objectIndex]
             val affected = when (t.kind) {
                 ViewerEditKind.MOVE -> true
                 ViewerEditKind.FRONT -> !mesh.vertexBack[v]
                 ViewerEditKind.BACK -> mesh.vertexBack[v]
-                ViewerEditKind.POINTS -> groups.any { abs(it.x - current[v * 3]) < 1e-4f && abs(it.y - current[v * 3 + 1]) < 1e-4f }
+                // Same outline point: matches in the two in-plane coordinates.
+                ViewerEditKind.POINTS -> groups.any { h -> (0..2).all { it == axis || abs(h[it] - current[v * 3 + it]) < 1e-4f } }
             }
-            if (affected) current[i] += d
+            if (affected) current[v * 3 + axis] += d
         }
         val snapshot = current.copyOf()
         queueEvent { mesh.vertices.position(0); mesh.vertices.put(snapshot); mesh.vertices.position(0) }
@@ -426,7 +448,7 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x; downY = event.y; moved = false; multiTouch = false
-                target = if (editable) hitTarget(event.x, event.y) else null
+                target = if (editing) hitTarget(event.x, event.y) else null
             }
             MotionEvent.ACTION_POINTER_DOWN -> { multiTouch = true; cancelDrag() }
             MotionEvent.ACTION_UP -> {
@@ -440,7 +462,7 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
                 cancelDrag()
                 if (!moved && !multiTouch) {
                     val hit = pickObject(event.x, event.y)
-                    if (editable) {
+                    if (editing) {
                         if (hit != null && hit == selected) onObjectTap?.invoke(hit)
                         else { select(hit); onSelect?.invoke(hit) }
                     } else hit?.let { onObjectTap?.invoke(it) }
@@ -478,7 +500,7 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
     }
 
     private fun drawOverlay(canvas: Canvas) {
-        if (editable) drawDepthEditing(canvas)
+        if (editing) drawDepthEditing(canvas)
         drawAxes(canvas)
         if (showMeasurements) drawMeasurements(canvas)
     }
@@ -489,10 +511,11 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
         paint.style = Paint.Style.FILL; paint.color = color; canvas.drawText(text, x, y, paint)
     }
 
-    /** Line across the whole view at a Z value, perpendicular to the Z axis on screen. */
-    private fun zLine(canvas: Canvas, zMm: Double, color: Int, dashed: Boolean): FloatArray {
-        val (ux, uy, _) = zAxisOnScreen()
-        val p = project(0f, 0f, mesh.frame.toUnit(zMm.toFloat(), 2))
+    /** Line across the whole view at a value along [axis], perpendicular to that axis on screen. */
+    private fun axisLine(canvas: Canvas, axis: Int, valueMm: Double, color: Int, dashed: Boolean): FloatArray {
+        val (ux, uy, _) = axisOnScreen(axis)
+        val at = mesh.frame.toUnit(valueMm.toFloat(), axis)
+        val p = project(if (axis == 0) at else 0f, if (axis == 1) at else 0f, if (axis == 2) at else 0f)
         val reach = (width + height).toFloat()
         paint.style = Paint.Style.STROKE; paint.strokeWidth = 1.5f * density; paint.color = color
         paint.pathEffect = if (dashed) DashPathEffect(floatArrayOf(8f * density, 6f * density), 0f) else null
@@ -502,27 +525,31 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
     }
 
     private fun drawDepthEditing(canvas: Canvas) {
-        val (ux, uy, _) = zAxisOnScreen()
+        val look = camera.angle.lookAxis ?: return
+        val o = selected?.takeIf(::editable)
+        // The zero line of the selected object's axis, or Z when nothing editable is selected and Z is visible.
+        val axis = o?.let { mesh.objectAxis[it] } ?: 2.takeIf { it != look } ?: return
+        val (ux, uy, _) = axisOnScreen(axis)
         val vertical = abs(uy) > abs(ux)
-        // Z = 0 is the front drawing plane; label it near the screen edge so it never covers the model.
-        val origin = zLine(canvas, 0.0, 0x99607D8B.toInt(), dashed = true)
-        if (vertical) label(canvas, "Z = 0", 8f * density, origin[1] - 5f * density, 0xFF607D8B.toInt(), Paint.Align.LEFT, 11f)
-        else label(canvas, "Z = 0", origin[0] + 6f * density, 18f * density, 0xFF607D8B.toInt(), Paint.Align.LEFT, 11f)
-        val frontText = "front ${if (vertical) "↓" else "←"}"
-        if (vertical) label(canvas, frontText, width - 8f * density, origin[1] + 16f * density, 0xFF1565C0.toInt(), Paint.Align.RIGHT, 11f)
-        else label(canvas, frontText, origin[0] - 6f * density, 18f * density, 0xFF1565C0.toInt(), Paint.Align.RIGHT, 11f)
+        val grey = 0xFF607D8B.toInt(); val accent = 0xFF1565C0.toInt()
+        val origin = axisLine(canvas, axis, 0.0, 0x99607D8B.toInt(), dashed = true)
+        // Labels go near the screen edge so they never cover the model.
+        if (vertical) label(canvas, "${axisNames[axis]} = 0", 8f * density, origin[1] - 5f * density, grey, Paint.Align.LEFT, 11f)
+        else label(canvas, "${axisNames[axis]} = 0", origin[0] + 6f * density, 18f * density, grey, Paint.Align.LEFT, 11f)
+        val positive = if (vertical) (if (uy > 0) "↓" else "↑") else (if (ux > 0) "→" else "←")
+        val positiveText = "${when (axis) { 2 -> "front"; 1 -> "up"; else -> "right" }} $positive"
+        if (vertical) label(canvas, positiveText, width - 8f * density, origin[1] + 16f * density, accent, Paint.Align.RIGHT, 11f)
+        else label(canvas, positiveText, origin[0] - 6f * density, 18f * density, accent, Paint.Align.RIGHT, 11f)
 
-        snapZMm?.let { z -> zLine(canvas, z, 0xFFE65100.toInt(), dashed = true) }
-        val o = selected ?: return
+        snapZMm?.let { value -> axisLine(canvas, axis, value, 0xFFE65100.toInt(), dashed = true) }
+        if (o == null) return
         val t = target
         val d = if (t != null && t.objectIndex == o) (dragDeltaMm / mesh.frame.mmPerUnit).toFloat() else 0f
         val frontShift = if (t?.kind == ViewerEditKind.MOVE || t?.kind == ViewerEditKind.FRONT) d else 0f
         val backShift = if (t?.kind == ViewerEditKind.MOVE || t?.kind == ViewerEditKind.BACK) d else 0f
-        val accent = 0xFF1565C0.toInt()
 
-        // Depth dimension beside the object, parallel to Z.
-        val frontZ = mesh.objectFront[o] + frontShift; val backZ = mesh.objectBack[o] + backShift
-        val f = project(mesh.objectCenterX[o], mesh.objectCenterY[o], frontZ); val b = project(mesh.objectCenterX[o], mesh.objectCenterY[o], backZ)
+        // Handles on stems beside the object, parallel to its axis.
+        val f = projectAlong(o, mesh.objectFront[o] + frontShift); val b = projectAlong(o, mesh.objectBack[o] + backShift)
         val front = floatArrayOf(f[0] + ux * 26f * density, f[1] + uy * 26f * density)
         val back = floatArrayOf(b[0] - ux * 26f * density, b[1] - uy * 26f * density)
         paint.style = Paint.Style.STROKE; paint.strokeWidth = 1.5f * density; paint.color = accent
@@ -530,7 +557,7 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
         fun handle(p: FloatArray) {
             paint.style = Paint.Style.FILL; paint.color = android.graphics.Color.WHITE; canvas.drawCircle(p[0], p[1], 13f * density, paint)
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 2.5f * density; paint.color = accent; canvas.drawCircle(p[0], p[1], 13f * density, paint)
-            // Double arrow along Z: this handle slides only in depth.
+            // Double arrow along the axis: this handle slides only in depth.
             val ax = ux * 7f * density; val ay = uy * 7f * density; val px = -uy * 4f * density; val py = ux * 4f * density
             canvas.drawLine(p[0] - ax, p[1] - ay, p[0] + ax, p[1] + ay, paint)
             canvas.drawLine(p[0] + ax, p[1] + ay, p[0] + ax * 0.4f + px, p[1] + ay * 0.4f + py, paint); canvas.drawLine(p[0] + ax, p[1] + ay, p[0] + ax * 0.4f - px, p[1] + ay * 0.4f - py, paint)
@@ -547,7 +574,8 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
                 t?.kind == ViewerEditKind.POINTS && i in t.handles -> d
                 else -> 0f
             }
-            val p = project(h.x, h.y, h.z + shift)
+            val position = floatArrayOf(h.x, h.y, h.z).also { it[axis] += shift }
+            val p = project(position[0], position[1], position[2])
             if (drawn.any { hypot(it[0] - p[0], it[1] - p[1]) < 3f * density }) return@forEachIndexed
             drawn += p
             val active = t?.kind == ViewerEditKind.POINTS && i in t.handles
@@ -555,16 +583,17 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 2f * density; paint.color = if (active) 0xFFE65100.toInt() else accent; canvas.drawCircle(p[0], p[1], 6f * density, paint)
         }
 
-        // Live value next to the finger while dragging.
+        // Live value at the top while dragging.
         if (t != null && t.objectIndex == o && moved) {
             val dm = dragDeltaMm
             val depth = mesh.frontMm(o) - mesh.backMm(o)
+            val name = axisNames[axis]
             fun signed(v: Double) = (if (v >= 0) "+" else "−") + format(abs(v))
             val text = when (t.kind) {
-                ViewerEditKind.MOVE -> "Z ${signed(dm)} · front ${format(mesh.frontMm(o) + dm)}"
-                ViewerEditKind.FRONT -> "Front ${format(mesh.frontMm(o) + dm)} · depth ${format(depth + dm)}"
-                ViewerEditKind.BACK -> "Back ${format(mesh.backMm(o) + dm)} · depth ${format(depth - dm)}"
-                ViewerEditKind.POINTS -> "${t.handles.size} point${if (t.handles.size == 1) "" else "s"} Z ${format(mesh.frame.toMm(mesh.handles[t.handles.first()].z, 2) + dm)}"
+                ViewerEditKind.MOVE -> "$name ${signed(dm)} · face ${format(mesh.frontMm(o) + dm)}"
+                ViewerEditKind.FRONT -> "Face $name ${format(mesh.frontMm(o) + dm)} · depth ${format(depth + dm)}"
+                ViewerEditKind.BACK -> "Far side $name ${format(mesh.backMm(o) + dm)} · depth ${format(depth - dm)}"
+                ViewerEditKind.POINTS -> "${t.handles.size} point${if (t.handles.size == 1) "" else "s"} $name ${format(handleDepthMm(t.handles.first(), o) + dm)}"
             }
             label(canvas, text, width / 2f, 40f * density + if (vertical) 0f else 16f * density, 0xFF1A2421.toInt(), size = 15f)
             snapLabel?.let { label(canvas, "Snapped to $it", width / 2f, 60f * density + if (vertical) 0f else 16f * density, 0xFFE65100.toInt(), size = 12f) }
@@ -624,6 +653,7 @@ private fun viewMatrix(camera: ViewerCamera, width: Int, height: Int): FloatArra
 internal fun ThreeDViewerDialog(
     mesh: ViewerMesh, initialAngle: ViewerAngle, initialSun: Float, onSunChange: (Float) -> Unit, onAngleChange: (ViewerAngle) -> Unit = {}, onEditObject: (Int) -> Unit = {}, onClose: () -> Unit,
     format: (Double) -> String = { "${(it * 10).roundToLong() / 10.0} mm" }, stepMm: Double = 1.0, onEdit: ((ViewerEdit) -> Unit)? = null, canUndo: Boolean = false, onUndo: () -> Unit = {},
+    onDraw: ((ViewerAngle) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     // Camera and selection outlive a rebuilt model so an edit doesn't reset the view.
@@ -652,6 +682,8 @@ internal fun ThreeDViewerDialog(
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     TextButton(onClick = onClose) { Text("Back") }
                     Text("${angle.label} view", style = MaterialTheme.typography.titleMedium)
+                    // Flat views open the matching drawing plane of the editor.
+                    if (onDraw != null && angle.lookAxis != null) TextButton(onClick = { onDraw(angle) }) { Text("Draw") }
                     Row {
                         if (onEdit != null) TextButton(onClick = onUndo, enabled = canUndo) { Text("Undo") }
                         TextButton(onClick = { view.exportImage() }) { Text("Export") }
@@ -665,13 +697,15 @@ internal fun ThreeDViewerDialog(
                 }
                 val selectedName = selected?.let { mesh.objectNames.getOrNull(it) }
                 val hint = when {
-                    onEdit != null && angle.showsDepth && selectedName != null -> {
+                    onEdit != null && angle.lookAxis != null && selectedName != null -> {
                         val o = selected!!
-                        "$selectedName: front Z ${format(mesh.frontMm(o))}, back Z ${format(mesh.backMm(o))}, depth ${format(mesh.frontMm(o) - mesh.backMm(o))}. Drag the shape to move it in Z, the round handles to change its front or back, the dots to move points. Tap it again for exact values."
+                        val axis = listOf("X", "Y", "Z")[mesh.objectAxis[o]]
+                        if (mesh.objectAxis[o] == angle.lookAxis) "$selectedName is extruded along $axis, straight toward you here. Resize it in another flat view, or tap it again for exact values."
+                        else "$selectedName: $axis ${format(mesh.backMm(o))} to ${format(mesh.frontMm(o))}, depth ${format(mesh.frontMm(o) - mesh.backMm(o))}. Drag the shape to move it along $axis, the round handles to change either side, the dots to move points. Tap it again for exact values."
                     }
-                    onEdit != null && angle.showsDepth -> "${if (angle == ViewerAngle.TOP) "Looking down: X across, front (Z+) at the bottom." else "From the right: Y up, front (Z+) on the left."} Tap a shape to edit its depth, or drag it to move it in Z. Drag empty space to pan, pinch to zoom."
-                    angle.orthographic -> "Drag to pan, pinch to zoom. Tap an object to set its Z position and depth."
-                    else -> "Drag to orbit, two fingers to pan and zoom. Tap an object to set its Z position and depth."
+                    onEdit != null && angle.lookAxis != null -> "${when (angle) { ViewerAngle.TOP -> "Looking down: X across, front (Z+) at the bottom."; ViewerAngle.PROFILE -> "From the right: Y up, front (Z+) on the left."; else -> "From the front: X across, Y up." }} Tap a shape to select it, drag it to move it along its depth. Draw opens this view in the editor."
+                    angle.orthographic -> "Drag to pan, pinch to zoom. Tap an object to set its position and depth."
+                    else -> "Drag to orbit, two fingers to pan and zoom. Tap an object to set its position and depth."
                 }
                 Text(hint, style = MaterialTheme.typography.bodySmall, color = Color(0xFF4D5A57), modifier = Modifier.padding(horizontal = 12.dp))
                 if (mesh.warnings.isNotEmpty()) Text(mesh.warnings.joinToString("\n") + "\nExport stays blocked until this is fixed.", Modifier.fillMaxWidth().padding(top = 4.dp).background(Color(0xFFFFE3E0)).padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = Color(0xFF8A1C12))

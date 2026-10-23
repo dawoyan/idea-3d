@@ -275,3 +275,34 @@ class ExportTest {
         assertNotNull(Regex("z=\"-10\"").find(model))
     }
 }
+
+class PlaneTest {
+    private fun box(plane: ModelPlane) = SolidSpec("Box", listOf(OutlinePoint(0.0, 0.0, 5.0, 10.0), OutlinePoint(20.0, 0.0, 5.0, 10.0), OutlinePoint(20.0, 30.0, 5.0, 10.0), OutlinePoint(0.0, 30.0, 5.0, 10.0)), 0, plane)
+
+    @Test fun planeFramesAreRightHanded() {
+        ModelPlane.entries.forEach { assertEquals(0.0, ((it.right cross it.up) - it.toward).length, 1e-12) }
+    }
+
+    @Test fun topPlaneExtrudesAlongYWithFrontAtTheBottom() {
+        val mesh = MeshBuilder.extrude(box(ModelPlane.TOP))
+        assertTrue(MeshBuilder.validate(mesh).isEmpty())
+        assertTrue(mesh.signedVolume > 0)
+        val (low, high) = mesh.bounds
+        assertEquals(Vec3(0.0, -5.0, -30.0), low); assertEquals(Vec3(20.0, 5.0, 0.0), high)
+    }
+
+    @Test fun profilePlaneExtrudesAlongXWithFrontOnTheLeft() {
+        val mesh = MeshBuilder.extrude(box(ModelPlane.PROFILE))
+        assertTrue(MeshBuilder.validate(mesh).isEmpty())
+        assertEquals(6000.0, mesh.signedVolume, 1e-6)
+        val (low, high) = mesh.bounds
+        assertEquals(Vec3(-5.0, 0.0, -20.0), low); assertEquals(Vec3(5.0, 30.0, 0.0), high)
+    }
+
+    @Test fun solidsFromDifferentPlanesOnlyWarnWhenTheyMayIntersect() {
+        val issues = MeshBuilder.overlapIssues(listOf(box(ModelPlane.FRONT), box(ModelPlane.TOP)))
+        assertEquals(1, issues.size); assertFalse(issues.single().blocking)
+        assertTrue(MeshBuilder.buildAll(listOf(box(ModelPlane.FRONT), box(ModelPlane.TOP))).size == 2)
+    }
+}
+

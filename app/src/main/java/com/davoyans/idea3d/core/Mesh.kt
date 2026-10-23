@@ -5,13 +5,37 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * One vertex of a solid's outline in model millimeters. [z] is the front surface;
- * the solid extends back to z - [thicknessMm].
+ * One vertex of a solid's outline in the millimeter coordinates of its [ModelPlane]:
+ * [x] and [y] lie in the drawing plane and [z] is the surface facing the plane's viewer.
+ * The solid extends away from that viewer to z - [thicknessMm].
  */
 data class OutlinePoint(val x: Double, val y: Double, val z: Double, val thicknessMm: Double)
 
-/** An extruded object to export: its outline, display name and ARGB color. */
-data class SolidSpec(val name: String, val outline: List<OutlinePoint>, val argb: Int)
+/**
+ * A drawing plane and the view that looks at it. Each is a right-handed frame
+ * (right x up = toward the viewer), so mapping a solid into model space keeps it outward-facing.
+ */
+enum class ModelPlane(val label: String, val right: Vec3, val up: Vec3, val toward: Vec3, val normalAxis: Axis) {
+    /** Front view: X right, Y up, extruded along Z. */
+    FRONT("Front", Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0), Axis.Z),
+    /** Top view, looking down: X right, front (+Z) at the bottom, extruded along Y. */
+    TOP("Top", Vec3(1.0, 0.0, 0.0), Vec3(0.0, 0.0, -1.0), Vec3(0.0, 1.0, 0.0), Axis.Y),
+    /** Profile view from the right: front (+Z) on the left, Y up, extruded along X. */
+    PROFILE("Profile", Vec3(0.0, 0.0, -1.0), Vec3(0.0, 1.0, 0.0), Vec3(1.0, 0.0, 0.0), Axis.X);
+
+    fun toModel(x: Double, y: Double, z: Double): Vec3 = right * x + up * y + toward * z
+
+    companion object { fun of(name: String?) = entries.firstOrNull { it.name == name } ?: FRONT }
+}
+
+/** An extruded object to export: its outline in [plane] coordinates, display name and ARGB color. */
+data class SolidSpec(val name: String, val outline: List<OutlinePoint>, val argb: Int, val plane: ModelPlane = ModelPlane.FRONT) {
+    /** Model-space corners of the solid's bounding box. */
+    fun bounds(): Pair<Vec3, Vec3> {
+        val points = outline.flatMap { listOf(plane.toModel(it.x, it.y, it.z), plane.toModel(it.x, it.y, it.z - it.thicknessMm)) }
+        return Vec3(points.minOf { it.x }, points.minOf { it.y }, points.minOf { it.z }) to Vec3(points.maxOf { it.x }, points.maxOf { it.y }, points.maxOf { it.z })
+    }
+}
 
 data class Triangle(val a: Int, val b: Int, val c: Int)
 
@@ -126,11 +150,11 @@ object MeshBuilder {
         val plan = points.map { Vec2(it.x, it.y) }
         val caps = Polygon.triangulate(plan) ?: fail("outline could not be filled")
         val n = points.size
-        val vertices = points.map { Vec3(it.x, it.y, it.z) } + points.map { Vec3(it.x, it.y, it.z - it.thicknessMm) }
+        val vertices = points.map { spec.plane.toModel(it.x, it.y, it.z) } + points.map { spec.plane.toModel(it.x, it.y, it.z - it.thicknessMm) }
         val triangles = mutableListOf<Triangle>()
         caps.forEach { t ->
-            triangles.add(Triangle(t.a, t.b, t.c)) // front faces +Z
-            triangles.add(Triangle(t.c + n, t.b + n, t.a + n)) // back faces -Z
+            triangles.add(Triangle(t.a, t.b, t.c)) // faces the plane's viewer
+            triangles.add(Triangle(t.c + n, t.b + n, t.a + n)) // faces away
         }
         for (i in 0 until n) {
             val j = (i + 1) % n
@@ -159,14 +183,23 @@ object MeshBuilder {
     }
 
     /**
-     * Rejects solids whose outlines overlap in plan while their Z ranges overlap, because
-     * slicers treat intersecting shells unpredictably. Touching faces are allowed.
+     * Rejects solids drawn in the same plane whose outlines overlap while their depth ranges overlap,
+     * because slicers treat intersecting shells unpredictably. Touching faces are allowed. Solids from
+     * different planes are compared by bounding box and only warned about, since the box can overlap
+     * where the solids themselves don't.
      */
     fun overlapIssues(specs: List<SolidSpec>): List<MeshIssue> {
         val issues = mutableListOf<MeshIssue>()
         fun zRange(s: SolidSpec) = s.outline.minOf { it.z - it.thicknessMm } to s.outline.maxOf { it.z }
         for (i in specs.indices) for (j in i + 1 until specs.size) {
             val a = specs[i]; val b = specs[j]
+            if (a.plane != b.plane) {
+                val (al, ah) = a.bounds(); val (bl, bh) = b.bounds()
+                val eps = 1e-6
+                if (al.x < bh.x - eps && bl.x < ah.x - eps && al.y < bh.y - eps && bl.y < ah.y - eps && al.z < bh.z - eps && bl.z < ah.z - eps)
+                    issues.add(MeshIssue(a.name, "may intersect ${b.name}; check in the 3D view and move one apart if they cross", blocking = false))
+                continue
+            }
             val za = zRange(a); val zb = zRange(b)
             if (za.second <= zb.first + 1e-6 || zb.second <= za.first + 1e-6) continue
             val pa = a.outline.map { Vec2(it.x, it.y) }; val pb = b.outline.map { Vec2(it.x, it.y) }

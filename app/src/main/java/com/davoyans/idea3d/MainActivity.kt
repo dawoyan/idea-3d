@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.nativeCanvas
@@ -135,6 +136,7 @@ import com.davoyans.idea3d.core.CalibrationReference
 import com.davoyans.idea3d.core.CalibrationStatus
 import com.davoyans.idea3d.core.LengthUnit
 import com.davoyans.idea3d.core.Mesh
+import com.davoyans.idea3d.core.ModelPlane
 import com.davoyans.idea3d.core.formatLength
 import com.davoyans.idea3d.core.parseLengthMm
 import com.davoyans.idea3d.core.projectedLengthForFixedTrue
@@ -144,6 +146,7 @@ import com.davoyans.idea3d.core.MeshIssue
 import com.davoyans.idea3d.core.ModelExport
 import com.davoyans.idea3d.core.OutlinePoint
 import com.davoyans.idea3d.core.SolidSpec
+import com.davoyans.idea3d.core.Vec3
 
 private enum class Tool { NONE, CALIBRATE, MEASURE, LINES, ADJUST, CROP }
 private enum class LineDrawing { STRAIGHT, BROKEN, CURVE }
@@ -154,16 +157,18 @@ private data class Pt(val x: Float, val y: Float)
 private data class CropFrame(val left: Float, val top: Float, val right: Float, val bottom: Float)
 private data class FeatureSnap(val point: Pt, val found: Boolean)
 private data class ScreenLine(val id: Int, val start: Offset, val end: Offset)
-private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "")
+private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "", val plane: ModelPlane = ModelPlane.FRONT)
 private fun MeasureLine.hasDepth() = abs(startZMm) > 0.000001 || abs(endZMm) > 0.000001
-private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null)
+private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT)
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
 private data class SelectedAlignmentObject(val guideIds: Set<Int>, val lineIds: Set<Int>, val points: List<Pt>)
-private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0)
+private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0, val plane: ModelPlane = ModelPlane.FRONT)
 private enum class JunctionKind { SPLIT_MEASUREMENT, SPLIT_GUIDE, JOIN_MEASUREMENTS, JOIN_GUIDES, JOIN_MEASURE_ENDPOINTS, JOIN_GUIDE_ENDPOINTS, MERGE_SHAPE_GUIDE, CLOSE_GUIDE_PATH, SHAPE_OVERLAP, CUT_SHAPE_LINE }
 private data class JunctionAction(val kind: JunctionKind, val firstId: Int, val secondId: Int, val point: Pt)
 private data class JunctionArm(val lineId: Int, val endpoint: Pt, val color: Color)
-private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList())
+private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList(), val plane: ModelPlane = ModelPlane.FRONT, val stash: Map<ModelPlane, PlaneGeometry> = emptyMap())
+/** Geometry of a drawing plane that is not the one being edited; items keep their [ModelPlane] tag. */
+private data class PlaneGeometry(val lines: List<MeasureLine> = emptyList(), val guides: List<GuideLine> = emptyList(), val extrusions: List<Extrusion> = emptyList())
 private const val BOSCH_COLOR_INDEX = 4
 private val lineColors = listOf(Color(0xFF00E5FF), Color(0xFFFF4FA3), Color(0xFF91FF3D), Color(0xFFFFA726), Color(0xFF1565C0))
 private fun lineColor(index: Int) = lineColors[index.mod(lineColors.size)]
@@ -180,6 +185,15 @@ private enum class ComparisonFigure(val description: String, val sizeMm: Double,
 }
 private data class PictureOptions(val figure: ComparisonFigure? = null, val sum: Boolean = false, val legend: Boolean = false, val guess: Boolean = false, val transparency: Int = 0)
 private data class SavedProject(val id: String, val name: String, val unit: String, val lines: List<MeasureLine>, val guides: List<GuideLine> = emptyList(), val guidesDetected: Boolean = false, val capturedAt: Long, val rotation: Float = 0f, val options: PictureOptions = PictureOptions(), val extrusions: List<Extrusion> = emptyList(), val blankScene: Boolean = false)
+
+/** Words for the depth axis of the plane being edited, so dialogs say Z, Y or X as appropriate. */
+private object DepthWords {
+    var plane by mutableStateOf(ModelPlane.FRONT)
+    val axis get() = plane.normalAxis.label
+    val toward get() = when (plane) { ModelPlane.FRONT -> "Bring front"; ModelPlane.TOP -> "Raise"; ModelPlane.PROFILE -> "Move right" }
+    val away get() = when (plane) { ModelPlane.FRONT -> "Move back"; ModelPlane.TOP -> "Lower"; ModelPlane.PROFILE -> "Move left" }
+    val surface get() = when (plane) { ModelPlane.FRONT -> "the picture surface (Z = 0)"; ModelPlane.TOP -> "Y = 0 (the bottom of the front drawing)"; ModelPlane.PROFILE -> "X = 0 (the left edge of the front drawing)" }
+}
 
 private object MeasurementPrecision {
     val places = mutableStateMapOf("mm" to 0, "cm" to 2, "m" to 2, "in" to 2, "ft" to 2)
@@ -557,6 +571,7 @@ private object ProjectStore {
             put("lengthSource", line.lengthSource.name)
             put("startZMm", line.startZMm); put("endZMm", line.endZMm)
             if (line.axis.isNotEmpty()) put("axis", line.axis)
+            if (line.plane != ModelPlane.FRONT) put("plane", line.plane.name)
             line.pathId?.let { put("pathId", it); put("segmentIndex", line.segmentIndex) }
         }) }
         val guides = JSONArray()
@@ -569,9 +584,10 @@ private object ProjectStore {
             guide.shapeWidthMm?.let { put("shapeWidthMm", it) }; guide.shapeHeightMm?.let { put("shapeHeightMm", it) }
             put("startZMm", guide.startZMm); put("endZMm", guide.endZMm)
             guide.startThicknessMm?.let { put("startThicknessMm", it) }; guide.endThicknessMm?.let { put("endThicknessMm", it) }
+            if (guide.plane != ModelPlane.FRONT) put("plane", guide.plane.name)
         }) }
         val extrusions = JSONArray()
-        project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm) }) }
+        project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
         File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene) }.toString())
     }
     private fun trash(context: Context) = File(directory(context), "trash").apply { mkdirs() }
@@ -642,13 +658,13 @@ private object ProjectStore {
     private fun read(file: File): SavedProject = decode(JSONObject(file.readText()), file.lastModified())
     private fun decode(json: JSONObject, fallbackTime: Long): SavedProject {
         val values = json.getJSONArray("lines")
-        val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key)) } }
+        val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key, ModelPlane.of(line.optString("plane")))) } }
         val guideValues = json.optJSONArray("guides") ?: JSONArray()
-        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(20, 50, 90) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 })) } }
+        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(20, 50, 90) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")))) } }
         val figure = ComparisonFigure.entries.firstOrNull { it.name == json.optString("figure") } ?: if (!json.has("figure") && json.optBoolean("silhouette")) ComparisonFigure.STANDING else null
         val transparency = json.optInt("transparency", 0).takeIf { it in listOf(0, 10, 90, 100) } ?: 0
         val extrusionValues = json.optJSONArray("extrusions") ?: JSONArray()
-        val extrusions = buildList { for (index in 0 until extrusionValues.length()) { val item = extrusionValues.getJSONObject(index); val ids = item.getJSONArray("guides"); add(Extrusion(item.getInt("id"), (0 until ids.length()).map { ids.getInt(it) }, Pt(item.getDouble("ox").toFloat(), item.getDouble("oy").toFloat()), Pt(item.getDouble("hx").toFloat(), item.getDouble("hy").toFloat()), Pt(item.getDouble("vx").toFloat(), item.getDouble("vy").toFloat()), Pt(item.optDouble("sunX", item.getDouble("vx") * 0.3).toFloat(), item.optDouble("sunY", item.getDouble("vy")).toFloat()), item.takeIf { it.has("depthMm") }?.optDouble("depthMm")?.takeIf { it.isFinite() && it >= 0 }, item.optDouble("positionZMm", 0.0).takeIf { it.isFinite() } ?: 0.0)) } }
+        val extrusions = buildList { for (index in 0 until extrusionValues.length()) { val item = extrusionValues.getJSONObject(index); val ids = item.getJSONArray("guides"); add(Extrusion(item.getInt("id"), (0 until ids.length()).map { ids.getInt(it) }, Pt(item.getDouble("ox").toFloat(), item.getDouble("oy").toFloat()), Pt(item.getDouble("hx").toFloat(), item.getDouble("hy").toFloat()), Pt(item.getDouble("vx").toFloat(), item.getDouble("vy").toFloat()), Pt(item.optDouble("sunX", item.getDouble("vx") * 0.3).toFloat(), item.optDouble("sunY", item.getDouble("vy")).toFloat()), item.takeIf { it.has("depthMm") }?.optDouble("depthMm")?.takeIf { it.isFinite() && it >= 0 }, item.optDouble("positionZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, ModelPlane.of(item.optString("plane")))) } }
         return SavedProject(json.getString("id"), json.getString("name"), json.optString("unit", "mm"), lines, guides, json.optBoolean("guidesDetected", false), json.optLong("capturedAt", fallbackTime), json.optDouble("rotation", 0.0).toFloat(), PictureOptions(figure, json.optBoolean("sum"), json.optBoolean("legend"), json.optBoolean("guess"), transparency), extrusions, json.optBoolean("blankScene", false))
     }
 }
@@ -767,7 +783,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var showPointDepth by remember { mutableStateOf(false) }
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
     val snackbarHost = remember { SnackbarHostState() }
-    var viewerExtrusionIds by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var viewerObjects by remember { mutableStateOf<List<Pair<ModelPlane, Int>>>(emptyList()) }
     var viewerHandlePoints by remember { mutableStateOf<List<Pt>>(emptyList()) }
     var viewerUndoBase by remember { mutableIntStateOf(0) }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
@@ -781,9 +797,25 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var showCanvasSize by remember { mutableStateOf(false) }
     var activeCropEdge by remember { mutableStateOf<CropEdge?>(null) }
     var cropSession by remember { mutableStateOf<UndoSnapshot?>(null) }
+    // The editor works on one drawing plane at a time; the others wait in planeStash with their plane tag.
+    var editPlane by remember { mutableStateOf(ModelPlane.FRONT) }
+    var planeStash by remember { mutableStateOf(emptyMap<ModelPlane, PlaneGeometry>()) }
+    SideEffect { DepthWords.plane = editPlane }
+    fun planeGeometry(plane: ModelPlane) = if (plane == editPlane) PlaneGeometry(lines.map { it.copy(plane = plane) }, guides.map { it.copy(plane = plane) }, extrusions.map { it.copy(plane = plane) }) else planeStash[plane] ?: PlaneGeometry()
+    fun allLines() = ModelPlane.entries.flatMap { planeGeometry(it).lines }
+    fun allGuides() = ModelPlane.entries.flatMap { planeGeometry(it).guides }
+    fun allExtrusions() = ModelPlane.entries.flatMap { planeGeometry(it).extrusions }
+    // Only the photo can be calibrated, so Top and Profile reuse the front references; their pixels are uniform.
+    fun scaleLines(input: List<MeasureLine>) = if (editPlane == ModelPlane.FRONT) input else input + planeGeometry(ModelPlane.FRONT).lines.filter { it.isReference }
+    fun frontAxes() = if (blankScene) null else axisScaleOf(planeGeometry(ModelPlane.FRONT).lines, unit)
+    // Top and Profile have no photo; they draw on a blank canvas of the same size.
+    val planeCanvas = remember(bitmap, editPlane == ModelPlane.FRONT || blankScene) {
+        bitmap?.let { image -> if (editPlane == ModelPlane.FRONT || blankScene) image else Bitmap.createBitmap(image.width, image.height, Bitmap.Config.RGB_565).apply { eraseColor(AndroidColor.WHITE) } }
+    }
+    var ghosts by remember { mutableStateOf<List<Pair<Int, FloatArray>>>(emptyList()) }
     fun recalculate(input: List<MeasureLine>): List<MeasureLine> {
-        val nextScale = if (blankScene) unitFactorMm(unit) else recomputeScale(input, unit)
-        val nextAxes = if (blankScene) null else axisScaleOf(input, unit)
+        val nextScale = if (blankScene) unitFactorMm(unit) else recomputeScale(scaleLines(input), unit)
+        val nextAxes = if (blankScene || editPlane != ModelPlane.FRONT) null else axisScaleOf(input, unit)
         scale = nextScale
         axisScale = nextAxes
         return input.map { line ->
@@ -796,7 +828,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
     }
     fun pushUndo(includeImage: Boolean = false) {
-        val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions)
+        val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash)
         undoHistory = undoHistory + snapshot
     }
     fun changePictureUnit(nextUnit: String) {
@@ -890,7 +922,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             bitmap = BitmapFactory.decodeFile(destination.absolutePath)
             projectId = id; projectName = imageDisplayName(context, uri).ifBlank { "Picture ${library.size + 1}" }
             projectCapturedAt = imageCaptureTime(destination)
-            unit = defaultUnit; lines = emptyList(); guides = emptyList(); guidesDetected = false; extrusions = emptyList(); selectedExtrusionId = null; scale = null; referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
+            unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); lines = emptyList(); guides = emptyList(); guidesDetected = false; extrusions = emptyList(); selectedExtrusionId = null; scale = null; referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
             tool = Tool.NONE; zoom = 1f; pan = Offset.Zero; levelRotation = 0f; undoHistory = emptyList(); selectedLineId = null; selectedEndpoint = null
             ProjectStore.save(context, SavedProject(id, imageDisplayName(context, uri).ifBlank { "Picture ${library.size + 1}" }, unit, emptyList(), emptyList(), false, projectCapturedAt, levelRotation))
             library = ProjectStore.list(context)
@@ -900,7 +932,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val image = Bitmap.createBitmap(2000, 2000, Bitmap.Config.ARGB_8888).apply { eraseColor(AndroidColor.WHITE) }
         ProjectStore.imageFile(context, id).outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
         blankScene = true; bitmap = image; projectId = id; projectName = "Scene ${library.count { it.blankScene } + 1}"; projectCapturedAt = System.currentTimeMillis()
-        unit = defaultUnit; lines = emptyList(); guides = emptyList(); guidesDetected = true; extrusions = emptyList(); selectedExtrusionId = null
+        unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); lines = emptyList(); guides = emptyList(); guidesDetected = true; extrusions = emptyList(); selectedExtrusionId = null
         scale = unitFactorMm(unit); referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
         tool = Tool.NONE; zoom = 1f; pan = Offset.Zero; levelRotation = 0f; undoHistory = emptyList(); selectedLineId = null; selectedEndpoint = null; selectedVertices = emptyList()
         selectedGuideId = null; selectedGuideEndpoint = null; selectedWholeGuideId = null; selectedWholeLineId = null; selectedCurveId = null; selectedLabelId = null
@@ -941,7 +973,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     LaunchedEffect(sharedImage) { sharedImage?.let { importPicture(it); onSharedImageConsumed() } }
     LaunchedEffect(tool, projectId, guidesDetected) {
         val image = bitmap
-        if (tool == Tool.LINES && image != null && !guidesDetected && !guideDetectionRunning) {
+        if (tool == Tool.LINES && editPlane == ModelPlane.FRONT && image != null && !guidesDetected && !guideDetectionRunning) {
             guideDetectionRunning = true
             val detected = withContext(Dispatchers.Default) { detectStrongGuideLines(image) }
             pushUndo()
@@ -953,9 +985,31 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     LaunchedEffect(projectId, scale, unit) {
         if (projectId != null && scale != null) extrusions = extrusions.map { extrusion -> extrusion.depthMm?.let { extrusionWithDepth(extrusion, it, scale, unit) } ?: extrusion }
     }
-    LaunchedEffect(projectId, projectName, lines, guides, guidesDetected, unit, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene) {
+    LaunchedEffect(projectId, projectName, lines, guides, guidesDetected, unit, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene, editPlane, planeStash) {
         if (blankScene) scale = unitFactorMm(unit)
-        projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, lines, guides, guidesDetected, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, guides, lines) }; library = ProjectStore.list(context) }
+        val front = planeGeometry(ModelPlane.FRONT)
+        projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, allLines(), allGuides(), guidesDetected, projectCapturedAt, levelRotation, pictureOptions, allExtrusions(), blankScene)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, front.guides, front.lines) }; library = ProjectStore.list(context) }
+    }
+    // Objects from the other planes, flattened into this plane's canvas so new shapes can be lined up with them.
+    LaunchedEffect(projectId, editPlane, planeStash, scale, unit, bitmap) {
+        val image = bitmap ?: return@LaunchedEffect
+        val others = ModelPlane.entries.filter { it != editPlane }.map { planeGeometry(it) }
+        val plane = editPlane; val pixels = scale; val axes = frontAxes(); val modelUnit = unit
+        ghosts = withContext(Dispatchers.Default) { runCatching {
+            val mapping = planeMapping(plane, image.width, image.height, pixels, modelUnit, axes) ?: return@runCatching emptyList()
+            buildSolidSpecs(others.flatMap { it.guides }, others.flatMap { it.extrusions }, pixels, modelUnit, image.width, image.height, axes, strict = false).mapNotNull { spec -> runCatching { MeshBuilder.extrude(spec) }.getOrNull() }.map { mesh ->
+                val triangles = ArrayList<Float>()
+                mesh.triangles.forEach { t ->
+                    val a = mapping.pixel(mesh.vertices[t.a]); var b = mapping.pixel(mesh.vertices[t.b]); var c = mapping.pixel(mesh.vertices[t.c])
+                    val area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+                    if (abs(area) < 0.01f) return@forEach
+                    // One winding for every triangle, so the filled union has no holes where faces overlap.
+                    if (area < 0) { val swap = b; b = c; c = swap }
+                    triangles.addAll(listOf(a.x, a.y, b.x, b.y, c.x, c.y))
+                }
+                mesh.argb to triangles.toFloatArray()
+            }
+        }.getOrDefault(emptyList()) }
     }
     fun handleTap(point: Pt, hitRadius: Double) {
         when (tool) {
@@ -1418,8 +1472,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     }
                 } else emptyList()
                 lines = lines.filterNot { it.id in removedIds }.map { replacements[it.id] ?: it } + joined + remaining
-                scale = if (blankScene) unitFactorMm(unit) else recomputeScale(lines, unit)
-                axisScale = if (blankScene) null else axisScaleOf(lines, unit)
+                scale = if (blankScene) unitFactorMm(unit) else recomputeScale(scaleLines(lines), unit)
+                axisScale = if (blankScene || editPlane != ModelPlane.FRONT) null else axisScaleOf(lines, unit)
             }
             JunctionKind.JOIN_GUIDES -> {
                 val originals = listOfNotNull(guides.firstOrNull { it.id == action.firstId }, guides.firstOrNull { it.id == action.secondId })
@@ -1845,27 +1899,49 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         ?: selectedGuideEndpoint?.let { endpoint -> guides.firstOrNull { it.id == endpoint.guideId }?.let { if (endpoint.isStart) it.start else it.end } }
         ?: selectedCurveId?.let { id -> guides.firstOrNull { it.id == id }?.curveMid }
 
+    /** Puts the current plane's geometry aside and edits [next]; nothing is lost and undo still covers both. */
+    fun switchPlane(next: ModelPlane) {
+        if (next == editPlane) return
+        val stash = planeStash.toMutableMap()
+        stash[editPlane] = planeGeometry(editPlane)
+        val loaded = stash.remove(next) ?: PlaneGeometry()
+        planeStash = stash.filterValues { it != PlaneGeometry() }; editPlane = next
+        guides = loaded.guides; extrusions = loaded.extrusions; lines = recalculate(loaded.lines)
+        referenceCount = lines.count { it.isReference }
+        selectedExtrusionId = null; selectedCurveId = null; selectedVertices = emptyList(); selectedLineId = null; selectedEndpoint = null; selectedGuideId = null; selectedGuideEndpoint = null
+        selectedWholeGuideId = null; selectedWholeLineId = null; selectedLabelId = null; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null
+        if (tool == Tool.CALIBRATE || tool == Tool.CROP) tool = Tool.NONE
+        zoom = 1f; pan = Offset.Zero
+    }
+
     fun restoreLastUndo() {
         val previous = undoHistory.lastOrNull() ?: return
         previous.image?.let { restored ->
             bitmap = restored
             projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { restored.compress(Bitmap.CompressFormat.PNG, 100, it) } }
         }
+        editPlane = previous.plane; planeStash = previous.stash
         lines = recalculate(previous.lines).map { line -> previous.lines.firstOrNull { it.id == line.id && (it.lengthSource == LengthSource.MANUAL || it.lengthSource == LengthSource.MEASURED) }?.let { line.copy(value = it.value) } ?: line }; guides = previous.guides; guidesDetected = previous.guidesDetected; extrusions = previous.extrusions; selectedExtrusionId = selectedExtrusionId?.takeIf { id -> extrusions.any { it.id == id } }; levelRotation = previous.rotation; unit = previous.unit; tool = previous.tool; referenceCount = lines.count { it.isReference }
         undoHistory = undoHistory.dropLast(1)
     }
 
-    /** Builds the viewer model. An open viewer keeps its frame so edits don't move the camera; [revertOnFailure] undoes an edit the model can't show. */
+    /** Replaces one plane's guides and objects, whether it is the plane being edited or a stashed one. */
+    fun setPlaneShapes(plane: ModelPlane, nextGuides: List<GuideLine>, nextExtrusions: List<Extrusion>) {
+        if (plane == editPlane) { guides = nextGuides; extrusions = nextExtrusions }
+        else planeStash = planeStash + (plane to (planeStash[plane] ?: PlaneGeometry()).copy(guides = nextGuides.map { it.copy(plane = plane) }, extrusions = nextExtrusions.map { it.copy(plane = plane) }))
+    }
+
+    /** Builds the viewer model from every plane. An open viewer keeps its frame so edits don't move the camera; [revertOnFailure] undoes an edit the model can't show. */
     fun open3dView(angle: ViewerAngle, revertOnFailure: Boolean = false) {
-        val guideSnapshot = guides.toList(); val extrusionSnapshot = extrusions.toList(); val modelScale = scale; val modelAxes = axisScale; val modelUnit = unit; val measurementSnapshot = lines.filterNot { it.isReference }; val openedProject = projectId
+        val guideSnapshot = allGuides(); val extrusionSnapshot = allExtrusions(); val modelScale = scale; val modelAxes = frontAxes(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
+        val width = bitmap?.width ?: 1; val height = bitmap?.height ?: 1
         val frame = viewerModel?.frame
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching {
                 val colors = mutableListOf<Int>()
-                val origin = DoubleArray(2)
-                val extrusionIds = mutableListOf<Int>()
-                val specs = buildSolidSpecs(guideSnapshot, extrusionSnapshot, modelScale, modelUnit, origin, modelAxes, extrusionIds)
-                // The viewer shows intersecting objects (with a warning) so they can be moved apart in Top or Profile; export still refuses them.
+                val objects = mutableListOf<Extrusion>()
+                val specs = buildSolidSpecs(guideSnapshot, extrusionSnapshot, modelScale, modelUnit, width, height, modelAxes, objects)
+                // The viewer shows intersecting objects (with a warning) so they can be moved apart; export still refuses them.
                 val issues = mutableListOf<MeshIssue>()
                 val meshes = specs.mapNotNull { spec -> try { MeshBuilder.extrude(spec).also { issues += MeshBuilder.validate(it) } } catch (e: MeshException) { issues += e.issues; null } }
                 if (issues.any { it.blocking }) throw MeshException(issues)
@@ -1873,28 +1949,28 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
                 val stl = ModelExport.stl(meshes)
                 val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { index } }.toIntArray()
-                // Extruded meshes list front vertices first, then the matching back vertices.
+                // Extruded meshes list the viewer-facing vertices first, then the matching far ones.
                 val vertexBack = meshes.flatMap { mesh -> val n = mesh.vertices.size / 2; mesh.triangles.flatMap { t -> listOf(t.a >= n, t.b >= n, t.c >= n) } }.toBooleanArray()
-                val factorX = unitFactorMm(modelUnit) / (modelAxes?.first ?: modelScale!!)
-                val factorY = unitFactorMm(modelUnit) / (modelAxes?.second ?: modelScale!!)
+                fun mapping(plane: ModelPlane) = planeMapping(plane, width, height, modelScale, modelUnit, modelAxes)!!
                 val handlePoints = mutableListOf<Pt>()
-                val handles = extrusionIds.flatMapIndexed { index, id ->
-                    val extrusion = extrusionSnapshot.first { it.id == id }
-                    val edges = extrusionGuides(extrusion, guideSnapshot)
+                val handles = objects.flatMapIndexed { index, extrusion ->
+                    val edges = extrusionGuides(extrusion, guideSnapshot.filter { it.plane == extrusion.plane })
                     val points = mutableListOf<Pair<Pt, Double>>()
                     edges.forEach { edge -> listOf(edge.start to edge.startZMm, edge.end to edge.endZMm).forEach { (p, z) -> if (points.none { distance(it.first, p) < 0.5 }) points += p to z } }
-                    points.map { (p, z) -> handlePoints += p; ViewerHandle(index, ((p.x - origin[0]) * factorX).toFloat(), ((origin[1] - p.y) * factorY).toFloat(), (extrusion.positionZMm + z).toFloat()) }
+                    points.map { (p, z) -> handlePoints += p; val v = mapping(extrusion.plane).model(p, facePositionMm(extrusion) + z); ViewerHandle(index, v.x.toFloat(), v.y.toFloat(), v.z.toFloat()) }
                 }
                 val measurements = measurementSnapshot.map { line ->
                     val value = if (line.lengthSource == LengthSource.UNKNOWN) "?" else "${formatMeasure(line.value, modelUnit)}${if (line.hasDepth()) "*" else ""} $modelUnit"
-                    ViewerMeasurement(((line.start.x - origin[0]) * factorX).toFloat(), ((origin[1] - line.start.y) * factorY).toFloat(), ((line.end.x - origin[0]) * factorX).toFloat(), ((origin[1] - line.end.y) * factorY).toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), line.startZMm.toFloat(), line.endZMm.toFloat())
+                    val a = mapping(line.plane).model(line.start, line.startZMm); val b = mapping(line.plane).model(line.end, line.endZMm)
+                    ViewerMeasurement(a.x.toFloat(), a.y.toFloat(), b.x.toFloat(), b.y.toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), a.z.toFloat(), b.z.toFloat())
                 }
-                Triple(ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, vertexBack, handles, specs.map { spec -> spec.outline.minOf { it.thicknessMm }.toFloat() }, warnings, frame), extrusionIds.toList(), handlePoints.toList())
+                val mesh = ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, vertexBack, handles, specs.map { spec -> spec.outline.minOf { it.thicknessMm }.toFloat() }, warnings, frame, specs.map { it.plane.normalAxis.ordinal })
+                Triple(mesh, objects.map { it.plane to it.id }, handlePoints.toList())
             } }
             if (projectId != openedProject) return@launch
             result.onSuccess { (mesh, ids, points) ->
                 if (viewerModel == null) viewerUndoBase = undoHistory.size
-                viewerAngle = angle; viewerModel = mesh; viewerExtrusionIds = ids; viewerHandlePoints = points
+                viewerAngle = angle; viewerModel = mesh; viewerObjects = ids; viewerHandlePoints = points
             }.onFailure { error ->
                 if (revertOnFailure && undoHistory.size > viewerUndoBase) {
                     restoreLastUndo()
@@ -1905,26 +1981,32 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
     }
 
-    /** Applies a drag from the Top or Profile view to the model, as one undo step. */
+    /** Applies a drag from a flat viewer view along an object's depth axis, as one undo step. */
     fun applyViewerEdit(edit: ViewerEdit) {
-        val extrusion = viewerExtrusionIds.getOrNull(edit.objectIndex)?.let { id -> extrusions.firstOrNull { it.id == id } }
+        val (plane, id) = viewerObjects.getOrNull(edit.objectIndex) ?: run { open3dView(viewerAngle); return }
+        val geometry = planeGeometry(plane)
+        val extrusion = geometry.extrusions.firstOrNull { it.id == id }
         val depth = extrusion?.depthMm
         if (extrusion == null || depth == null) { open3dView(viewerAngle); return }
         val d = edit.deltaMm
-        val edgeIds = extrusionGuides(extrusion, guides).map { it.id }.toSet()
+        val face = facePositionMm(extrusion)
+        val edgeIds = extrusionGuides(extrusion, geometry.guides).map { it.id }.toSet()
         pushUndo()
-        // Front moves with Z position; back = front - thickness, so a back-only change is a thickness change.
-        fun thicker(by: Double) { guides = guides.map { g -> if (g.id !in edgeIds) g else g.copy(startThicknessMm = g.startThicknessMm?.plus(by), endThicknessMm = g.endThicknessMm?.plus(by)) } }
-        when (edit.kind) {
-            ViewerEditKind.MOVE -> extrusions = extrusions.map { if (it.id == extrusion.id) it.copy(positionZMm = it.positionZMm + d) else it }
-            ViewerEditKind.FRONT -> { extrusions = extrusions.map { if (it.id == extrusion.id) extrusionWithDepth(it, depth + d, scale, unit).copy(positionZMm = it.positionZMm + d) else it }; thicker(d) }
-            ViewerEditKind.BACK -> { extrusions = extrusions.map { if (it.id == extrusion.id) extrusionWithDepth(it, depth - d, scale, unit) else it }; thicker(-d) }
+        var nextGuides = geometry.guides
+        // The far side is the facing surface minus thickness, so changing only one side changes thickness.
+        fun thicker(by: Double) { nextGuides = nextGuides.map { g -> if (g.id !in edgeIds) g else g.copy(startThicknessMm = g.startThicknessMm?.plus(by), endThicknessMm = g.endThicknessMm?.plus(by)) } }
+        val next = when (edit.kind) {
+            ViewerEditKind.MOVE -> extrusion.copy(positionZMm = extrusion.positionZMm + d)
+            ViewerEditKind.FRONT -> { thicker(d); withFacePosition(extrusionWithDepth(extrusion, depth + d, scale, unit), face + d, depth + d) }
+            ViewerEditKind.BACK -> { thicker(-d); withFacePosition(extrusionWithDepth(extrusion, depth - d, scale, unit), face, depth - d) }
             ViewerEditKind.POINTS -> {
                 val points = edit.handles.mapNotNull { viewerHandlePoints.getOrNull(it) }
                 fun near(p: Pt) = points.any { distance(it, p) < 0.5 }
-                guides = guides.map { g -> if (g.id !in edgeIds) g else g.copy(startZMm = if (near(g.start)) g.startZMm + d else g.startZMm, endZMm = if (near(g.end)) g.endZMm + d else g.endZMm) }
+                nextGuides = nextGuides.map { g -> if (g.id !in edgeIds) g else g.copy(startZMm = if (near(g.start)) g.startZMm + d else g.startZMm, endZMm = if (near(g.end)) g.endZMm + d else g.endZMm) }
+                extrusion
             }
         }
+        setPlaneShapes(plane, nextGuides, geometry.extrusions.map { if (it.id == id) next else it })
         open3dView(viewerAngle, revertOnFailure = true)
     }
 
@@ -1942,8 +2024,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = bitmap!!, lines = lines, guides = guides, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
-                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = levelRotation, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = ghosts, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
+                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan },
                 onDoubleTap = { setPresentation(false) }, doubleTapEnabled = true,
                 onJunction = { junctionAction = it }, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
@@ -2021,7 +2103,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 if (tool != Tool.ADJUST) IconButton(onClick = { guideLengthEditId = id }, modifier = Modifier.size(36.dp)) { Icon(painterResource(R.drawable.ic_measure_straight), contentDescription = "Set line length") }
                 Button(onClick = { deleteGuide(id) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E)), contentPadding = PaddingValues(horizontal = 10.dp)) { Text("Delete", fontSize = 12.sp) }
             }
-            if (selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) IconButton(onClick = {
+            if (editPlane == ModelPlane.FRONT && selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) IconButton(onClick = {
                 bitmap?.let { image -> cropSession = UndoSnapshot(image.copy(Bitmap.Config.ARGB_8888, true), lines, guides, guidesDetected, levelRotation, unit, tool, extrusions); cropFrame = CropFrame(0f, 0f, image.width.toFloat(), image.height.toFloat()); tool = Tool.CROP; draftStart = null; pendingEnd = null }
             }) { Icon(painterResource(R.drawable.ic_crop), contentDescription = "Crop picture") }
             if (tool != Tool.ADJUST && selectedVertices.isEmpty()) Box {
@@ -2037,7 +2119,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, onTool = { panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
+        else if (bitmap != null) BottomControls(editPlane == ModelPlane.FRONT, tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, onTool = { panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
     ) { padding ->
         if (bitmap == null) LibraryScreen(Modifier.padding(padding), library, { picker.launch("image/*") }, ::newScene, { projectPicker.launch(arrayOf("application/zip", "application/octet-stream")) }, { showSettings = true }, { project -> renameTarget = project }, { project ->
             projectExportId = project.id
@@ -2050,7 +2132,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }, { project ->
             BitmapFactory.decodeFile(ProjectStore.imageFile(context, project.id).absolutePath)?.let { loaded ->
-                blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; lines = project.lines; guides = project.guides; guidesDetected = project.guidesDetected; extrusions = project.extrusions; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference }; scale = if (project.blankScene) unitFactorMm(project.unit) else recomputeScale(project.lines, project.unit); axisScale = if (project.blankScene) null else axisScaleOf(project.lines, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
+                blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; editPlane = ModelPlane.FRONT
+                planeStash = ModelPlane.entries.filter { it != ModelPlane.FRONT }.associateWith { plane -> PlaneGeometry(project.lines.filter { it.plane == plane }, project.guides.filter { it.plane == plane }, project.extrusions.filter { it.plane == plane }) }.filterValues { it != PlaneGeometry() }
+                lines = project.lines.filter { it.plane == ModelPlane.FRONT }; guides = project.guides.filter { it.plane == ModelPlane.FRONT }; guidesDetected = project.guidesDetected; extrusions = project.extrusions.filter { it.plane == ModelPlane.FRONT }; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference && it.plane == ModelPlane.FRONT }; scale = if (project.blankScene) unitFactorMm(project.unit) else recomputeScale(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit); axisScale = if (project.blankScene) null else axisScaleOf(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
             }
         }, { project ->
             ProjectStore.moveToTrash(context, project.id); library = ProjectStore.list(context)
@@ -2062,12 +2146,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         })
         else Column(Modifier.padding(padding).fillMaxSize()) {
             StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, onMeasurements = { showMeasurements = true })
-            if (!blankScene) CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
+            PlaneSwitcher(editPlane, onPlane = ::switchPlane)
+            if (!blankScene && editPlane == ModelPlane.FRONT) CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = bitmap!!, lines = lines, guides = guides, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
-                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = levelRotation, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = ghosts, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
+                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan }, onDoubleTap = { }, doubleTapEnabled = false,
                 onJunction = { junctionAction = it }, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
                 selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null), onNudge = ::nudgeSelected
@@ -2330,12 +2415,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); Toast.makeText(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onExport3d = {
-        val exportGuidesSnapshot = guides.toList(); val exportExtrusionsSnapshot = extrusions.toList()
-        val exportScale = scale; val exportUnit = unit; val exportAxes = axisScale
+        val exportGuidesSnapshot = allGuides(); val exportExtrusionsSnapshot = allExtrusions()
+        val exportScale = scale; val exportUnit = unit; val exportAxes = frontAxes(); val exportWidth = bitmap?.width ?: 1; val exportHeight = bitmap?.height ?: 1
         modelReport = ModelReport.Checking
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching {
-                val meshes = buildMeshes(exportGuidesSnapshot, exportExtrusionsSnapshot, exportScale, exportUnit, axisScale = exportAxes)
+                val meshes = buildMeshes(exportGuidesSnapshot, exportExtrusionsSnapshot, exportScale, exportUnit, exportWidth, exportHeight, exportAxes)
                 File(context.cacheDir, "pending-3d-export.stl").writeBytes(ModelExport.stl(meshes))
                 File(context.cacheDir, "pending-3d-export.3mf").writeBytes(ModelExport.threeMf(meshes))
                 meshes
@@ -2364,19 +2449,23 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (extrusions.any { abs(it.sun.x - position * width) > 0.01f }) { pushUndo(); extrusions = extrusions.map { it.copy(sun = Pt(position * width, 0f)) } }
     }, onAngleChange = { viewerAngle = it }, onEditObject = { viewerEditObject = it }, onClose = { viewerModel = null; viewerEditObject = null; showPictureEdit = false },
         format = { formatLength(it, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2) }, stepMm = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble()),
-        onEdit = ::applyViewerEdit, canUndo = undoHistory.size > viewerUndoBase, onUndo = { restoreLastUndo(); open3dView(viewerAngle) }) }
+        onEdit = ::applyViewerEdit, canUndo = undoHistory.size > viewerUndoBase, onUndo = { restoreLastUndo(); open3dView(viewerAngle) },
+        onDraw = { angle -> viewerModel = null; viewerEditObject = null; switchPlane(when (angle) { ViewerAngle.TOP -> ModelPlane.TOP; ViewerAngle.PROFILE -> ModelPlane.PROFILE; else -> ModelPlane.FRONT }); if (tool == Tool.NONE) tool = Tool.LINES }) }
     viewerEditObject?.let { index ->
-        val extrusion = viewerExtrusionIds.getOrNull(index)?.let { id -> extrusions.firstOrNull { it.id == id } }
+        val target = viewerObjects.getOrNull(index)
+        val geometry = target?.let { planeGeometry(it.first) }
+        val extrusion = geometry?.extrusions?.firstOrNull { it.id == target.second }
         val name = viewerModel?.objectNames?.getOrNull(index) ?: "Object"
-        if (extrusion == null) viewerEditObject = null
-        else ObjectDepthDialog(name, extrusion.positionZMm, extrusion.depthMm, unit, onDismiss = { viewerEditObject = null }, onRemove3d = {
+        if (target == null || geometry == null || extrusion == null) viewerEditObject = null
+        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, onDismiss = { viewerEditObject = null }, onRemove3d = {
             pushUndo()
-            extrusions = extrusions.filterNot { it.id == extrusion.id }
+            setPlaneShapes(target.first, geometry.guides, geometry.extrusions.filterNot { it.id == extrusion.id })
             viewerEditObject = null
-            if (extrusions.isEmpty()) viewerModel = null else open3dView(viewerAngle)
-        }) { zMm, depthMm ->
+            if (allExtrusions().isEmpty()) viewerModel = null else open3dView(viewerAngle)
+        }) { faceMm, depthMm ->
             pushUndo()
-            extrusions = extrusions.map { if (it.id == extrusion.id) (if (depthMm != null) extrusionWithDepth(it, depthMm, scale, unit) else it).copy(positionZMm = zMm) else it }
+            val resized = if (depthMm != null) extrusionWithDepth(extrusion, depthMm, scale, unit) else extrusion
+            setPlaneShapes(target.first, geometry.guides, geometry.extrusions.map { if (it.id == extrusion.id) withFacePosition(resized, faceMm, resized.depthMm ?: 0.0) else it })
             viewerEditObject = null
             open3dView(viewerAngle)
         }
@@ -2587,7 +2676,13 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
 }
 
 /** Sets an object's front-face Z (positive toward the viewer) and, only when edited, its depth. */
-@Composable private fun ObjectDepthDialog(name: String, zMm: Double, depthMm: Double?, unit: String, onDismiss: () -> Unit, onRemove3d: () -> Unit, onSave: (Double, Double?) -> Unit) {
+@Composable private fun ObjectDepthDialog(name: String, plane: ModelPlane, zMm: Double, depthMm: Double?, unit: String, onDismiss: () -> Unit, onRemove3d: () -> Unit, onSave: (Double, Double?) -> Unit) {
+    val (faceLabel, faceHint) = when (plane) {
+        ModelPlane.FRONT -> "Front face Z" to "Positive Z comes toward you in the front view; 0 is the drawing plane."
+        ModelPlane.TOP -> "Top face Y" to "Drawn in the Top view, so it is extruded down along Y. 0 is the bottom of the front drawing."
+        ModelPlane.PROFILE -> "Right face X" to "Drawn in the Profile view, so it is extruded left along X. 0 is the left edge of the front drawing."
+    }
+    val axis = plane.normalAxis.label
     val lengthUnit = LengthUnit.of(unit)
     var z by remember { mutableStateOf(formatLength(zMm, lengthUnit, 2, withUnit = false)) }
     var depth by remember { mutableStateOf(depthMm?.let { formatLength(it, lengthUnit, 2, withUnit = false) } ?: "") }
@@ -2600,13 +2695,27 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
         confirmButton = { TextButton(onClick = onRemove3d) { Text("Remove 3D") } }, dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("Cancel") } })
     else AlertDialog(onDismissRequest = onDismiss, title = { Text(name) }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(z, { z = it }, label = { Text("Front face Z (${lengthUnit.symbol})") }, supportingText = { Text("Positive Z comes toward you in the front view; 0 is the drawing plane.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
-            OutlinedTextField(depth, { depth = it; depthEdited = true }, label = { Text("Depth behind front face (${lengthUnit.symbol})") }, supportingText = { Text(if (depthEdited) "Thickness will change." else "Kept as is unless you change it.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-            zValue?.let { front -> (depthValue)?.let { d -> Text("Occupies Z ${formatLength(front - d, lengthUnit)} to ${formatLength(front, lengthUnit)}.", fontSize = 12.sp, color = Color(0xFF4D5A57)) } }
+            OutlinedTextField(z, { z = it }, label = { Text("$faceLabel (${lengthUnit.symbol})") }, supportingText = { Text(faceHint) }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+            OutlinedTextField(depth, { depth = it; depthEdited = true }, label = { Text("Depth behind that face (${lengthUnit.symbol})") }, supportingText = { Text(if (depthEdited) "Thickness will change." else "Kept as is unless you change it.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            zValue?.let { front -> (depthValue)?.let { d -> Text("Occupies $axis ${formatLength(front - d, lengthUnit)} to ${formatLength(front, lengthUnit)}.", fontSize = 12.sp, color = Color(0xFF4D5A57)) } }
             TextButton(onClick = { confirmRemove = true }) { Text("Remove 3D (keep shape)") }
         }
     }, confirmButton = { TextButton(enabled = valid, onClick = { onSave(zValue!!, if (depthEdited) depthValue else null) }) { Text("Apply") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+/** Picks the drawing plane. Every plane has the same tools; shapes drawn in Top extrude along Y, in Profile along X. */
+@Composable private fun PlaneSwitcher(plane: ModelPlane, onPlane: (ModelPlane) -> Unit) {
+    Row(Modifier.fillMaxWidth().background(Color(0xFFF2F5F4)).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        ModelPlane.entries.forEach { candidate ->
+            FilterChip(selected = plane == candidate, onClick = { onPlane(candidate) }, label = { Text(candidate.label, fontSize = 13.sp) })
+        }
+        Text(when (plane) {
+            ModelPlane.FRONT -> "X →  Y ↑  depth Z"
+            ModelPlane.TOP -> "X →  Z ↓ front  depth Y"
+            ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X"
+        }, fontSize = 11.sp, color = Color(0xFF4D5A57), maxLines = 1, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+    }
 }
 
 @Composable private fun CalibrationBanner(calibration: Calibration) {
@@ -2824,7 +2933,7 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
     }
 }
 
-@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
+@Composable private fun BottomControls(calibrationEnabled: Boolean, tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
     var lineMenuOpen by remember { mutableStateOf(false) }
     var measureMenuOpen by remember { mutableStateOf(false) }
     Surface(shadowElevation = 8.dp) { Row(
@@ -2832,7 +2941,8 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-            ToolIconButton("Calibrate", R.drawable.ic_calibrate_level, tool == Tool.CALIBRATE, { onTool(if (tool == Tool.CALIBRATE) Tool.NONE else Tool.CALIBRATE) }, Modifier.weight(1f))
+            // Only the photo can be calibrated; Top and Profile reuse its scale.
+            if (calibrationEnabled) ToolIconButton("Calibrate", R.drawable.ic_calibrate_level, tool == Tool.CALIBRATE, { onTool(if (tool == Tool.CALIBRATE) Tool.NONE else Tool.CALIBRATE) }, Modifier.weight(1f))
             Box(Modifier.weight(1f)) {
                 ToolIconButton("Measure", R.drawable.ic_measure_straight, tool == Tool.MEASURE && measureDrawing == LineDrawing.STRAIGHT, { val selected = tool == Tool.MEASURE && measureDrawing == LineDrawing.STRAIGHT; onMeasureDrawing(LineDrawing.STRAIGHT); onTool(if (selected) Tool.NONE else Tool.MEASURE) }, Modifier.fillMaxWidth(), description = "Straight measurement", onLongPress = { measureMenuOpen = true })
                 DropdownMenu(expanded = measureMenuOpen, onDismissRequest = { measureMenuOpen = false }) {
@@ -2902,7 +3012,7 @@ private fun vibrateSelection(context: Context): Boolean = runCatching {
     true
 }.getOrDefault(false)
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -3153,6 +3263,27 @@ private fun vibrateSelection(context: Context): Boolean = runCatching {
             withTransform({ rotate(rotation, pivot) }) {
                 drawRect(Color.White, topLeft = Offset(left, top), size = Size(imageW, imageH))
                 drawImage(bitmap.asImageBitmap(), dstOffset = androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()), dstSize = androidx.compose.ui.unit.IntSize(imageW.toInt(), imageH.toInt()), alpha = 1f - pictureOptions.transparency / 100f)
+                if (ghosts.isNotEmpty()) drawIntoCanvas { canvas ->
+                    // Drawn opaque into a translucent layer so overlapping faces don't darken.
+                    canvas.saveLayer(androidx.compose.ui.geometry.Rect(left, top, left + imageW, top + imageH), androidx.compose.ui.graphics.Paint().apply { alpha = 0.3f })
+                    ghosts.forEach { (argb, triangles) ->
+                        val path = androidx.compose.ui.graphics.Path()
+                        var i = 0
+                        while (i + 5 < triangles.size) {
+                            path.moveTo(left + triangles[i] * fit, top + triangles[i + 1] * fit); path.lineTo(left + triangles[i + 2] * fit, top + triangles[i + 3] * fit); path.lineTo(left + triangles[i + 4] * fit, top + triangles[i + 5] * fit); path.close()
+                            i += 6
+                        }
+                        drawPath(path, Color(argb).copy(alpha = 1f))
+                    }
+                    canvas.restore()
+                }
+                // Top and Profile canvases put the front drawing plane (Z = 0) across their middle.
+                if (DepthWords.plane != ModelPlane.FRONT) {
+                    val dash = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(18f, 12f))
+                    val zeroColor = Color(0xFF607D8B)
+                    if (DepthWords.plane == ModelPlane.TOP) drawLine(zeroColor, Offset(left, top + imageH / 2f), Offset(left + imageW, top + imageH / 2f), strokeWidth = 3f, pathEffect = dash)
+                    else drawLine(zeroColor, Offset(left + imageW / 2f, top), Offset(left + imageW / 2f, top + imageH), strokeWidth = 3f, pathEffect = dash)
+                }
                 val gridScale = if (tool == Tool.ADJUST) drawingScale else null
                 if (gridScale != null && gridScale.isFinite() && gridScale > 0 && fit > 0) {
                     val desired = max(70.0 / (gridScale * fit), max(bitmap.width, bitmap.height) / (300.0 * gridScale))
@@ -3412,9 +3543,13 @@ private fun vibrateSelection(context: Context): Boolean = runCatching {
                 val extrusion = extrusions.firstOrNull { it.id == selectedExtrusionId }
                 val zMm = extrusion?.let { ex -> val current = depthMmForHandle(ex, position, moveScale, unit); val start = depthMmForHandle(ex, initial, moveScale, unit); if (current != null && start != null) current - start else null }
                 Column(Modifier.align(Alignment.BottomEnd).padding(end = 170.dp, bottom = 20.dp).background(Color(0xCC18201E), RoundedCornerShape(4.dp)).padding(8.dp)) {
-                    Text("ΔX ${amount((position.x - initial.x).toDouble())} $suffix", color = Color.White, fontSize = 12.sp)
-                    Text("ΔY ${amount((position.y - initial.y).toDouble())} $suffix", color = Color.White, fontSize = 12.sp)
-                    Text(if (zMm == null) "ΔZ —" else "ΔZ ${formatMeasure(zMm / unitFactorMm(unit), unit)} $unit", color = Color.White, fontSize = 12.sp)
+                    // Screen axes are X/Y in Front, X/Z in Top and Z (growing to the left)/Y in Profile.
+                    val across = if (DepthWords.plane == ModelPlane.PROFILE) "Z" else "X"
+                    val acrossSign = if (DepthWords.plane == ModelPlane.PROFILE) -1.0 else 1.0
+                    val down = if (DepthWords.plane == ModelPlane.TOP) "Z" else "Y"
+                    Text("Δ$across ${amount(acrossSign * (position.x - initial.x))} $suffix", color = Color.White, fontSize = 12.sp)
+                    Text("Δ$down ${amount((position.y - initial.y).toDouble())} $suffix", color = Color.White, fontSize = 12.sp)
+                    Text(if (zMm == null) "Δ${DepthWords.axis} —" else "Δ${DepthWords.axis} ${formatMeasure(zMm / unitFactorMm(unit), unit)} $unit", color = Color.White, fontSize = 12.sp)
                 }
             }
             FineAdjustPad(onNudge)
@@ -3825,8 +3960,8 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("$count selected 3D points")
             if (count < 2) Text("Select at least two points on 3D shapes with a positive depth.")
-            OutlinedTextField(distance, { if (decimalInputPattern.matches(it)) { distance = it; positionEdited = true } }, label = { Text(if (back) "Move back by ($unit)" else "Bring front by ($unit)") }, placeholder = { if (initialZ == null) Text("Mixed") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-            Text("Distance from the picture surface (Z = 0)", fontSize = 12.sp)
+            OutlinedTextField(distance, { if (decimalInputPattern.matches(it)) { distance = it; positionEdited = true } }, label = { Text(if (back) "${DepthWords.away} by ($unit)" else "${DepthWords.toward} by ($unit)") }, placeholder = { if (initialZ == null) Text("Mixed") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            Text("Offset along ${DepthWords.axis} from the shape's position", fontSize = 12.sp)
             ZDirectionPicker(back = back, onChange = { back = it; positionEdited = true })
             OutlinedTextField(thickness, { if (decimalInputPattern.matches(it)) { thickness = it; thicknessEdited = true } }, label = { Text("Thickness ($unit)") }, placeholder = { if (initialThickness == null) Text("Mixed") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             Text("Changes appear in the 3D view and STL export.", fontSize = 12.sp)
@@ -3836,7 +3971,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
 
 @Composable private fun ZDirectionPicker(back: Boolean, onChange: (Boolean) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        listOf(false to "Bring front", true to "Move back").forEach { (direction, label) ->
+        listOf(false to DepthWords.toward, true to DepthWords.away).forEach { (direction, label) ->
             val selected = back == direction
             Row(Modifier.weight(1f).border(if (selected) 2.dp else 1.dp, if (selected) Color(0xFF168142) else Color(0xFF8A9691), RoundedCornerShape(4.dp)).clickable { onChange(direction) }.padding(end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 RadioButton(selected = selected, onClick = { onChange(direction) }, modifier = Modifier.size(40.dp), colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF168142)))
@@ -3911,9 +4046,9 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 OutlinedTextField(shapeHeight, { if (decimalInputPattern.matches(it)) { shapeHeight = it; heightEdited = true } }, label = { Text("Height ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
             }
             if (extrusion != null) {
-                OutlinedTextField(depth, { if (decimalInputPattern.matches(it)) { depth = it; depthEdited = true } }, label = { Text("Depth Z ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                OutlinedTextField(zDistance, { if (decimalInputPattern.matches(it)) { zDistance = it; zEdited = true } }, label = { Text(if (zBack) "Move back by ($unit)" else "Bring front by ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                Text("Distance from the picture surface (Z = 0)", fontSize = 12.sp)
+                OutlinedTextField(depth, { if (decimalInputPattern.matches(it)) { depth = it; depthEdited = true } }, label = { Text("Depth ${DepthWords.axis} ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                OutlinedTextField(zDistance, { if (decimalInputPattern.matches(it)) { zDistance = it; zEdited = true } }, label = { Text(if (zBack) "${DepthWords.away} by ($unit)" else "${DepthWords.toward} by ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                Text(if (DepthWords.plane == ModelPlane.FRONT) "Distance from ${DepthWords.surface}" else "Position of the far side, from ${DepthWords.surface}", fontSize = 12.sp)
                 ZDirectionPicker(back = zBack, onChange = { zBack = it; zEdited = true })
                 if (scale != null && scale.isFinite() && scale > 0 && positionValue != null) {
                     Text("3D position preview", fontWeight = FontWeight.Medium, fontSize = 12.sp)
@@ -3987,10 +4122,10 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 if (boschReadingUsed) Text("Laser measurement: this line will be blue.", fontSize = 12.sp, color = Color(0xFF1565C0), fontWeight = FontWeight.Bold)
                 OutlinedTextField(value = label, onValueChange = { label = it }, label = { Text("Label") }, singleLine = true)
                 if (!line.isReference) {
-                    Text("Point Z from picture surface", fontWeight = FontWeight.Medium)
-                    OutlinedTextField(startZ, { if (decimalInputPattern.matches(it)) startZ = it }, label = { Text("${points?.first ?: "Start"} Z ($unit)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
+                    Text("Point ${DepthWords.axis} offset", fontWeight = FontWeight.Medium)
+                    OutlinedTextField(startZ, { if (decimalInputPattern.matches(it)) startZ = it }, label = { Text("${points?.first ?: "Start"} ${DepthWords.axis} ($unit)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
                     ZDirectionPicker(startBack) { startBack = it }
-                    OutlinedTextField(endZ, { if (decimalInputPattern.matches(it)) endZ = it }, label = { Text("${points?.second ?: "End"} Z ($unit)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
+                    OutlinedTextField(endZ, { if (decimalInputPattern.matches(it)) endZ = it }, label = { Text("${points?.second ?: "End"} ${DepthWords.axis} ($unit)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
                     ZDirectionPicker(endBack) { endBack = it }
                     val size = value.toDoubleOrNull()
                     val dz = zValue(startZ, startBack)?.let { a -> zValue(endZ, endBack)?.let { b -> abs(b - a) } }
@@ -4137,73 +4272,107 @@ private fun closedGuideShapes(guides: List<GuideLine>): List<List<GuideLine>> =
 private fun shapePoints(path: List<GuideLine>): List<Pt> = path.flatMap { guidePoints(it).dropLast(1) }
 
 // Printable geometry is built by the tested core (com.davoyans.idea3d.core) in model millimeters:
-// X right, Y up, Z toward the front-view viewer. The drawn picture is the front surface and
-// thickness extends behind it.
-private data class StlShape(val contour: List<Pt>, val depth: Double, val z: Double, val color: Int, val edges: List<GuideLine>, val extrusionId: Int)
-private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null, extrusionIdsOut: MutableList<Int>? = null): List<SolidSpec> {
-    val pixelsPerUnit = scale?.takeIf { it.isFinite() && it > 0 } ?: error("Set a calibration length before exporting")
-    val shapes = drawableGuideShapes(guides)
-    require(shapes.isNotEmpty()) { "Draw a closed shape and add 3D depth first" }
-    val issues = mutableListOf<MeshIssue>()
-    val models = shapes.mapIndexedNotNull { index, shape ->
-        val name = "Shape ${index + 1}"
-        val extrusion = extrusions.firstOrNull { ex -> extrusionGuides(ex, guides).any { g -> shape.any { it.id == g.id } } }
-        if (extrusion == null) { issues += MeshIssue(name, "has no 3D depth yet; use Make 3D or exclude it"); return@mapIndexedNotNull null }
-        val depth = extrusion.depthMm?.takeIf { it.isFinite() && it > 0 }
-        if (depth == null) { issues += MeshIssue(name, "needs a positive Z depth"); return@mapIndexedNotNull null }
-        val path = shapePath(shape)
-        attachedRegions(shape, guides).forEach { region ->
-            val part = android.graphics.Path().apply {
-                region.points.firstOrNull()?.let { moveTo(it.x, it.y); region.points.drop(1).forEach { p -> lineTo(p.x, p.y) }; close() }
-            }
-            if (!path.op(part, android.graphics.Path.Op.UNION)) issues += MeshIssue(name, "attached regions could not be combined")
-        }
-        val contours = editableContours(path)
-        if (contours == null) { issues += MeshIssue(name, "has a hole; holes are not supported for 3D export yet"); return@mapIndexedNotNull null }
-        if (contours.size != 1) { issues += MeshIssue(name, "must have one continuous outline (found ${contours.size})"); return@mapIndexedNotNull null }
-        val edges = extrusionGuides(extrusion, guides)
-        val contour = contours.single()
-        val endpoints = edges.flatMap { listOf(it.start, it.end) }
-        val enriched = contour.indices.flatMap { i ->
-            val a = contour[i]; val b = contour[(i + 1) % contour.size]
-            val dx = (b.x - a.x).toDouble(); val dy = (b.y - a.y).toDouble(); val length2 = dx * dx + dy * dy
-            val interior = if (length2 <= 1e-10) emptyList() else endpoints.mapNotNull { p ->
-                val t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2
-                if (t <= 0.000001 || t >= 0.999999) null else {
-                    val projected = Pt((a.x + t * dx).toFloat(), (a.y + t * dy).toFloat())
-                    if (distance(projected, p) < 0.01) t to p else null
-                }
-            }.sortedBy { it.first }.fold(mutableListOf<Pair<Double, Pt>>()) { acc, point -> if (acc.none { distance(it.second, point.second) < 0.01 }) acc.add(point); acc }
-            listOf(a) + interior.map { it.second }
-        }
-        name to StlShape(enriched, depth, extrusion.positionZMm, guideColor(shape.first().colorIndex).toArgb(), edges, extrusion.id)
-    }
-    if (issues.isNotEmpty()) throw MeshException(issues)
-    val mmPerPixelX = axisScale?.first?.let { unitFactorMm(unit) / it } ?: (unitFactorMm(unit) / pixelsPerUnit)
-    val mmPerPixelY = axisScale?.second?.let { unitFactorMm(unit) / it } ?: (unitFactorMm(unit) / pixelsPerUnit)
-    val originX = models.minOf { (_, model) -> model.contour.minOf { it.x } }.toDouble()
-    val originY = models.maxOf { (_, model) -> model.contour.maxOf { it.y } }.toDouble()
-    originOut?.let { it[0] = originX; it[1] = originY }
-    extrusionIdsOut?.addAll(models.map { it.second.extrusionId })
-    return models.map { (name, model) ->
-        val outline = model.contour.map { p ->
-            val edge = model.edges.minByOrNull { distance(p, guidePointAt(it, guideNearestParameter(it, p))) } ?: error("Missing shape boundary")
-            val t = guideNearestParameter(edge, p).toDouble()
-            val pointZ = edge.startZMm * (1 - t) + edge.endZMm * t
-            val thickness = (edge.startThicknessMm ?: model.depth) * (1 - t) + (edge.endThicknessMm ?: model.depth) * t
-            OutlinePoint((p.x - originX) * mmPerPixelX, (originY - p.y) * mmPerPixelY, model.z + pointZ, thickness)
-        }
-        SolidSpec(name, outline, model.color)
+// X right, Y up, Z toward the front-view viewer. Each drawing plane is a canvas of the picture's size:
+// the front canvas holds the photo, the Top and Profile canvases share its X and Y ranges and put
+// Z = 0 across their middle. A drawn shape is the surface facing that plane's viewer and its
+// thickness extends away from the viewer.
+
+/** Converts a plane's canvas pixels to millimeters in that plane's (right, up) coordinates and back. */
+private class PlaneMapping(val plane: ModelPlane, private val originU: Double, private val originV: Double, private val mmPerPixelRight: Double, private val mmPerPixelUp: Double) {
+    fun right(p: Pt) = (p.x - originU) * mmPerPixelRight
+    fun up(p: Pt) = (originV - p.y) * mmPerPixelUp
+    fun pixel(right: Double, up: Double) = Pt((originU + right / mmPerPixelRight).toFloat(), (originV - up / mmPerPixelUp).toFloat())
+    /** Model point of a canvas pixel at [depthMm] along the plane's viewing direction. */
+    fun model(p: Pt, depthMm: Double) = plane.toModel(right(p), up(p), depthMm)
+    /** Canvas pixel of a model point (its depth is dropped). */
+    fun pixel(model: Vec3) = pixel(model dot plane.right, model dot plane.up)
+}
+
+private fun planeMapping(plane: ModelPlane, width: Int, height: Int, scale: Double?, unit: String, axisScale: Pair<Double, Double>? = null): PlaneMapping? {
+    val pixelsPerUnit = scale?.takeIf { it.isFinite() && it > 0 } ?: return null
+    val uniform = unitFactorMm(unit) / pixelsPerUnit
+    return when (plane) {
+        ModelPlane.FRONT -> PlaneMapping(plane, 0.0, height.toDouble(), axisScale?.first?.let { unitFactorMm(unit) / it } ?: uniform, axisScale?.second?.let { unitFactorMm(unit) / it } ?: uniform)
+        ModelPlane.TOP -> PlaneMapping(plane, 0.0, height / 2.0, uniform, uniform)
+        ModelPlane.PROFILE -> PlaneMapping(plane, width / 2.0, height.toDouble(), uniform, uniform)
     }
 }
 
-private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null, extrusionIdsOut: MutableList<Int>? = null): List<Mesh> =
-    MeshBuilder.buildAll(buildSolidSpecs(guides, extrusions, scale, unit, originOut, axisScale, extrusionIdsOut))
+/**
+ * Position of the surface facing the plane's viewer. Front objects store that surface (Z of the front face,
+ * so they start on the drawing plane); Top and Profile objects store their far side, so a new one rests on
+ * Y = 0 or X = 0 instead of hanging below or behind the scene.
+ */
+private fun facePositionMm(extrusion: Extrusion): Double = if (extrusion.plane == ModelPlane.FRONT) extrusion.positionZMm else extrusion.positionZMm + (extrusion.depthMm ?: 0.0)
+private fun withFacePosition(extrusion: Extrusion, faceMm: Double, depthMm: Double): Extrusion = extrusion.copy(positionZMm = if (extrusion.plane == ModelPlane.FRONT) faceMm else faceMm - depthMm)
 
-private fun buildStlModel(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, triangleColors: MutableList<Int>? = null, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null): ByteArray {
-    val meshes = buildMeshes(guides, extrusions, scale, unit, originOut, axisScale)
-    triangleColors?.let { colors -> meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } } }
-    return ModelExport.stl(meshes)
+private data class StlShape(val contour: List<Pt>, val depth: Double, val face: Double, val color: Int, val edges: List<GuideLine>, val extrusion: Extrusion)
+/** Builds every plane's solids. With [strict] off, shapes that can't be built yet are skipped instead of reported. */
+private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, width: Int, height: Int, axisScale: Pair<Double, Double>? = null, objectsOut: MutableList<Extrusion>? = null, strict: Boolean = true): List<SolidSpec> {
+    scale?.takeIf { it.isFinite() && it > 0 } ?: error("Set a calibration length before exporting")
+    val issues = mutableListOf<MeshIssue>()
+    val specs = mutableListOf<SolidSpec>()
+    var count = 0
+    ModelPlane.entries.forEach { plane ->
+        val planeGuides = guides.filter { it.plane == plane }
+        val planeExtrusions = extrusions.filter { it.plane == plane }
+        val mapping = planeMapping(plane, width, height, scale, unit, axisScale)!!
+        val models = drawableGuideShapes(planeGuides).mapNotNull { shape ->
+            val name = "${if (plane == ModelPlane.FRONT) "" else "${plane.label} "}Shape ${++count}"
+            val extrusion = planeExtrusions.firstOrNull { ex -> extrusionGuides(ex, planeGuides).any { g -> shape.any { it.id == g.id } } }
+            if (extrusion == null) { issues += MeshIssue(name, "has no 3D depth yet; use Make 3D or exclude it"); return@mapNotNull null }
+            val depth = extrusion.depthMm?.takeIf { it.isFinite() && it > 0 }
+            if (depth == null) { issues += MeshIssue(name, "needs a positive depth"); return@mapNotNull null }
+            val path = shapePath(shape)
+            attachedRegions(shape, planeGuides).forEach { region ->
+                val part = android.graphics.Path().apply {
+                    region.points.firstOrNull()?.let { moveTo(it.x, it.y); region.points.drop(1).forEach { p -> lineTo(p.x, p.y) }; close() }
+                }
+                if (!path.op(part, android.graphics.Path.Op.UNION)) issues += MeshIssue(name, "attached regions could not be combined")
+            }
+            val contours = editableContours(path)
+            if (contours == null) { issues += MeshIssue(name, "has a hole; holes are not supported for 3D export yet"); return@mapNotNull null }
+            if (contours.size != 1) { issues += MeshIssue(name, "must have one continuous outline (found ${contours.size})"); return@mapNotNull null }
+            val edges = extrusionGuides(extrusion, planeGuides)
+            val contour = contours.single()
+            val endpoints = edges.flatMap { listOf(it.start, it.end) }
+            val enriched = contour.indices.flatMap { i ->
+                val a = contour[i]; val b = contour[(i + 1) % contour.size]
+                val dx = (b.x - a.x).toDouble(); val dy = (b.y - a.y).toDouble(); val length2 = dx * dx + dy * dy
+                val interior = if (length2 <= 1e-10) emptyList() else endpoints.mapNotNull { p ->
+                    val t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2
+                    if (t <= 0.000001 || t >= 0.999999) null else {
+                        val projected = Pt((a.x + t * dx).toFloat(), (a.y + t * dy).toFloat())
+                        if (distance(projected, p) < 0.01) t to p else null
+                    }
+                }.sortedBy { it.first }.fold(mutableListOf<Pair<Double, Pt>>()) { acc, point -> if (acc.none { distance(it.second, point.second) < 0.01 }) acc.add(point); acc }
+                listOf(a) + interior.map { it.second }
+            }
+            name to StlShape(enriched, depth, facePositionMm(extrusion), guideColor(shape.first().colorIndex).toArgb(), edges, extrusion)
+        }
+        models.forEach { (name, model) ->
+            val outline = model.contour.map { p ->
+                val edge = model.edges.minByOrNull { distance(p, guidePointAt(it, guideNearestParameter(it, p))) } ?: error("Missing shape boundary")
+                val t = guideNearestParameter(edge, p).toDouble()
+                val pointZ = edge.startZMm * (1 - t) + edge.endZMm * t
+                val thickness = (edge.startThicknessMm ?: model.depth) * (1 - t) + (edge.endThicknessMm ?: model.depth) * t
+                OutlinePoint(mapping.right(p), mapping.up(p), model.face + pointZ, thickness)
+            }
+            specs += SolidSpec(name, outline, model.color, plane)
+            objectsOut?.add(model.extrusion.copy(plane = plane))
+        }
+    }
+    if (!strict) return specs
+    if (count == 0) error("Draw a closed shape and add 3D depth first")
+    if (issues.isNotEmpty()) throw MeshException(issues)
+    return specs
+}
+
+private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, width: Int, height: Int, axisScale: Pair<Double, Double>? = null): List<Mesh> {
+    val meshes = MeshBuilder.buildAll(buildSolidSpecs(guides, extrusions, scale, unit, width, height, axisScale))
+    // Printable files start at X = 0 and Y = 0; Z keeps the drawing plane at 0.
+    val minX = meshes.minOf { m -> m.vertices.minOf { it.x } }; val minY = meshes.minOf { m -> m.vertices.minOf { it.y } }
+    return meshes.map { m -> m.copy(vertices = m.vertices.map { Vec3(it.x - minX, it.y - minY, it.z) }) }
 }
 
 private fun shapePath(shape: List<GuideLine>): android.graphics.Path = android.graphics.Path().apply {
