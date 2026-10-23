@@ -102,7 +102,7 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
 
 ## Limits
 
-- **Bar and pipe corners:** where two lines with a material meet, the pieces overlap at the corner; they aren't mitered.
+- **Bar and pipe corners:** where two lines with a material meet, the pieces overlap at the corner; they aren't mitered. Curved lines are built from 12 straight pieces that overlap slightly at each bend. Each piece is a separate solid in the export; slicers normally merge them.
 
 - **No physical device test yet.** Not checked: touch feel, long-press, pinch smoothness and Bluetooth.
 - **No slicer test yet.** The files have not been opened in PrusaSlicer, Cura or Bambu Studio. Open them in your slicer and check them before printing.

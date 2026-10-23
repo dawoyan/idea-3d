@@ -5007,16 +5007,27 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
  */
 private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
     val counts = HashMap<String, Int>()
-    return guides.mapNotNull { guide ->
-        val material = guide.materialId?.let(materials::get) ?: return@mapNotNull null
-        val mapping = setup.mapping(guide.plane) ?: return@mapNotNull null
+    return guides.flatMap { guide ->
+        val material = guide.materialId?.let(materials::get) ?: return@flatMap emptyList()
+        val mapping = setup.mapping(guide.plane) ?: return@flatMap emptyList()
         val name = "${material.name} ${counts.merge(material.id, 1, Int::plus)}"
-        val steps = if (guide.curveMid == null) 1 else 8
+        val steps = if (guide.curveMid == null) 1 else 12
         val points = (0..steps).map { i -> val t = i.toFloat() / steps; mapping.model(guidePointAt(guide, t), guide.startZMm + (guide.endZMm - guide.startZMm) * t) }
+        // Curves are straight pieces, each a separate solid. Merging them was far too slow on a phone, so each piece is
+        // lengthened past the bends instead, which closes the gaps on the outside of a bend.
+        val half = max(material.profile.widthMm, material.profile.heightMm) / 2
+        val extend = DoubleArray(points.size)
+        for (j in 1 until points.lastIndex) {
+            val d1 = (points[j] - points[j - 1]).normalized(); val d2 = (points[j + 1] - points[j]).normalized()
+            val turn = kotlin.math.acos((d1 dot d2).coerceIn(-1.0, 1.0))
+            extend[j] = half * kotlin.math.tan(turn / 2).coerceAtMost(3.0)
+        }
         try {
-            val pieces = points.zipWithNext().map { (a, b) -> MemberBuilder.build(name, a, b, guide.plane.toward, material.profile, material.argb) }
-            (guide.plane to -(guide.id + 1)) to pieces.reduce { acc, piece -> Csg.union(acc, piece) }
-        } catch (e: MeshException) { issues?.addAll(e.issues); null }
+            points.indices.toList().zipWithNext().map { (i, k) ->
+                val dir = (points[k] - points[i]).normalized()
+                (guide.plane to -(guide.id + 1)) to MemberBuilder.build(name, points[i] - dir * extend[i], points[k] + dir * extend[k], guide.plane.toward, material.profile, material.argb)
+            }
+        } catch (e: MeshException) { issues?.addAll(e.issues); emptyList() }
     }
 }
 
