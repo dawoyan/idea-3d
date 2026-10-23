@@ -521,7 +521,27 @@ private class BoschGlmClient(private val context: Context) {
 private object ProjectStore {
     private fun directory(context: Context) = File(context.filesDir, "idea3d-projects").apply { mkdirs() }
     fun imageFile(context: Context, id: String) = File(directory(context), "$id.jpg")
+    fun thumbnailFile(context: Context, id: String) = File(directory(context), "$id-thumb.png")
+    /** Library preview: the picture with the drawn shapes and lines on top, so empty scenes are recognizable too. */
+    fun writeThumbnail(context: Context, id: String, image: Bitmap, guides: List<GuideLine>, lines: List<MeasureLine>) = runCatching {
+        val size = 192f
+        val factor = size / max(image.width, image.height)
+        val out = Bitmap.createBitmap((image.width * factor).roundToInt().coerceAtLeast(1), (image.height * factor).roundToInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+        val canvas = AndroidCanvas(out)
+        canvas.drawBitmap(Bitmap.createScaledBitmap(image, out.width, out.height, true), 0f, 0f, null)
+        canvas.scale(factor, factor)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        drawableGuideShapes(guides).forEach { shape ->
+            paint.style = Paint.Style.FILL; paint.color = guideColor(shape.first().colorIndex).copy(alpha = 0.35f).toArgb()
+            canvas.drawPath(shapePath(shape), paint)
+        }
+        paint.style = Paint.Style.STROKE; paint.strokeWidth = 2.5f / factor
+        guides.forEach { guide -> paint.color = guideColor(guide.colorIndex).toArgb(); guidePoints(guide).zipWithNext().forEach { (a, b) -> canvas.drawLine(a.x, a.y, b.x, b.y, paint) } }
+        lines.forEach { line -> paint.color = measurementColor(line).toArgb(); canvas.drawLine(line.start.x, line.start.y, line.end.x, line.end.y, paint) }
+        thumbnailFile(context, id).outputStream().use { out.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
     fun thumbnail(context: Context, id: String): Bitmap? {
+        thumbnailFile(context, id).takeIf { it.isFile }?.let { file -> BitmapFactory.decodeFile(file.absolutePath)?.let { return it } }
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(imageFile(context, id).absolutePath, options)
         options.inSampleSize = generateSequence(1) { it * 2 }.takeWhile { options.outWidth / it > 180 || options.outHeight / it > 180 }.lastOrNull() ?: 1
@@ -554,7 +574,17 @@ private object ProjectStore {
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm) }) }
         File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene) }.toString())
     }
-    fun delete(context: Context, id: String) { File(directory(context), "$id.json").delete(); imageFile(context, id).delete() }
+    private fun trash(context: Context) = File(directory(context), "trash").apply { mkdirs() }
+    private fun projectFiles(dir: File, id: String) = listOf("$id.json", "$id.jpg", "$id-thumb.png").map { File(dir, it) }
+    /** Moves a project aside so the delete can be undone; only the most recent deletion is kept. */
+    fun moveToTrash(context: Context, id: String) {
+        trash(context).listFiles()?.forEach { it.delete() }
+        projectFiles(directory(context), id).zip(projectFiles(trash(context), id)).forEach { (from, to) -> if (from.isFile) from.renameTo(to) }
+    }
+    fun restoreFromTrash(context: Context, id: String) {
+        projectFiles(trash(context), id).zip(projectFiles(directory(context), id)).forEach { (from, to) -> if (from.isFile) from.renameTo(to) }
+    }
+    fun delete(context: Context, id: String) { File(directory(context), "$id.json").delete(); imageFile(context, id).delete(); thumbnailFile(context, id).delete() }
     fun exportProject(context: Context, id: String, uri: Uri) {
         val json = File(directory(context), "$id.json")
         val image = imageFile(context, id)
@@ -736,6 +766,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var showPictureEdit by remember { mutableStateOf(false) }
     var showPointDepth by remember { mutableStateOf(false) }
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
+    val snackbarHost = remember { SnackbarHostState() }
     var viewerExtrusionIds by remember { mutableStateOf<List<Int>>(emptyList()) }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
     var viewerAngle by remember { mutableStateOf(ViewerAngle.THREE_D) }
@@ -922,7 +953,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     LaunchedEffect(projectId, projectName, lines, guides, guidesDetected, unit, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene) {
         if (blankScene) scale = unitFactorMm(unit)
-        projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, lines, guides, guidesDetected, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene)); library = ProjectStore.list(context) }
+        projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, lines, guides, guidesDetected, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, guides, lines) }; library = ProjectStore.list(context) }
     }
     fun handleTap(point: Pt, hitRadius: Double) {
         when (tool) {
@@ -1876,6 +1907,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         )
     } else Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
+        snackbarHost = { SnackbarHost(snackbarHost) },
         topBar = { if (bitmap != null) TopAppBar(title = {
             if (tool != Tool.CROP) OutlinedButton(onClick = { showPictureEdit = true }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Text(projectName.ifBlank { "Idea 3D" }, fontWeight = FontWeight.Bold, letterSpacing = 0.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1966,7 +1998,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             BitmapFactory.decodeFile(ProjectStore.imageFile(context, project.id).absolutePath)?.let { loaded ->
                 blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; lines = project.lines; guides = project.guides; guidesDetected = project.guidesDetected; extrusions = project.extrusions; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference }; scale = if (project.blankScene) unitFactorMm(project.unit) else recomputeScale(project.lines, project.unit); axisScale = if (project.blankScene) null else axisScaleOf(project.lines, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
             }
-        }, { project -> ProjectStore.delete(context, project.id); library = ProjectStore.list(context) })
+        }, { project ->
+            ProjectStore.moveToTrash(context, project.id); library = ProjectStore.list(context)
+            scope.launch {
+                if (snackbarHost.showSnackbar("Deleted \"${project.name}\"", actionLabel = "Undo", duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed) {
+                    ProjectStore.restoreFromTrash(context, project.id); library = ProjectStore.list(context)
+                }
+            }
+        })
         else Column(Modifier.padding(padding).fillMaxSize()) {
             StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, onMeasurements = { showMeasurements = true })
             if (!blankScene) CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
@@ -2315,7 +2354,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             projects.forEach { project ->
                 Card(Modifier.fillMaxWidth().clickable { onOpen(project) }, shape = RoundedCornerShape(8.dp)) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        val thumbnail = remember(context, project.id) { ProjectStore.thumbnail(context, project.id) }
+                        val thumbnail = remember(context, project) { ProjectStore.thumbnail(context, project.id) }
                         if (thumbnail != null) Image(
                             bitmap = thumbnail.asImageBitmap(), contentDescription = null,
                             modifier = Modifier.size(68.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xFFE2ECE9)),
@@ -3649,7 +3688,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
             Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Picture name") }, singleLine = true)
                 OutlinedButton(onClick = onExportImage) { Text("Export picture") }
-                OutlinedButton(onClick = onExport3d) { Text("Export 3D file (STL)") }
+                OutlinedButton(onClick = onExport3d) { Text("Export 3D model (STL or 3MF)") }
                 Text("Measurement unit", fontWeight = FontWeight.Medium)
                 Box {
                     OutlinedButton(onClick = { unitMenuOpen = true }) { Text(unit) }
