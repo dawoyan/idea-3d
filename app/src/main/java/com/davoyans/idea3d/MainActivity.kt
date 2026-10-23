@@ -136,6 +136,7 @@ import com.davoyans.idea3d.core.CalibrationStatus
 import com.davoyans.idea3d.core.LengthUnit
 import com.davoyans.idea3d.core.Mesh
 import com.davoyans.idea3d.core.formatLength
+import com.davoyans.idea3d.core.parseLengthMm
 import com.davoyans.idea3d.core.projectedLengthForFixedTrue
 import com.davoyans.idea3d.core.MeshBuilder
 import com.davoyans.idea3d.core.MeshException
@@ -735,6 +736,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var showPictureEdit by remember { mutableStateOf(false) }
     var showPointDepth by remember { mutableStateOf(false) }
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
+    var viewerExtrusionIds by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var viewerEditObject by remember { mutableStateOf<Int?>(null) }
     var viewerAngle by remember { mutableStateOf(ViewerAngle.THREE_D) }
     var showViewMenu by remember { mutableStateOf(false) }
     var showMeasurements by remember { mutableStateOf(false) }
@@ -1815,16 +1818,20 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val result = withContext(Dispatchers.Default) { runCatching {
                 val colors = mutableListOf<Int>()
                 val origin = DoubleArray(2)
-                val stl = buildStlModel(guideSnapshot, extrusionSnapshot, modelScale, modelUnit, colors, origin, modelAxes)
+                val extrusionIds = mutableListOf<Int>()
+                val meshes = buildMeshes(guideSnapshot, extrusionSnapshot, modelScale, modelUnit, origin, modelAxes, extrusionIds)
+                meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
+                val stl = ModelExport.stl(meshes)
+                val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { index } }.toIntArray()
                 val factorX = unitFactorMm(modelUnit) / (modelAxes?.first ?: modelScale!!)
                 val factorY = unitFactorMm(modelUnit) / (modelAxes?.second ?: modelScale!!)
                 val measurements = measurementSnapshot.map { line ->
                     val value = if (line.lengthSource == LengthSource.UNKNOWN) "?" else "${formatMeasure(line.value, modelUnit)}${if (line.hasDepth()) "*" else ""} $modelUnit"
                     ViewerMeasurement(((line.start.x - origin[0]) * factorX).toFloat(), ((origin[1] - line.start.y) * factorY).toFloat(), ((line.end.x - origin[0]) * factorX).toFloat(), ((origin[1] - line.end.y) * factorY).toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), line.startZMm.toFloat(), line.endZMm.toFloat())
                 }
-                ViewerMesh.fromStl(stl, colors, measurements)
+                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }) to extrusionIds
             } }
-            if (projectId == openedProject) result.onSuccess { viewerAngle = angle; viewerModel = it }.onFailure { Toast.makeText(context, "3D view: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+            if (projectId == openedProject) result.onSuccess { viewerAngle = angle; viewerModel = it.first; viewerExtrusionIds = it.second }.onFailure { Toast.makeText(context, "3D view: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
 
@@ -2262,7 +2269,23 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     viewerModel?.let { mesh -> ThreeDViewerDialog(mesh, viewerAngle, initialSun = ((extrusions.firstOrNull()?.sun?.x ?: ((bitmap?.width ?: 1) * 0.15f)) / (bitmap?.width ?: 1)).coerceIn(0f, 1f), onSunChange = { position ->
         val width = bitmap?.width ?: 1
         if (extrusions.any { abs(it.sun.x - position * width) > 0.01f }) { pushUndo(); extrusions = extrusions.map { it.copy(sun = Pt(position * width, 0f)) } }
-    }, onClose = { viewerModel = null; showPictureEdit = false }) }
+    }, onAngleChange = { viewerAngle = it }, onEditObject = { viewerEditObject = it }, onClose = { viewerModel = null; viewerEditObject = null; showPictureEdit = false }) }
+    viewerEditObject?.let { index ->
+        val extrusion = viewerExtrusionIds.getOrNull(index)?.let { id -> extrusions.firstOrNull { it.id == id } }
+        val name = viewerModel?.objectNames?.getOrNull(index) ?: "Object"
+        if (extrusion == null) viewerEditObject = null
+        else ObjectDepthDialog(name, extrusion.positionZMm, extrusion.depthMm, unit, onDismiss = { viewerEditObject = null }, onRemove3d = {
+            pushUndo()
+            extrusions = extrusions.filterNot { it.id == extrusion.id }
+            viewerEditObject = null
+            if (extrusions.isEmpty()) viewerModel = null else open3dView(viewerAngle)
+        }) { zMm, depthMm ->
+            pushUndo()
+            extrusions = extrusions.map { if (it.id == extrusion.id) (if (depthMm != null) extrusionWithDepth(it, depthMm, scale, unit) else it).copy(positionZMm = zMm) else it }
+            viewerEditObject = null
+            open3dView(viewerAngle)
+        }
+    }
     if (showHelp) AlertDialog(onDismissRequest = { showHelp = false }, confirmButton = { TextButton(onClick = { showHelp = false }) { Text("Done") } }, title = { Text("Measure a picture") }, text = {
         Text("1. Import a picture.\n\n2. Calibration: tap two known points and enter their real distance. Add an optional perpendicular (90 degree) reference; its scale is averaged with the first.\n\n3. Measure: tap two points for each new dimension.\n\n4. Fine adjust: drag any endpoint while the magnifier is visible. Export saves the picture with all labels and pointers.")
     })
@@ -2466,6 +2489,29 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
         if (cursor.moveToFirst()) result = cursor.getString(0).substringBeforeLast('.')
     }
     return result
+}
+
+/** Sets an object's front-face Z (positive toward the viewer) and, only when edited, its depth. */
+@Composable private fun ObjectDepthDialog(name: String, zMm: Double, depthMm: Double?, unit: String, onDismiss: () -> Unit, onRemove3d: () -> Unit, onSave: (Double, Double?) -> Unit) {
+    val lengthUnit = LengthUnit.of(unit)
+    var z by remember { mutableStateOf(formatLength(zMm, lengthUnit, 2, withUnit = false)) }
+    var depth by remember { mutableStateOf(depthMm?.let { formatLength(it, lengthUnit, 2, withUnit = false) } ?: "") }
+    var depthEdited by remember { mutableStateOf(false) }
+    var confirmRemove by remember { mutableStateOf(false) }
+    val zValue = parseLengthMm(z.ifBlank { "0" }, lengthUnit)
+    val depthValue = if (depthEdited) parseLengthMm(depth, lengthUnit) else depthMm
+    val valid = zValue != null && (!depthEdited || depthValue != null && depthValue > 0)
+    if (confirmRemove) AlertDialog(onDismissRequest = { confirmRemove = false }, title = { Text("Remove 3D from $name?") }, text = { Text("The flat shape stays in the drawing. You can undo this.") },
+        confirmButton = { TextButton(onClick = onRemove3d) { Text("Remove 3D") } }, dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("Cancel") } })
+    else AlertDialog(onDismissRequest = onDismiss, title = { Text(name) }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(z, { z = it }, label = { Text("Front face Z (${lengthUnit.symbol})") }, supportingText = { Text("Positive Z comes toward you in the front view; 0 is the drawing plane.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+            OutlinedTextField(depth, { depth = it; depthEdited = true }, label = { Text("Depth behind front face (${lengthUnit.symbol})") }, supportingText = { Text(if (depthEdited) "Thickness will change." else "Kept as is unless you change it.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            zValue?.let { front -> (depthValue)?.let { d -> Text("Occupies Z ${formatLength(front - d, lengthUnit)} to ${formatLength(front, lengthUnit)}.", fontSize = 12.sp, color = Color(0xFF4D5A57)) } }
+            TextButton(onClick = { confirmRemove = true }) { Text("Remove 3D (keep shape)") }
+        }
+    }, confirmButton = { TextButton(enabled = valid, onClick = { onSave(zValue!!, if (depthEdited) depthValue else null) }) { Text("Apply") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable private fun CalibrationBanner(calibration: Calibration) {
@@ -3659,12 +3705,12 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
             Text("Current: $width × $height px")
             Text("Add white space (pixels)")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(left, { if (it.length <= 6 && it.all(Char::isDigit)) left = it }, label = { Text("Left") }, placeholder = { Text("0") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                OutlinedTextField(right, { if (it.length <= 6 && it.all(Char::isDigit)) right = it }, label = { Text("Right") }, placeholder = { Text("0") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                OutlinedTextField(left, { if (it.length <= 6 && it.all(Char::isDigit)) left = it }, label = { Text("Left") }, placeholder = { Text("0") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+                OutlinedTextField(right, { if (it.length <= 6 && it.all(Char::isDigit)) right = it }, label = { Text("Right") }, placeholder = { Text("0") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(top, { if (it.length <= 6 && it.all(Char::isDigit)) top = it }, label = { Text("Top") }, placeholder = { Text("0") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                OutlinedTextField(bottom, { if (it.length <= 6 && it.all(Char::isDigit)) bottom = it }, label = { Text("Bottom") }, placeholder = { Text("0") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                OutlinedTextField(top, { if (it.length <= 6 && it.all(Char::isDigit)) top = it }, label = { Text("Top") }, placeholder = { Text("0") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+                OutlinedTextField(bottom, { if (it.length <= 6 && it.all(Char::isDigit)) bottom = it }, label = { Text("Bottom") }, placeholder = { Text("0") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
             }
             if (margins.all { it != null }) Text("New: ${width.toLong() + margins[0]!! + margins[2]!!} × ${height.toLong() + margins[1]!! + margins[3]!!} px", fontSize = 12.sp)
         }
@@ -3989,8 +4035,8 @@ private fun shapePoints(path: List<GuideLine>): List<Pt> = path.flatMap { guideP
 // Printable geometry is built by the tested core (com.davoyans.idea3d.core) in model millimeters:
 // X right, Y up, Z toward the front-view viewer. The drawn picture is the front surface and
 // thickness extends behind it.
-private data class StlShape(val contour: List<Pt>, val depth: Double, val z: Double, val color: Int, val edges: List<GuideLine>)
-private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null): List<SolidSpec> {
+private data class StlShape(val contour: List<Pt>, val depth: Double, val z: Double, val color: Int, val edges: List<GuideLine>, val extrusionId: Int)
+private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null, extrusionIdsOut: MutableList<Int>? = null): List<SolidSpec> {
     val pixelsPerUnit = scale?.takeIf { it.isFinite() && it > 0 } ?: error("Set a calibration length before exporting")
     val shapes = drawableGuideShapes(guides)
     require(shapes.isNotEmpty()) { "Draw a closed shape and add 3D depth first" }
@@ -4026,7 +4072,7 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
             }.sortedBy { it.first }.fold(mutableListOf<Pair<Double, Pt>>()) { acc, point -> if (acc.none { distance(it.second, point.second) < 0.01 }) acc.add(point); acc }
             listOf(a) + interior.map { it.second }
         }
-        name to StlShape(enriched, depth, extrusion.positionZMm, guideColor(shape.first().colorIndex).toArgb(), edges)
+        name to StlShape(enriched, depth, extrusion.positionZMm, guideColor(shape.first().colorIndex).toArgb(), edges, extrusion.id)
     }
     if (issues.isNotEmpty()) throw MeshException(issues)
     val mmPerPixelX = axisScale?.first?.let { unitFactorMm(unit) / it } ?: (unitFactorMm(unit) / pixelsPerUnit)
@@ -4034,6 +4080,7 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
     val originX = models.minOf { (_, model) -> model.contour.minOf { it.x } }.toDouble()
     val originY = models.maxOf { (_, model) -> model.contour.maxOf { it.y } }.toDouble()
     originOut?.let { it[0] = originX; it[1] = originY }
+    extrusionIdsOut?.addAll(models.map { it.second.extrusionId })
     return models.map { (name, model) ->
         val outline = model.contour.map { p ->
             val edge = model.edges.minByOrNull { distance(p, guidePointAt(it, guideNearestParameter(it, p))) } ?: error("Missing shape boundary")
@@ -4046,8 +4093,8 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
     }
 }
 
-private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null): List<Mesh> =
-    MeshBuilder.buildAll(buildSolidSpecs(guides, extrusions, scale, unit, originOut, axisScale))
+private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null, extrusionIdsOut: MutableList<Int>? = null): List<Mesh> =
+    MeshBuilder.buildAll(buildSolidSpecs(guides, extrusions, scale, unit, originOut, axisScale, extrusionIdsOut))
 
 private fun buildStlModel(guides: List<GuideLine>, extrusions: List<Extrusion>, scale: Double?, unit: String, triangleColors: MutableList<Int>? = null, originOut: DoubleArray? = null, axisScale: Pair<Double, Double>? = null): ByteArray {
     val meshes = buildMeshes(guides, extrusions, scale, unit, originOut, axisScale)
