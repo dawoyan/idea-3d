@@ -70,9 +70,10 @@ internal class ViewerMesh private constructor(val vertices: FloatBuffer, val nor
                     repeat(3) { axis -> val v = data.float; require(v.isFinite()) { "Invalid model coordinate" }; vertices[index + axis] = v; low[axis] = minOf(low[axis], v); high[axis] = maxOf(high[axis], v) }
                     normals[index] = nx; normals[index + 1] = ny; normals[index + 2] = nz
                     val ci = triangle * 12 + vertex * 4
-                    colors[ci] = max(0.14f, android.graphics.Color.red(color) / 255f)
-                    colors[ci + 1] = max(0.14f, android.graphics.Color.green(color) / 255f)
-                    colors[ci + 2] = max(0.14f, android.graphics.Color.blue(color) / 255f)
+                    // Lift very dark materials slightly so light and shade on faces stay readable.
+                    colors[ci] = 0.22f + 0.78f * android.graphics.Color.red(color) / 255f
+                    colors[ci + 1] = 0.22f + 0.78f * android.graphics.Color.green(color) / 255f
+                    colors[ci + 2] = 0.22f + 0.78f * android.graphics.Color.blue(color) / 255f
                     colors[ci + 3] = 1f
                 }
                 data.short
@@ -301,7 +302,7 @@ private class MeasurementOverlay(context: Context, private val mesh: ViewerMesh,
     private fun drawAxes(canvas: android.graphics.Canvas, density: Float) {
         val rotation = FloatArray(16); Matrix.setIdentityM(rotation, 0)
         Matrix.rotateM(rotation, 0, renderer.pitch, 1f, 0f, 0f); Matrix.rotateM(rotation, 0, renderer.yaw, 0f, 1f, 0f)
-        val origin = 36f * density to height - 36f * density
+        val origin = 56f * density to height - 56f * density
         val length = 24f * density
         val axes = listOf(Triple("X", floatArrayOf(1f, 0f, 0f, 0f), 0xFFD32F2F.toInt()), Triple("Y", floatArrayOf(0f, 1f, 0f, 0f), 0xFF2E7D32.toInt()), Triple("Z", floatArrayOf(0f, 0f, 1f, 0f), 0xFF1565C0.toInt()))
         val out = FloatArray(4)
@@ -367,7 +368,10 @@ internal fun ThreeDViewerDialog(mesh: ViewerMesh, initialAngle: ViewerAngle, ini
                     Slider(value = sun, onValueChange = { sun = it; view.setSunPosition(it) }, onValueChangeFinished = { onSunChange(sun) }, modifier = Modifier.fillMaxWidth(), colors = SliderDefaults.colors(thumbColor = Color.Transparent, activeTrackColor = Color.Transparent, inactiveTrackColor = Color.Transparent))
                     Icon(painterResource(R.drawable.ic_sun), contentDescription = null, tint = Color(0xFFE7A500), modifier = Modifier.offset(x = (maxWidth - 32.dp) * sun, y = 8.dp).size(32.dp))
                 }
-                AndroidView(factory = { FrameLayout(it).apply { addView(view); addView(view.measurementOverlay) } }, modifier = Modifier.fillMaxWidth().weight(1f))
+                // A rebuilt model creates a new GL view; key the host so it is actually swapped in.
+                androidx.compose.runtime.key(view) {
+                    AndroidView(factory = { FrameLayout(it).apply { addView(view); addView(view.measurementOverlay) } }, modifier = Modifier.fillMaxWidth().weight(1f))
+                }
             }
         }
     }

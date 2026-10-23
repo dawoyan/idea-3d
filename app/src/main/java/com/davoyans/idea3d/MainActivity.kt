@@ -1968,7 +1968,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }, { project -> ProjectStore.delete(context, project.id); library = ProjectStore.list(context) })
         else Column(Modifier.padding(padding).fillMaxSize()) {
-            StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, onMeasurements = { showMeasurements = true })
+            StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, onMeasurements = { showMeasurements = true })
             if (!blankScene) CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
@@ -1995,8 +1995,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { corrected.bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) } }
                 } else Toast.makeText(context, "Add two parallel-side references and one connecting reference", Toast.LENGTH_SHORT).show()
             })
-            if (draftStart != null) Text("Tap the end point", Modifier.fillMaxWidth().padding(10.dp), textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-            else if (tool == Tool.CALIBRATE) CalibrationList(lines, unit, Modifier.fillMaxWidth().heightIn(max = 96.dp)) { line -> selectedLineId = line.id; showLineEdit = true }
+            // The end-point hint lives in the status strip so the canvas never shifts mid-gesture.
+            if (tool == Tool.CALIBRATE) CalibrationList(lines, unit, Modifier.fillMaxWidth().heightIn(max = 96.dp)) { line -> selectedLineId = line.id; showLineEdit = true }
         }
     }
     renameTarget?.let { project -> ProjectTitleDialog(project, onDismiss = { renameTarget = null }, onSave = { title ->
@@ -2554,9 +2554,9 @@ private sealed class ModelReport {
     }, dismissButton = { TextButton(onClick = onDismiss) { Text(if (report is ModelReport.Ready) "Cancel" else "Close") } })
 }
 
-@Composable private fun StatusStrip(tool: Tool, scale: Double?, count: Int, refs: Int, onMeasurements: () -> Unit) {
+@Composable private fun StatusStrip(tool: Tool, scale: Double?, count: Int, refs: Int, drawingEnd: Boolean = false, onMeasurements: () -> Unit) {
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 14.dp, vertical = 8.dp)) {
-        val status = when { tool == Tool.NONE -> "Choose a tool"; tool == Tool.CROP -> "Adjust crop, then confirm"; tool == Tool.LINES -> "Tap points to draw a guide"; tool == Tool.ADJUST -> "Select a point, line or label"; tool == Tool.CALIBRATE -> "Tap two points to calibrate"; else -> "Tap two points to measure" }
+        val status = when { drawingEnd -> "Tap the end point"; tool == Tool.NONE -> "Choose a tool"; tool == Tool.CROP -> "Adjust crop, then confirm"; tool == Tool.LINES -> "Tap points to draw a guide"; tool == Tool.ADJUST -> "Select a point, line or label"; tool == Tool.CALIBRATE -> "Tap two points to calibrate"; else -> "Tap two points to measure" }
         Text(status, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("$count measurements", modifier = Modifier.clickable(onClick = onMeasurements).padding(vertical = 6.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF006E67))
