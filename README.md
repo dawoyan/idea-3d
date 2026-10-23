@@ -31,6 +31,7 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
   - drag its dots to move outline points. Points that line up in the view move together.
 
   The new size or offset shows while dragging, each drag is one undo step, and tapping the selected shape again opens its exact values. For example, in Top you can widen a Front box or make it deeper.
+- **Fit:** each plane opens zoomed to everything in it, including shapes from the other planes, so every corner and handle is on screen. **Fit** in the status bar does this again, and pinching can zoom out further. Blank canvases also grow to hold everything drawn on them. The status bar says what to tap and drag in each step.
 - **Blank canvases:** Top and Profile are blank and start at the picture's size. They grow to fill the screen, with no dark bands, and so does an empty scene's front canvas. Crop resizes them. Each plane stores where its canvas sits in 3D, so cropping or growing never moves anything.
 - **Calibration:** a plane uses its own calibration lines if it has any. Otherwise Top and Profile use the front scale, and an empty scene uses 1 pixel per unit. Leveling, rotation and perspective correction work on the photo, so they stay in Front.
 - **3D:** shown in place of the canvas. One finger orbits, two fingers pan and zoom, and a tap opens an object's exact values. Sizes, Front, Frame, light, Reset and Save are on one slim row. The model rebuilds after every change, including undo.

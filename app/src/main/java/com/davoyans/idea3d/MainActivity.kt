@@ -871,6 +871,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var selectedForeign by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
     var foreignDrag by remember { mutableStateOf<ForeignDrag?>(null) }
     var foreignDialog by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
+    var editorViewSize by remember { mutableStateOf(Size.Zero) }
+    // Set when a plane or project opens; the view zooms to its content once the other planes' shapes are known.
+    var fitPending by remember { mutableStateOf(true) }
     fun recalculate(input: List<MeasureLine>): List<MeasureLine> {
         val nextScale = scaleFor(input, editPlane)
         val nextAxes = if (editPlane != ModelPlane.FRONT) null else axisScaleOf(input, unit)
@@ -920,23 +923,25 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val frame = frameOf(editPlane)
         planeFrames = planeFrames + (editPlane to PlaneFrame(frame.originU + dx, frame.originV + dy, width, height))
     }
+    /** Bounds (canvas pixels) of everything in the plane being edited, including shapes from the other planes. */
+    fun contentBounds(): FloatArray? {
+        var minX = Float.POSITIVE_INFINITY; var minY = Float.POSITIVE_INFINITY; var maxX = Float.NEGATIVE_INFINITY; var maxY = Float.NEGATIVE_INFINITY
+        fun add(x: Float, y: Float) { minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y) }
+        guides.forEach { g -> listOfNotNull(g.start, g.end, g.curveMid).forEach { add(it.x, it.y) } }
+        lines.forEach { l -> add(l.start.x, l.start.y); add(l.end.x, l.end.y) }
+        foreign.forEach { o -> var i = 0; while (i + 1 < o.canvas.size) { add(o.canvas[i], o.canvas[i + 1]); i += 2 } }
+        return if (minX.isFinite()) floatArrayOf(minX, minY, maxX, maxY) else null
+    }
     /**
-     * Grows a blank canvas (Top, Profile or an empty scene) to the shape of the screen, so there are no dark bands.
-     * Earlier undo steps are moved too, so undoing never shifts the drawing.
+     * Grows a blank canvas (Top, Profile or an empty scene) by the given margins. The drawing and the plane's origin
+     * move together, and earlier undo steps are moved too, so nothing shifts in 3D or on undo.
      */
-    fun fitCanvasToView(viewW: Float, viewH: Float) {
-        if (presentation || tool == Tool.CROP || viewW < 10f || viewH < 10f || !(editPlane != ModelPlane.FRONT || blankScene)) return
-        val canvas = planeCanvas ?: return
-        val aspect = viewW / viewH
-        val w = canvas.width; val h = canvas.height
-        val (newW, newH) = when {
-            h * aspect > w * 1.01f -> kotlin.math.ceil(h * aspect).toInt() to h
-            w / aspect > h * 1.01f -> w to kotlin.math.ceil(w / aspect).toInt()
-            else -> return
-        }
-        if (newW.toLong() * newH > 40_000_000L) return
-        val dx = ((newW - w) / 2).toFloat(); val dy = ((newH - h) / 2).toFloat()
-        val plane = editPlane; val oldFrontW = bitmap?.width ?: w; val oldFrontH = bitmap?.height ?: h
+    fun growBlankCanvas(left: Int, top: Int, right: Int, bottom: Int): Boolean {
+        val canvas = planeCanvas ?: return false
+        val newW = canvas.width + left + right; val newH = canvas.height + top + bottom
+        if (left < 0 || top < 0 || right < 0 || bottom < 0 || newW.toLong() * newH > 40_000_000L) return false
+        val dx = left.toFloat(); val dy = top.toFloat()
+        val plane = editPlane; val oldFrontW = bitmap?.width ?: canvas.width; val oldFrontH = bitmap?.height ?: canvas.height
         undoHistory = undoHistory.map { snapshot ->
             val frame = snapshot.frames[plane] ?: defaultFrame(plane, oldFrontW, oldFrontH)
             val frames = snapshot.frames + (plane to PlaneFrame(frame.originU + dx, frame.originV + dy, newW, newH))
@@ -949,7 +954,32 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             bitmap = grown
             projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { grown.compress(Bitmap.CompressFormat.PNG, 100, it) } }
         }
-        zoom = 1f; pan = Offset.Zero
+        fitPending = true
+        return true
+    }
+    fun isBlankCanvas() = editPlane != ModelPlane.FRONT || blankScene
+    /** Grows a blank canvas so every shape, including the grey ones, sits on it with a margin. */
+    fun growCanvasToContent(): Boolean {
+        if (!isBlankCanvas() || tool == Tool.CROP) return false
+        val canvas = planeCanvas ?: return false
+        val b = contentBounds() ?: return false
+        val margin = max(b[2] - b[0], b[3] - b[1]) * 0.15f + 40f
+        val left = kotlin.math.ceil(max(0f, margin - b[0])).toInt(); val top = kotlin.math.ceil(max(0f, margin - b[1])).toInt()
+        val right = kotlin.math.ceil(max(0f, b[2] + margin - canvas.width)).toInt(); val bottom = kotlin.math.ceil(max(0f, b[3] + margin - canvas.height)).toInt()
+        // Very large content can exceed the canvas size limit; the view still zooms out to show it.
+        return left + top + right + bottom > 0 && growBlankCanvas(left, top, right, bottom)
+    }
+    /** Grows a blank canvas to the shape of the screen, so there are no dark bands. */
+    fun fitCanvasToView(viewW: Float, viewH: Float) {
+        if (!presentation) editorViewSize = Size(viewW, viewH)
+        if (presentation || tool == Tool.CROP || viewW < 10f || viewH < 10f || !isBlankCanvas()) return
+        val canvas = planeCanvas ?: return
+        val aspect = viewW / viewH
+        val w = canvas.width; val h = canvas.height
+        when {
+            h * aspect > w * 1.01f -> { val extra = kotlin.math.ceil(h * aspect).toInt() - w; growBlankCanvas(extra / 2, 0, extra - extra / 2, 0) }
+            w / aspect > h * 1.01f -> { val extra = kotlin.math.ceil(w / aspect).toInt() - h; growBlankCanvas(0, extra / 2, 0, extra - extra / 2) }
+        }
     }
     fun startCrop() {
         val snapshot = UndoSnapshot(if (editPlane == ModelPlane.FRONT) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames)
@@ -1114,6 +1144,20 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val front = planeGeometry(ModelPlane.FRONT)
         projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, allLines(), allGuides(), guidesDetected, projectCapturedAt, levelRotation, pictureOptions, allExtrusions(), blankScene, planeFrames)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, front.guides, front.lines) }; library = ProjectStore.list(context) }
     }
+    /** Zooms and centers the canvas on everything in this plane, including shapes from the other planes. */
+    fun fitView() {
+        val canvas = planeCanvas ?: return
+        val viewW = editorViewSize.width; val viewH = editorViewSize.height
+        if (viewW < 10f || viewH < 10f) return
+        val bounds = contentBounds() ?: run { zoom = 1f; pan = Offset.Zero; return }
+        val minX = bounds[0]; val minY = bounds[1]; val maxX = bounds[2]; val maxY = bounds[3]
+        val baseFit = min(viewW / canvas.width, viewH / canvas.height)
+        // Leave room around the content for handles.
+        val nextZoom = min(viewW * 0.72f / ((maxX - minX).coerceAtLeast(1f) * baseFit), viewH * 0.72f / ((maxY - minY).coerceAtLeast(1f) * baseFit)).coerceIn(0.1f, 8f)
+        val fit = baseFit * nextZoom
+        zoom = nextZoom
+        pan = Offset(viewW / 2f - (minX + maxX) / 2f * fit - (viewW - canvas.width * fit) / 2f, viewH / 2f - (minY + maxY) / 2f * fit - (viewH - canvas.height * fit) / 2f)
+    }
     // Objects from the other planes, flattened into this plane's canvas so they can be lined up with, selected and reshaped here.
     LaunchedEffect(projectId, editPlane, planeStash, planeFrames, scale, unit, bitmap) {
         if (bitmap == null) return@LaunchedEffect
@@ -1149,6 +1193,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }.getOrDefault(emptyList()) }
         if (foreign.none { it.key == selectedForeign }) selectedForeign = null
+        if (fitPending && editorViewSize.width > 10f) {
+            // A grown canvas rebuilds these shapes first; the next pass fits the view.
+            if (!growCanvasToContent()) { fitView(); fitPending = false }
+        }
     }
     fun selectedForeignObject() = foreign.firstOrNull { it.key == selectedForeign }
     /** Replaces one plane's guides and objects, whether it is the plane being edited or a stashed one. */
@@ -2229,7 +2277,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         selectedWholeGuideId = null; selectedWholeLineId = null; selectedLabelId = null; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null
         if (tool == Tool.CALIBRATE || tool == Tool.CROP) tool = Tool.NONE
         selectedForeign = null; foreignDrag = null
-        zoom = 1f; pan = Offset.Zero
+        zoom = 1f; pan = Offset.Zero; fitPending = true
     }
 
     fun restoreLastUndo() {
@@ -2399,7 +2447,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }, { project ->
             BitmapFactory.decodeFile(ProjectStore.imageFile(context, project.id).absolutePath)?.let { loaded ->
-                blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; editPlane = ModelPlane.FRONT; planeFrames = project.frames
+                blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; editPlane = ModelPlane.FRONT; planeFrames = project.frames; fitPending = true
                 planeStash = ModelPlane.entries.filter { it != ModelPlane.FRONT }.associateWith { plane -> PlaneGeometry(project.lines.filter { it.plane == plane }, project.guides.filter { it.plane == plane }, project.extrusions.filter { it.plane == plane }) }.filterValues { it != PlaneGeometry() }
                 lines = project.lines.filter { it.plane == ModelPlane.FRONT }; guides = project.guides.filter { it.plane == ModelPlane.FRONT }; guidesDetected = project.guidesDetected; extrusions = project.extrusions.filter { it.plane == ModelPlane.FRONT }; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference && it.plane == ModelPlane.FRONT }; scale = recomputeScale(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit) ?: if (project.blankScene) unitFactorMm(project.unit) else null; axisScale = axisScaleOf(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
             }
@@ -2412,7 +2460,15 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         })
         else Column(Modifier.padding(padding).fillMaxSize()) {
-            StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, onMeasurements = { showMeasurements = true })
+            val editHint = when {
+                show3d -> "3D: drag to orbit, two fingers to pan and zoom, tap a shape for exact sizes"
+                tool == Tool.ADJUST && selectedForeign != null -> "Drag the shape to move it · round handles resize · dots move points · tap it again for exact sizes"
+                tool == Tool.ADJUST && foreign.isNotEmpty() && selectedEndpoint == null && selectedGuideEndpoint == null && selectedWholeGuideId == null -> "Tap a shape to select it. Grey shapes were drawn in another view and can be moved and resized here"
+                tool == Tool.NONE && foreign.isNotEmpty() -> "Choose a tool. Use Adjust to move or resize shapes, including the grey ones"
+                else -> null
+            }
+            val axesHint = if (show3d) "" else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
+            StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, hint = editHint, axes = axesHint, onFit = if (show3d) null else ({ if (!growCanvasToContent()) fitView() }), onMeasurements = { showMeasurements = true })
             PlaneSwitcher(editPlane, show3d, onPlane = { leave3d(); switchPlane(it) }, on3d = ::open3dView)
             val model = viewerModel
             if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, initialSun = ((extrusions.firstOrNull()?.sun?.x ?: ((bitmap?.width ?: 1) * 0.15f)) / (bitmap?.width ?: 1)).coerceIn(0f, 1f), onSunChange = { position ->
@@ -2994,11 +3050,6 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
             FilterChip(selected = !showing3d && plane == candidate, onClick = { onPlane(candidate) }, label = { Text(candidate.label, fontSize = 13.sp) })
         }
         FilterChip(selected = showing3d, onClick = on3d, label = { Text("3D", fontSize = 13.sp) })
-        if (!showing3d) Text(when (plane) {
-            ModelPlane.FRONT -> "X →  Y ↑  depth Z"
-            ModelPlane.TOP -> "X →  Z ↓ front  depth Y"
-            ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X"
-        }, fontSize = 11.sp, color = Color(0xFF4D5A57), maxLines = 1, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
     }
 }
 
@@ -3042,13 +3093,16 @@ private sealed class ModelReport {
     }, dismissButton = { TextButton(onClick = onDismiss) { Text(if (report is ModelReport.Ready) "Cancel" else "Close") } })
 }
 
-@Composable private fun StatusStrip(tool: Tool, scale: Double?, count: Int, refs: Int, drawingEnd: Boolean = false, onMeasurements: () -> Unit) {
-    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 14.dp, vertical = 8.dp)) {
+@Composable private fun StatusStrip(tool: Tool, scale: Double?, count: Int, refs: Int, drawingEnd: Boolean = false, hint: String? = null, axes: String = "", onFit: (() -> Unit)? = null, onMeasurements: () -> Unit) {
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 14.dp, vertical = 6.dp)) {
         val status = when { drawingEnd -> "Tap the end point"; tool == Tool.NONE -> "Choose a tool"; tool == Tool.CROP -> "Adjust crop, then confirm"; tool == Tool.LINES -> "Tap points to draw a guide"; tool == Tool.ADJUST -> "Select a point, line or label"; tool == Tool.CALIBRATE -> "Tap two points to calibrate"; else -> "Tap two points to measure" }
-        Text(status, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(hint ?: status, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("$count measurements", modifier = Modifier.clickable(onClick = onMeasurements).padding(vertical = 6.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF006E67))
-            Text("  |  $refs reference${if (refs == 1) "" else "s"}", fontSize = 12.sp, color = Color(0xFF4D5A57))
+            Text("$count measurements", modifier = Modifier.clickable(onClick = onMeasurements).padding(vertical = 4.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF006E67))
+            Text("  |  $refs ref${if (refs == 1) "" else "s"}", fontSize = 12.sp, color = Color(0xFF4D5A57), maxLines = 1)
+            Text(axes, fontSize = 11.sp, color = Color(0xFF4D5A57), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.End, modifier = Modifier.weight(1f).padding(horizontal = 6.dp))
+            // Brings everything in this plane back into view.
+            if (onFit != null) Text("Fit", modifier = Modifier.border(1.dp, Color(0xFF006E67), RoundedCornerShape(12.dp)).clickable(onClick = onFit).padding(horizontal = 12.dp, vertical = 3.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF006E67))
         }
     }
 }
@@ -3470,7 +3524,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val centroid = Offset(pressed.map { it.position.x }.average().toFloat(), pressed.map { it.position.y }.average().toFloat())
                         val distance = pressed.map { hypot((it.position.x - centroid.x).toDouble(), (it.position.y - centroid.y).toDouble()).toFloat() }.average().toFloat()
                         if (lastDistance > 0f) {
-                            val nextZoom = (localZoom * (distance / lastDistance)).coerceIn(1f, 8f)
+                            val nextZoom = (localZoom * (distance / lastDistance)).coerceIn(0.1f, 8f)
                             val focus = sourceAt(lastCentroid, localZoom, localPan)
                             val nextFit = baseFit * nextZoom
                             val unrotatedCentroid = rotateView(centroid, -rotation)
@@ -3568,7 +3622,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 drawImage(bitmap.asImageBitmap(), dstOffset = androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()), dstSize = androidx.compose.ui.unit.IntSize(imageW.toInt(), imageH.toInt()), alpha = 1f - pictureOptions.transparency / 100f)
                 if (ghosts.isNotEmpty()) drawIntoCanvas { canvas ->
                     // Drawn opaque into a translucent layer so overlapping faces don't darken.
-                    canvas.saveLayer(androidx.compose.ui.geometry.Rect(left, top, left + imageW, top + imageH), androidx.compose.ui.graphics.Paint().apply { alpha = 0.3f })
+                    canvas.saveLayer(androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height), androidx.compose.ui.graphics.Paint().apply { alpha = 0.3f })
                     ghosts.forEach { (argb, triangles) -> drawPath(trianglePath(triangles, left, top, fit), Color(argb).copy(alpha = 1f)) }
                     canvas.restore()
                 }
