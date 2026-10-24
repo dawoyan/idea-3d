@@ -36,14 +36,18 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
   - **Grey shapes:** selecting one also offers exact values, **3D Cut**, **3D Join**, and **Open in its view**. That last one switches to the view the shape was drawn in, where split line by point, join shapes and 2D cut apply to it.
 - **Materials:** **Materials** on the main screen lists bars and pipes shared by all projects. Each has a name, a profile (rectangular or round, tube or bar), sizes, wall thickness and a color, and the list starts with a few examples such as a rectangular iron pipe 40 × 20 × 2 mm. Tap a line and then the **Material** button in the top bar, and pick a material: the whole line, including every segment of a broken line, becomes that bar or pipe in 3D and in STL/3MF export. The part is centered on the line, its height runs along the view's depth axis, and curves follow in short straight pieces.
 - **Materials from your own drawings:** in any project, draw a cross-section; closed shapes inside it become holes, so a square inside a square is a tube. Tap the project name and choose **Save drawing as material**: it takes the selected shape, or the biggest outline in the drawing. You can also select the shape with Adjust and tap the square-with-plus icon. Name it, for example "Tube 4×4", and set its real width; height and holes scale with it. It joins the shared list, and in any other project a line's **Line details** can use it: the line becomes that shape along its length.
-- **Select (several items, every view):** tap **Select** in the grey bar. It works the same in Front, Top and Profile, on items drawn in any view: lines, broken lines, curves, shapes and 3D objects.
-  - Tap items to pick or unpick them (they turn orange), or drag a box around them.
+- **Select (everything, every view):** tap **Select** in the grey bar. It works the same in Front, Top and Profile, on anything drawn in any view: points, lines, broken lines, curves, shapes and 3D objects.
+  - Tap a point to pick it (orange ring), or tap a line, shape or object to pick it (orange band). Tap again to unpick.
+  - Or drag a box: items lying fully inside are picked whole, and other points inside the box are picked as points.
   - Drag a picked item to move them all; the arrows move them one step.
   - **Group** keeps items together: picking one picks the group. Groups can span views and are saved; **Ungroup** splits them.
   - **Merge:** 3D objects join into one solid. Two overlapping shapes drawn in the same view become one outline.
   - **Cut 1st by 2nd:** the second item is cut out of the first: a shape by a shape or straight line in the same view, or one 3D object by another.
   - **Line up ⬌/⬍** puts their centers on one row or column of this view. **Space ⬌/⬍** spaces three or more evenly.
-  - **Delete.** **Done** leaves Select.
+  - **Line up** and **Space** work on points too, mixed with items.
+  - **Properties** opens the settings of the one picked thing.
+  - **Make 3D** gives picked shapes 20 mm depth, and **Copy** duplicates picked items.
+  - **Delete** removes picked items. For a picked point, it removes the lines ending there. **Done** leaves Select.
 - **Several points:** in Adjust, drag a box on empty space. It now also picks end points of lines from other views. They move together with the arrows or by dragging, and the align buttons line all of them up.
 - **Properties:** whenever something is selected, the grey bar shows **Properties**. It opens the right settings for it:
   - a **line**: length, color, thickness, material and turn;
