@@ -409,3 +409,33 @@ class MemberTurnTest {
     }
 }
 
+class ImportTest {
+    private fun box() = MeshBuilder.extrude(SolidSpec("Box", listOf(OutlinePoint(0.0, 0.0, 0.0, 10.0), OutlinePoint(40.0, 0.0, 0.0, 10.0), OutlinePoint(40.0, 20.0, 0.0, 10.0), OutlinePoint(0.0, 20.0, 0.0, 10.0)), 0))
+
+    @Test fun importsBinaryStlAndThreeMf() {
+        val box = box()
+        listOf("box.stl" to ModelExport.stl(listOf(box)), "box.3mf" to ModelExport.threeMf(listOf(box))).forEach { (name, bytes) ->
+            val read = ModelImport.read(name, bytes)
+            assertEquals(box.triangles.size, read.triangles.size)
+            assertEquals(Math.abs(box.signedVolume), Math.abs(read.signedVolume), 1e-3)
+            val (low, high) = read.bounds
+            assertEquals(40.0, high.x - low.x, 1e-3); assertEquals(0.0, (high.y + low.y) / 2, 1e-3)
+        }
+    }
+
+    @Test fun importsObjAndAsciiStl() {
+        val obj = "v 0 0 0\nv 10 0 0\nv 10 10 0\nv 0 10 0\nf 1/1/1 2/2/2 3/3/3 4/4/4\n"
+        assertEquals(2, ModelImport.read("square.obj", obj.toByteArray()).triangles.size)
+        val stl = "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1e1 0 0\nvertex 0 10 0\nendloop\nendfacet\nendsolid t\n"
+        val read = ModelImport.read("t.stl", stl.toByteArray())
+        assertEquals(1, read.triangles.size); assertEquals(10.0, read.bounds.second.x - read.bounds.first.x, 1e-9)
+    }
+
+    @Test fun placedModelKeepsVolumeAndMoves() {
+        val box = ModelImport.centered(box())
+        val placed = ModelImport.placed(box, 2.0, 90.0, 0.0, 0.0, Vec3(5.0, 6.0, 7.0))
+        assertEquals(box.signedVolume * 8, placed.signedVolume, 1e-6)
+        val (low, high) = placed.bounds
+        assertEquals(6.0, (low.y + high.y) / 2, 1e-6); assertEquals(80.0, high.x - low.x, 1e-6)
+    }
+}
