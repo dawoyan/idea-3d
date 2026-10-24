@@ -171,7 +171,7 @@ private data class FeatureSnap(val point: Pt, val found: Boolean)
 private data class ScreenLine(val id: Int, val start: Offset, val end: Offset)
 private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "", val plane: ModelPlane = ModelPlane.FRONT)
 private fun MeasureLine.hasDepth() = abs(startZMm) > 0.000001 || abs(endZMm) > 0.000001
-private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0)
+private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null)
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
 private data class SelectedAlignmentObject(val guideIds: Set<Int>, val lineIds: Set<Int>, val points: List<Pt>)
 private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0, val plane: ModelPlane = ModelPlane.FRONT)
@@ -888,10 +888,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var editPlane by remember { mutableStateOf(ModelPlane.FRONT) }
     var planeStash by remember { mutableStateOf(emptyMap<ModelPlane, PlaneGeometry>()) }
     SideEffect { DepthWords.plane = editPlane }
-    fun planeGeometry(plane: ModelPlane) = if (plane == editPlane) PlaneGeometry(lines.map { it.copy(plane = plane) }, guides.map { it.copy(plane = plane) }, extrusions.map { it.copy(plane = plane) }) else planeStash[plane] ?: PlaneGeometry()
-    fun allLines() = ModelPlane.entries.flatMap { planeGeometry(it).lines }
-    fun allGuides() = ModelPlane.entries.flatMap { planeGeometry(it).guides }
-    fun allExtrusions() = ModelPlane.entries.flatMap { planeGeometry(it).extrusions }
+    /** Measurements of a plane (they stay in their own view). */
+    fun planeLines(plane: ModelPlane): List<MeasureLine> = if (plane == editPlane) lines.map { it.copy(plane = plane) } else planeStash[plane]?.lines.orEmpty()
     var planeFrames by remember { mutableStateOf(emptyMap<ModelPlane, PlaneFrame>()) }
     var solidOps by remember { mutableStateOf(emptyList<SolidOp>()) }
     // Items (lines, shapes, objects) grouped together, from any view: each item by its view and one of its line ids.
@@ -913,10 +911,76 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     // A plane uses its own calibration lines; without any, Top and Profile reuse the front scale and a blank scene is 1 pixel per unit.
     fun scaleFor(input: List<MeasureLine>, plane: ModelPlane): Double? = recomputeScale(input, unit)
-        ?: (if (plane != ModelPlane.FRONT) recomputeScale(planeGeometry(ModelPlane.FRONT).lines, unit) else null)
+        ?: (if (plane != ModelPlane.FRONT) recomputeScale(planeLines(ModelPlane.FRONT), unit) else null)
         ?: if (blankScene) unitFactorMm(unit) else null
-    fun frontAxes() = axisScaleOf(planeGeometry(ModelPlane.FRONT).lines, unit)
-    fun modelSetup() = ModelSetup(ModelPlane.entries.associateWith { frameOf(it) }, ModelPlane.entries.associateWith { scaleFor(planeGeometry(it).lines, it) }, frontAxes(), unit)
+    fun frontAxes() = axisScaleOf(planeLines(ModelPlane.FRONT), unit)
+    fun modelSetup() = ModelSetup(ModelPlane.entries.associateWith { frameOf(it) }, ModelPlane.entries.associateWith { scaleFor(planeLines(it), it) }, frontAxes(), unit)
+
+    /*
+     * Every view edits all lines, from every view, as its own. Lines drawn in another view are projected into this
+     * one: they keep that view in [GuideLine.plane], get negative ids (and path and group ids), and their depth
+     * along this view. Everything else about them works like a line drawn here. They are converted back whenever the
+     * other view's geometry is read (planeGeometry), so saving, 3D and export always see each line where it lives.
+     * Lines that outline a 3D object stay with their object in the other view.
+     */
+    val projectedIdSpan = 100_000_000
+    fun encodedId(plane: ModelPlane, id: Int) = -((plane.ordinal + 1) * projectedIdSpan + id)
+    fun decodedId(id: Int): Int = (-id) % projectedIdSpan
+    /** New lines made from a projected one (a split, say) get ids after everything already in their view. */
+    fun newIdBase(plane: ModelPlane, values: (GuideLine) -> Int?): Int =
+        ((planeStash[plane]?.guides.orEmpty().mapNotNull(values)) + guides.filter { it.plane == plane }.mapNotNull(values).filter { it < 0 }.map(::decodedId)).maxOrNull() ?: 0
+    fun homeId(value: Int?, base: Int): Int? = value?.let { if (it < 0) decodedId(it) else base + it }
+    fun projectGuide(g: GuideLine, from: ModelPlane, setup: ModelSetup): GuideLine? {
+        val own = setup.mapping(from) ?: return null; val here = setup.mapping(editPlane) ?: return null
+        val a = own.model(g.start, g.startZMm); val b = own.model(g.end, g.endZMm)
+        val m = g.curveMid?.let { own.model(it, (g.startZMm + g.endZMm) / 2) }
+        val n = editPlane.toward
+        return g.copy(id = encodedId(from, g.id), start = here.pixel(a), end = here.pixel(b), curveMid = m?.let { here.pixel(it) }, startZMm = a dot n, endZMm = b dot n, midDepthMm = m?.let { it dot n },
+            pathId = g.pathId?.let { encodedId(from, it) }, groupId = g.groupId?.let { encodedId(from, it) }, plane = from)
+    }
+    fun unprojectGuide(g: GuideLine, setup: ModelSetup, ids: Int, paths: Int, groups: Int): GuideLine? {
+        val home = g.plane
+        val own = setup.mapping(home) ?: return null; val here = setup.mapping(editPlane) ?: return null
+        val a = here.model(g.start, g.startZMm); val b = here.model(g.end, g.endZMm)
+        // An untouched projected curve knows its exact middle depth; pieces made from it use their ends.
+        val m = g.curveMid?.let { here.model(it, if (g.id < 0 && g.midDepthMm != null) g.midDepthMm else (g.startZMm + g.endZMm) / 2) }
+        val n = home.toward
+        return g.copy(id = homeId(g.id, ids)!!, start = own.pixel(a), end = own.pixel(b), curveMid = m?.let { own.pixel(it) }, startZMm = a dot n, endZMm = b dot n, midDepthMm = null,
+            pathId = homeId(g.pathId, paths), groupId = homeId(g.groupId, groups))
+    }
+    fun planeGeometry(plane: ModelPlane): PlaneGeometry {
+        if (plane == editPlane) return PlaneGeometry(lines.map { it.copy(plane = plane) }, guides.filter { it.plane == plane }, extrusions.map { it.copy(plane = plane) })
+        val stash = planeStash[plane] ?: PlaneGeometry()
+        val shown = guides.filter { it.plane == plane }
+        if (shown.isEmpty()) return stash
+        val setup = modelSetup()
+        val ids = newIdBase(plane) { it.id }; val paths = newIdBase(plane) { it.pathId }; val groups = newIdBase(plane) { it.groupId }
+        return stash.copy(guides = stash.guides + shown.mapNotNull { unprojectGuide(it, setup, ids, paths, groups) })
+    }
+    fun allLines() = ModelPlane.entries.flatMap { planeGeometry(it).lines }
+    fun allGuides() = ModelPlane.entries.flatMap { planeGeometry(it).guides }
+    fun allExtrusions() = ModelPlane.entries.flatMap { planeGeometry(it).extrusions }
+    /** Lines of [full] that outline one of its 3D objects (these stay in their view, edited through the object). */
+    fun objectLines(full: PlaneGeometry): Set<Int> = full.extrusions.flatMap { e -> extrusionGuides(e, full.guides).map { it.id } }.toSet()
+    /** Shows [next]: its own geometry plus every other view's lines projected into it. [full] is every view's complete geometry. */
+    fun showView(next: ModelPlane, full: Map<ModelPlane, PlaneGeometry>) {
+        editPlane = next
+        val own = full[next] ?: PlaneGeometry()
+        val setup = modelSetup()
+        val canProject = { p: ModelPlane -> setup.mapping(p) != null && setup.mapping(next) != null }
+        val projected = ModelPlane.entries.filter { it != next && canProject(it) }.flatMap { p ->
+            val g = full[p] ?: return@flatMap emptyList()
+            val keep = objectLines(g)
+            g.guides.filterNot { it.id in keep }.mapNotNull { projectGuide(it, p, setup) }
+        }
+        planeStash = ModelPlane.entries.filter { it != next }.associateWith { p ->
+            val g = full[p] ?: PlaneGeometry()
+            val keep = objectLines(g)
+            g.copy(guides = if (canProject(p)) g.guides.filter { it.id in keep } else g.guides)
+        }.filterValues { it != PlaneGeometry() }
+        guides = own.guides.map { it.copy(plane = next) } + projected; extrusions = own.extrusions
+    }
+
     // Top and Profile (and blank scenes) draw on a plain white canvas.
     val editFrame = frameOf(editPlane)
     val planeCanvas = remember(bitmap, editPlane == ModelPlane.FRONT, editFrame.width, editFrame.height) {
@@ -1188,7 +1252,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (bitmap == null) return@LaunchedEffect
         val memberGuides = allGuides().filter { it.materialId != null }; val memberSetup = modelSetup(); val memberPlane = editPlane; val materialMap = materials.associateBy { it.id }
         // Every line of the other views, flattened into this one, so plain lines can be found and lined up with too.
-        val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeGeometry(it).guides }
+        // Lines of other views are shown here as normal lines; only 3D objects' outlines remain in their view.
+        val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }
         ghostLines = withContext(Dispatchers.Default) { runCatching {
             val here = memberSetup.mapping(memberPlane) ?: return@runCatching emptyList()
             otherGuides.mapNotNull { g ->
@@ -1251,8 +1316,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     fun selectedForeignObject() = foreign.firstOrNull { it.key == selectedForeign }
     /** Replaces one plane's guides and objects, whether it is the plane being edited or a stashed one. */
     fun setPlaneShapes(plane: ModelPlane, nextGuides: List<GuideLine>, nextExtrusions: List<Extrusion>) {
-        if (plane == editPlane) { guides = nextGuides; extrusions = nextExtrusions }
-        else planeStash = planeStash + (plane to (planeStash[plane] ?: PlaneGeometry()).copy(guides = nextGuides.map { it.copy(plane = plane) }, extrusions = nextExtrusions.map { it.copy(plane = plane) }))
+        if (plane == editPlane) { guides = nextGuides.map { it.copy(plane = plane) } + guides.filter { it.plane != plane }; extrusions = nextExtrusions; return }
+        // Another view: its object outlines stay there; its other lines are shown here, projected.
+        val full = PlaneGeometry(planeStash[plane]?.lines.orEmpty(), nextGuides.map { it.copy(plane = plane) }, nextExtrusions.map { it.copy(plane = plane) })
+        val keep = objectLines(full); val setup = modelSetup()
+        val canProject = setup.mapping(plane) != null && setup.mapping(editPlane) != null
+        planeStash = planeStash + (plane to full.copy(guides = if (canProject) full.guides.filter { it.id in keep } else full.guides))
+        guides = guides.filter { it.plane != plane } + if (canProject) full.guides.filterNot { it.id in keep }.mapNotNull { projectGuide(it, plane, setup) } else emptyList()
     }
 
 
@@ -1557,13 +1627,15 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         return itemGuides(key).map { g -> val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1); pts.mapIndexed { i, p -> here.pixel(own.model(p, g.startZMm + (g.endZMm - g.startZMm) * i / n)) } }
     }
     /** The item under [point]: one drawn here, or one from another view as it shows here. */
+    /** The item key of a line shown here: its own view and its id there. */
+    fun homeKey(g: GuideLine): Pair<ModelPlane, Int> = if (g.plane == editPlane) editPlane to g.id else g.plane to (homeId(g.id, newIdBase(g.plane) { it.id }) ?: g.id)
     fun itemAt(point: Pt, radius: Double): Pair<ModelPlane, Int>? {
-        closestGuide(point, guides, radius * 1.7)?.let { return editPlane to it.id }
+        closestGuide(point, guides, radius * 1.7)?.let { return homeKey(it) }
         fun segmentDistance(a: Pt, b: Pt): Double { val dx = b.x - a.x; val dy = b.y - a.y; val t = (((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy).coerceAtLeast(1e-6f)).coerceIn(0f, 1f); return distance(point, Pt(a.x + dx * t, a.y + dy * t)) }
         ModelPlane.entries.filter { it != editPlane }.flatMap { plane -> planeGeometry(plane).guides.map { plane to it.id } }
             .mapNotNull { key -> itemOutlineHere(key).flatMap { it.zipWithNext() }.minOfOrNull { (a, b) -> segmentDistance(a, b) }?.let { key to it } }
             .filter { it.second <= radius * 1.7 }.minByOrNull { it.second }?.let { return it.first }
-        closedGuideShapes(guides).lastOrNull { pointInsidePolygon(point, shapePoints(it)) }?.let { return editPlane to it.first().id }
+        closedGuideShapes(guides).lastOrNull { pointInsidePolygon(point, shapePoints(it)) }?.let { return homeKey(it.first()) }
         foreign.lastOrNull { insideForeign(it, point) }?.let { o -> planeGeometry(o.plane).extrusions.firstOrNull { it.id == o.extrusionId }?.let { e -> extrusionGuides(e, planeGeometry(o.plane).guides).firstOrNull()?.let { return o.plane to it.id } } }
         return null
     }
@@ -1784,7 +1856,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     draftStart = point
                 } else if (distance(draftStart!!, point) > 4.0) {
                     pushUndo()
-                    guides = guides + GuideLine(nextGuideId(guides), draftStart!!, point, manual = true, pathId = activePolylineId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth)
+                    guides = guides + GuideLine(nextGuideId(guides), draftStart!!, point, manual = true, plane = editPlane, pathId = activePolylineId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth)
                     draftStart = point
                 }
             } else if (draftStart == null) {
@@ -1801,7 +1873,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 if (distance(draftStart!!, point) > 4.0) {
                     pushUndo()
                     val start = draftStart!!
-                    val guide = GuideLine(nextGuideId(guides), start, point, manual = true, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, curveMid = if (lineDrawing == LineDrawing.CURVE) Pt((start.x + point.x) / 2f, (start.y + point.y) / 2f) else null)
+                    val guide = GuideLine(nextGuideId(guides), start, point, manual = true, plane = editPlane, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, curveMid = if (lineDrawing == LineDrawing.CURVE) Pt((start.x + point.x) / 2f, (start.y + point.y) / 2f) else null)
                     guides = guides + guide
                     selectedGuideId = if (lineDrawing == LineDrawing.CURVE) guide.id else null
                 }
@@ -1861,7 +1933,15 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     fun activateExtrusion(point: Pt, radius: Double, targetId: Int? = null) {
         val image = bitmap ?: return
-        val guide = (if (targetId != null) guides.firstOrNull { it.id == targetId } else closestGuide(point, guides, radius * 2)) ?: return
+        var guide = (if (targetId != null) guides.firstOrNull { it.id == targetId } else closestGuide(point, guides, radius * 2)) ?: return
+        if (guide.plane != editPlane) {
+            // A shape drawn in another view becomes this view's shape, extruded along this view's depth.
+            val source = guides.filter { sameGuideObject(it, guide) }
+            var next = nextGuideId(guides); val path = nextGuidePathId(guides)
+            val renamed = source.associate { it.id to next++ }
+            guides = guides.filterNot { g -> source.any { it.id == g.id } } + source.map { it.copy(id = renamed.getValue(it.id), plane = editPlane, pathId = if (it.pathId != null) path else null, groupId = null, midDepthMm = null) }
+            guide = guides.first { it.id == renamed.getValue(guide.id) }
+        }
         val ids = guides.filter { sameGuideObject(it, guide) }.map { it.id }
         val existing = extrusions.firstOrNull { extrusionGuides(it, guides).map { guide -> guide.id }.toSet() == ids.toSet() }
         val selected = existing ?: run {
@@ -2635,11 +2715,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     fun switchPlane(next: ModelPlane) {
         if (next == editPlane) return
         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> if (guides.any { it.id == id }) crossViewSelection = editPlane to id }
-        val stash = planeStash.toMutableMap()
-        stash[editPlane] = planeGeometry(editPlane)
-        val loaded = stash.remove(next) ?: PlaneGeometry()
-        planeStash = stash.filterValues { it != PlaneGeometry() }; editPlane = next
-        guides = loaded.guides; extrusions = loaded.extrusions; lines = recalculate(loaded.lines)
+        val full = ModelPlane.entries.associateWith { planeGeometry(it) }
+        val loaded = full[next] ?: PlaneGeometry()
+        // Measurements stay in their view; lines from every view come along, projected.
+        lines = emptyList()
+        showView(next, full)
+        lines = recalculate(loaded.lines)
         referenceCount = lines.count { it.isReference }
         selectedExtrusionId = null; selectedCurveId = null; selectedVertices = emptyList(); selectedLineId = null; selectedEndpoint = null; selectedGuideId = null; selectedGuideEndpoint = null
         selectedWholeGuideId = null; selectedWholeLineId = null; selectedLabelId = null; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null
@@ -3008,6 +3089,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; editPlane = ModelPlane.FRONT; planeFrames = project.frames; solidOps = project.solidOps; itemGroups = project.itemGroups; selectMode = false; pickedItems = emptyList(); fitPending = true
                 planeStash = ModelPlane.entries.filter { it != ModelPlane.FRONT }.associateWith { plane -> PlaneGeometry(project.lines.filter { it.plane == plane }, project.guides.filter { it.plane == plane }, project.extrusions.filter { it.plane == plane }) }.filterValues { it != PlaneGeometry() }
                 lines = project.lines.filter { it.plane == ModelPlane.FRONT }; guides = project.guides.filter { it.plane == ModelPlane.FRONT }; guidesDetected = project.guidesDetected; extrusions = project.extrusions.filter { it.plane == ModelPlane.FRONT }; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference && it.plane == ModelPlane.FRONT }; scale = recomputeScale(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit) ?: if (project.blankScene) unitFactorMm(project.unit) else null; axisScale = axisScaleOf(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
+                // Show every view's lines in Front too.
+                showView(ModelPlane.FRONT, ModelPlane.entries.associateWith { plane -> PlaneGeometry(project.lines.filter { it.plane == plane }, project.guides.filter { it.plane == plane }, project.extrusions.filter { it.plane == plane }) })
             }
         }, { project ->
             ProjectStore.moveToTrash(context, project.id); library = ProjectStore.list(context)
