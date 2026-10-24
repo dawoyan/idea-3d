@@ -72,6 +72,29 @@ object MemberBuilder {
         return Csg.subtract(outer, inner)
     }
 
+    /**
+     * The cut face of a member at [a]: its outline and holes as 3D points, turned like [build] turns it.
+     * Used to show a bar's or pipe's shape where a line points into the screen.
+     */
+    fun section(a: Vec3, b: Vec3, up: Vec3, profile: MemberProfile, turnDeg: Double = 0.0): List<List<Vec3>> {
+        if (profile.problem() != null) return emptyList()
+        val along = b - a
+        if (along.length < 1e-6) return emptyList()
+        val u = along.normalized()
+        var v = up - u * (up dot u)
+        if (v.length < 1e-6) v = (if (kotlin.math.abs(u.x) < 0.9) Vec3(1.0, 0.0, 0.0) else Vec3(0.0, 1.0, 0.0)).let { it - u * (it dot u) }
+        v = v.normalized()
+        var w = u cross v
+        if (turnDeg != 0.0) {
+            val t = Math.toRadians(turnDeg); val c = kotlin.math.cos(t); val s = kotlin.math.sin(t)
+            val w2 = w * c + v * s; v = v * c - w * s; w = w2
+        }
+        val loops = if (profile.kind == ProfileKind.DRAWN) listOf(profile.outline.map { it.x to it.y }) + profile.holes.map { h -> h.map { it.x to it.y } }
+            else listOf(ring(profile.kind.round, profile.widthMm, profile.heightMm)) +
+                if (profile.kind.hollow) listOf(ring(profile.kind.round, profile.widthMm - 2 * profile.wallMm, profile.heightMm - 2 * profile.wallMm)) else emptyList()
+        return loops.map { loop -> loop.map { (x, y) -> a + w * x + v * y } }
+    }
+
     /** Cross-section corners as (across, up) pairs. */
     private fun ring(round: Boolean, width: Double, height: Double): List<Pair<Double, Double>> =
         if (round) (0 until ROUND_SEGMENTS).map { i -> val t = 2 * PI * i / ROUND_SEGMENTS; width / 2 * cos(t) to width / 2 * sin(t) }
