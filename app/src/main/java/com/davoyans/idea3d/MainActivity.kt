@@ -903,6 +903,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var selectedGhostPoints by remember { mutableStateOf(emptyList<Triple<ModelPlane, Int, Boolean>>()) }
     // Points picked in Select mode, from any view (including this one): (view, line id, start?).
     var pickedPoints by remember { mutableStateOf(emptyList<Triple<ModelPlane, Int, Boolean>>()) }
+    // What a box picks in Select mode: the points inside it (default) or the whole items inside it.
+    var boxPicksItems by remember { mutableStateOf(false) }
     /** The front canvas is the picture; Top and Profile canvases start at the picture's size and can be cropped or grown. */
     fun frameOf(plane: ModelPlane): PlaneFrame {
         val width = bitmap?.width ?: 1; val height = bitmap?.height ?: 1
@@ -1672,9 +1674,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val pts = itemOutlineHere(key).flatten()
             if (pts.isNotEmpty() && pts.all { it.x in x1..x2 && it.y in y1..y2 }) seen += key
         } }
-        seen.forEach { key -> if (pickedItems.none { sameItem(key, it) }) togglePicked(key) }
-        // Points inside the box that aren't part of a whole item picked above.
-        allPointsHere().filter { (sel, at) -> at.x in x1..x2 && at.y in y1..y2 && seen.none { k -> k.first == sel.first && itemGuides(k).any { it.id == sel.second } } }
+        if (boxPicksItems) { seen.forEach { key -> if (pickedItems.none { sameItem(key, it) }) togglePicked(key) }; return }
+        allPointsHere().filter { (_, at) -> at.x in x1..x2 && at.y in y1..y2 }
             .forEach { (sel, _) -> if (pickedPoints.none { samePoint(it, sel) }) pickedPoints = pickedPoints + sel }
     }
     /** End points of other views' lines inside a box, for multi-point selection. */
@@ -3048,10 +3049,16 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     Action("Delete", total >= 1, ::deletePicked)
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally)) {
-                    Action("Line up ⬌", total >= 2) { arrangePicked(horizontal = true, distribute = false) }
-                    Action("Line up ⬍", total >= 2) { arrangePicked(horizontal = false, distribute = false) }
-                    Action("Space ⬌", total >= 3) { arrangePicked(horizontal = true, distribute = true) }
-                    Action("Space ⬍", total >= 3) { arrangePicked(horizontal = false, distribute = true) }
+                    Action("Align ⬌", total >= 2) { arrangePicked(horizontal = true, distribute = false) }
+                    Action("Align ⬍", total >= 2) { arrangePicked(horizontal = false, distribute = false) }
+                    Action("Even ⬌", total >= 3) { arrangePicked(horizontal = true, distribute = true) }
+                    Action("Even ⬍", total >= 3) { arrangePicked(horizontal = false, distribute = true) }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally)) {
+                    // What dragging a box picks.
+                    FilterChip(selected = !boxPicksItems, onClick = { boxPicksItems = false }, label = { Text("Box: points", fontSize = 12.sp) })
+                    FilterChip(selected = boxPicksItems, onClick = { boxPicksItems = true }, label = { Text("Box: items", fontSize = 12.sp) })
+                    if (total > 0) Action("Clear") { pickedItems = emptyList(); pickedPoints = emptyList() }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally)) {
                     Action("Properties", total == 1, ::propertiesPicked)
@@ -3102,7 +3109,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         })
         else Column(Modifier.padding(padding).fillMaxSize()) {
             val editHint = when {
-                selectMode -> if (pickedItems.isEmpty() && pickedPoints.isEmpty()) "Tap points, lines, shapes or objects from any view to pick them, or drag a box around them" else "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · drag one to move all, arrows step"
+                selectMode -> if (pickedItems.isEmpty() && pickedPoints.isEmpty()) "Drag a box to pick ${if (boxPicksItems) "whole items" else "points"} inside it, or tap points, lines, shapes or objects. Then Align or Even to order them" else "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · drag one to move all, arrows step"
                 joinPick != null -> if (joinPick!!.selected.size < 2) "Tap the two blinking parts you want to keep, then Finish" else if (joinPick!!.keepRemaining) "These two parts join; the others stay. Tap Finish" else "Green parts join; red blinking parts are deleted. Tap Finish"
                 solidPick != null -> solidPick!!.let { (join, target) -> if (join) "Tap the object to join with ${objectName(target)}. Tap empty space to cancel" else "Tap the object that cuts ${objectName(target)}. Tap empty space to cancel" }
                 selectedForeignPoint != null -> "Arrows move the point one step · the move button moves it by an exact size · drag a dot to move freely"
@@ -3264,10 +3271,31 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             } }, confirmButton = {}, dismissButton = { TextButton(onClick = { pendingAlignment = null }) { Text("Cancel") } })
     }
     guideLengthEditId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
-        var length by remember(id, guide.lengthMm, unit) { mutableStateOf(guide.lengthMm?.let { (it / unitFactorMm(unit)).toString() } ?: "") }
+        var length by remember(id, unit) { mutableStateOf("") }
         var materialId by remember(id) { mutableStateOf(guide.materialId) }
         var turn by remember(id) { mutableStateOf(guide.materialTurnDeg) }
         var lineColorIndex by remember(id) { mutableIntStateOf(guide.colorIndex) }
+        // The line's extent along each model axis, editable for straight lines (the start stays put).
+        val here = modelSetup().mapping(editPlane)
+        val a3 = here?.model(guide.start, guide.startZMm); val b3 = here?.model(guide.end, guide.endZMm)
+        val extent = if (a3 != null && b3 != null) b3 - a3 else null
+        fun shown(v: Double?) = v?.let { java.text.DecimalFormat("0.##").format(it / unitFactorMm(unit)) } ?: ""
+        var dxText by remember(id) { mutableStateOf(shown(extent?.x)) }
+        var dyText by remember(id) { mutableStateOf(shown(extent?.y)) }
+        var dzText by remember(id) { mutableStateOf(shown(extent?.z)) }
+        fun setExtent(target: Vec3) {
+            val start = a3 ?: return; val map = here ?: return
+            val endModel = start + target
+            val oldEnd = guide.end
+            val newEnd = map.pixel(endModel); val newEndZ = endModel dot editPlane.toward
+            pushUndo()
+            guides = guides.map { item ->
+                if (!sameGuideObject(item, guide) && item.id != guide.id) item
+                else item.copy(start = if (distance(item.start, oldEnd) < 0.6) newEnd else item.start, end = if (distance(item.end, oldEnd) < 0.6) newEnd else item.end,
+                    startZMm = if (distance(item.start, oldEnd) < 0.6) newEndZ else item.startZMm, endZMm = if (distance(item.end, oldEnd) < 0.6) newEndZ else item.endZMm, lengthMm = null)
+            }
+            guideLengthEditId = null
+        }
         var lineWidth by remember(id) { mutableStateOf(guide.strokeWidth) }
         val value = length.replace(',', '.').toDoubleOrNull()
         val currentMm = scale?.let { s -> hypot(guidePoints(guide).zipWithNext().sumOf { (a, b) -> frontLength(a, b, s, axisScale) } * unitFactorMm(unit), guide.endZMm - guide.startZMm) }
@@ -3281,6 +3309,22 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 currentMm?.let { Text("Now ${formatLength(it, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2)}", fontSize = 13.sp, color = Color(0xFF4D5A57)) }
                 OutlinedTextField(length, { if (decimalInputPattern.matches(it)) length = it }, label = { Text("Length ($unit)") }, placeholder = { Text("Keep as is") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                 if (scale == null) Text("Set a calibration length to resize the line to scale.")
+                if (extent != null && guide.curveMid == null) {
+                    // Size along X, Y and Z: what the line covers in each direction, wherever it was drawn.
+                    Text("Size along each axis (${unit}), from its start", fontWeight = FontWeight.Medium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedTextField(dxText, { dxText = it }, label = { Text("X") }, singleLine = true, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+                        OutlinedTextField(dyText, { dyText = it }, label = { Text("Y") }, singleLine = true, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+                        OutlinedTextField(dzText, { dzText = it }, label = { Text("Z") }, singleLine = true, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val parsed = listOf(dxText, dyText, dzText).map { it.replace(',', '.').toDoubleOrNull()?.times(unitFactorMm(unit)) }
+                        OutlinedButton(enabled = parsed.all { it != null }, onClick = { setExtent(Vec3(parsed[0]!!, parsed[1]!!, parsed[2]!!)) }) { Text("Apply sizes", fontSize = 12.sp) }
+                        // Removes the part going into depth here, so the line lies flat in this view.
+                        val n = editPlane.toward
+                        OutlinedButton(onClick = { setExtent(extent - n * (extent dot n)) }) { Text("No depth here", fontSize = 12.sp) }
+                    }
+                }
                 Text("Color and thickness", fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     guideColors.indices.forEach { i -> Box(Modifier.size(30.dp).background(guideColor(i), CircleShape).border(if (i == lineColorIndex) 3.dp else 0.dp, Color(0xFF00897B), CircleShape).clickable { lineColorIndex = i }) }
@@ -4719,13 +4763,18 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     val materialName = guide.materialId?.let(materialNames::get)
                     if (guide.lengthMm != null || materialName != null) drawingScale?.takeIf { it > 0 }?.let { pxPerUnit ->
                         val pts = guidePoints(guide); val n = (pts.size - 1).coerceAtLeast(1)
+                        val seen = pts.zipWithNext().sumOf { (a, b) -> distance(a, b) } / pxPerUnit * unitFactorMm(unit)
                         val mm = pts.withIndex().zipWithNext().sumOf { (a, b) ->
                             val flat = distance(a.value, b.value) / pxPerUnit * unitFactorMm(unit)
                             hypot(flat, (guide.endZMm - guide.startZMm) * (b.index - a.index) / n)
                         }
-                        val center = viewAt(guidePointAt(guide, 0.5f))
-                        val text = "${formatMeasure(mm / unitFactorMm(unit), unit)} $unit" + (materialName?.let { " · $it" } ?: "")
-                        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; textSize = 14.sp.toPx(); isFakeBoldText = true; style = Paint.Style.STROKE; strokeWidth = 4.dp.toPx(); color = AndroidColor.WHITE }
+                        // Above the middle of the line (beside it for steep lines), so it doesn't cover the line.
+                        val mid = viewAt(guidePointAt(guide, 0.5f)); val a0 = viewAt(guide.start); val b0 = viewAt(guide.end)
+                        val steep = abs(b0.y - a0.y) > abs(b0.x - a0.x)
+                        val center = if (steep) Offset(mid.x + 10.dp.toPx(), mid.y) else Offset(mid.x, mid.y - 10.dp.toPx())
+                        // When part of the line goes into depth, say how long it looks here too.
+                        val text = "${formatMeasure(mm / unitFactorMm(unit), unit)} $unit" + (if (mm - seen > 0.01 * mm) " (${formatMeasure(seen / unitFactorMm(unit), unit)} seen here)" else "") + (materialName?.let { " · $it" } ?: "")
+                        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = if (steep) Paint.Align.LEFT else Paint.Align.CENTER; textSize = 14.sp.toPx(); isFakeBoldText = true; style = Paint.Style.STROKE; strokeWidth = 4.dp.toPx(); color = AndroidColor.WHITE }
                         drawContext.canvas.nativeCanvas.drawText(text, center.x, center.y, paint)
                         paint.style = Paint.Style.FILL; paint.color = AndroidColor.BLACK
                         drawContext.canvas.nativeCanvas.drawText(text, center.x, center.y, paint)
