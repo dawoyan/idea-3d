@@ -1482,6 +1482,22 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         text to { pushUndo(); solidOps = solidOps - op }
     }
 
+    /**
+     * What the Properties button opens for the current selection: a point's exact position, a shape's size, color,
+     * transparency and depth, a line's length, material, color and thickness, or a measurement's details.
+     */
+    fun openProperties(): (() -> Unit)? {
+        selectedForeign?.let { key -> return { foreignDialog = key } }
+        if (selectedForeignPoint != null || selectedGuideEndpoint != null || selectedEndpoint != null) return { movePointDialog = true }
+        (selectedWholeGuideId ?: selectedGuideId)?.let { id ->
+            val guide = guides.firstOrNull { it.id == id } ?: return@let
+            val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
+            return { if (inShape) shapeEditId = id else guideLengthEditId = id }
+        }
+        (selectedWholeLineId ?: selectedLineId)?.takeIf { id -> lines.any { it.id == id } }?.let { id -> return { selectedLineId = id; showLineEdit = true } }
+        return null
+    }
+
     /** Crossing lines are joined right on the canvas; every other junction keeps its dialog. */
     fun onJunction(action: JunctionAction) {
         if (action.kind != JunctionKind.JOIN_GUIDES && action.kind != JunctionKind.JOIN_MEASUREMENTS) { junctionAction = action; return }
@@ -2659,9 +2675,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 else -> null
             }
             val axesHint = if (show3d) "" else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
-            StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, hint = editHint, axes = axesHint, onFit = if (show3d) null else ({ fitView() }), onFind = { showFinder = true },
-                onEditSelection = (selectedWholeGuideId ?: selectedGuideId)?.takeIf { selectedForeign == null && !show3d && guides.any { g -> g.id == it } }?.let { id -> { guideLengthEditId = id } }, onMeasurements = { showMeasurements = true })
-            PlaneSwitcher(editPlane, show3d, onPlane = { leave3d(); switchPlane(it) }, on3d = ::open3dView)
+            StatusStrip(tool, scale, lines.count { !it.isReference }, referenceCount, drawingEnd = draftStart != null, hint = editHint, axes = axesHint, onFit = if (show3d) null else ({ fitView() }),
+                onEditSelection = if (show3d) null else openProperties(), onMeasurements = { showMeasurements = true })
+            PlaneSwitcher(editPlane, show3d, onPlane = { leave3d(); switchPlane(it) }, on3d = { showFinder = true })
             val model = viewerModel
             if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, initialSun = ((extrusions.firstOrNull()?.sun?.x ?: ((bitmap?.width ?: 1) * 0.15f)) / (bitmap?.width ?: 1)).coerceIn(0f, 1f), onSunChange = { position ->
                 val width = bitmap?.width ?: 1
@@ -2811,18 +2827,27 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         var length by remember(id, guide.lengthMm, unit) { mutableStateOf(guide.lengthMm?.let { (it / unitFactorMm(unit)).toString() } ?: "") }
         var materialId by remember(id) { mutableStateOf(guide.materialId) }
         var turn by remember(id) { mutableStateOf(guide.materialTurnDeg) }
+        var lineColorIndex by remember(id) { mutableIntStateOf(guide.colorIndex) }
+        var lineWidth by remember(id) { mutableStateOf(guide.strokeWidth) }
         val value = length.replace(',', '.').toDoubleOrNull()
         val currentMm = scale?.let { s -> guidePoints(guide).zipWithNext().sumOf { (a, b) -> frontLength(a, b, s, axisScale) } * unitFactorMm(unit) }
         /** Applies the chosen material to every segment of this (broken) line. */
         fun saveMaterial() {
-            if (materialId == guide.materialId && turn == guide.materialTurnDeg) return
-            guides = guides.map { if (sameGuideObject(it, guide)) it.copy(materialId = materialId, materialTurnDeg = turn) else it }
+            if (materialId == guide.materialId && turn == guide.materialTurnDeg && lineColorIndex == guide.colorIndex && lineWidth == guide.strokeWidth) return
+            guides = guides.map { if (sameGuideObject(it, guide)) it.copy(materialId = materialId, materialTurnDeg = turn, colorIndex = lineColorIndex, strokeWidth = lineWidth) else it }
         }
-        AlertDialog(onDismissRequest = { guideLengthEditId = null }, title = { Text("Line: material and length") },
+        AlertDialog(onDismissRequest = { guideLengthEditId = null }, title = { Text("Line properties") },
             text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 currentMm?.let { Text("Now ${formatLength(it, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2)}", fontSize = 13.sp, color = Color(0xFF4D5A57)) }
                 OutlinedTextField(length, { if (decimalInputPattern.matches(it)) length = it }, label = { Text("Length ($unit)") }, placeholder = { Text("Keep as is") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                 if (scale == null) Text("Set a calibration length to resize the line to scale.")
+                Text("Color and thickness", fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    guideColors.indices.forEach { i -> Box(Modifier.size(30.dp).background(guideColor(i), CircleShape).border(if (i == lineColorIndex) 3.dp else 0.dp, Color(0xFF00897B), CircleShape).clickable { lineColorIndex = i }) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(3f to "Thin", 5f to "Medium", 8f to "Thick").forEach { (w, label) -> FilterChip(selected = lineWidth == w, onClick = { lineWidth = w }, label = { Text(label, fontSize = 13.sp) }) }
+                }
                 // A material makes the line a bar or pipe in 3D and in exports.
                 Text("Material", fontWeight = FontWeight.Medium)
                 (listOf<Material?>(null) + materials).forEach { material ->
@@ -3082,6 +3107,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }, confirmButton = {
             Row {
+                TextButton(onClick = { showFinder = false; open3dView() }) { Text("3D view") }
                 TextButton(onClick = { showFinder = false; setPresentation(true) }) { Text("Full view") }
                 TextButton(onClick = { showFinder = false }) { Text("Close") }
             }
@@ -3428,7 +3454,7 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
     var b by remember { mutableStateOf("") }
     val aMm = if (a.isBlank()) 0.0 else parseLengthMm(a, lengthUnit)
     val bMm = if (b.isBlank()) 0.0 else parseLengthMm(b, lengthUnit)
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Move point by") }, text = {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Point: move by") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(a, { a = it }, label = { Text("$labelA (${lengthUnit.symbol})") }, supportingText = { Text("Use a minus sign to move the other way.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
             OutlinedTextField(b, { b = it }, label = { Text("$labelB (${lengthUnit.symbol})") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
@@ -3479,7 +3505,8 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
         ModelPlane.entries.forEach { candidate ->
             FilterChip(selected = !showing3d && plane == candidate, onClick = { onPlane(candidate) }, label = { Text(candidate.label, fontSize = 13.sp) })
         }
-        FilterChip(selected = showing3d, onClick = on3d, label = { Text("3D", fontSize = 13.sp) })
+        // Find replaces the 3D tab; the 3D view opens from the Find list.
+        FilterChip(selected = false, onClick = on3d, label = { Text("Find", fontSize = 13.sp, fontWeight = FontWeight.Bold) }, leadingIcon = { Icon(painterResource(R.drawable.ic_finder), contentDescription = null, modifier = Modifier.size(18.dp)) })
     }
 }
 
@@ -3534,7 +3561,7 @@ private sealed class ModelReport {
             Spacer(Modifier.weight(1f))
             @Composable fun Pill(label: String, filled: Boolean = false, onClick: () -> Unit) = Text(label, modifier = Modifier.padding(start = 6.dp).background(if (filled) Color(0xFF006E67) else Color.Transparent, RoundedCornerShape(12.dp)).border(1.dp, Color(0xFF006E67), RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 3.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (filled) Color.White else Color(0xFF006E67), maxLines = 1)
             // The selected line's size and material, and finding anything in any view, are always one tap away here.
-            onEditSelection?.let { Pill("Size & material", filled = true, onClick = it) }
+            onEditSelection?.let { Pill("Properties", filled = true, onClick = it) }
             onFind?.let { Pill("Find", onClick = it) }
             // Brings everything in this plane back into view.
             if (onFit != null) Text("Fit", modifier = Modifier.border(1.dp, Color(0xFF006E67), RoundedCornerShape(12.dp)).clickable(onClick = onFit).padding(horizontal = 12.dp, vertical = 3.dp), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF006E67))
@@ -4829,7 +4856,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     val positionValue = if (!zEdited) originalPosition else zDistance.replace(',', '.').toDoubleOrNull()?.let { if (zBack) -it else it }
     val widthValue = if (widthEdited) shapeWidth.replace(',', '.').toDoubleOrNull() else originalWidth
     val heightValue = if (heightEdited) shapeHeight.replace(',', '.').toDoubleOrNull() else originalHeight
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Edit shape") }, text = {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Shape properties") }, text = {
         Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(shapeWidth, { if (decimalInputPattern.matches(it)) { shapeWidth = it; widthEdited = true } }, label = { Text("Width ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
