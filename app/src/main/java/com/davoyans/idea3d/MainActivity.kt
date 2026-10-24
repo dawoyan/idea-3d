@@ -2762,6 +2762,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val meshes = model.meshes
                 val warnings = model.warnings.map { it.toString() }
                 meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
+                val finishes = meshes.flatMapIndexed { i, mesh -> List(mesh.triangles.size) { model.finishes.getOrNull(i) ?: Finish.PLAIN } }
                 val stl = ModelExport.stl(meshes)
                 val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { index } }.toIntArray()
                 val measurements = measurementSnapshot.mapNotNull { line ->
@@ -2770,7 +2771,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     val a = mapping.model(line.start, line.startZMm); val b = mapping.model(line.end, line.endZMm)
                     ViewerMeasurement(a.x.toFloat(), a.y.toFloat(), b.x.toFloat(), b.y.toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), a.z.toFloat(), b.z.toFloat())
                 }
-                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame) to model.objects
+                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes) to model.objects
             } }
             if (projectId != openedProject) return@launch
             result.onSuccess { (mesh, ids) -> viewerModel = mesh; viewerObjects = ids; show3d = true }
@@ -2915,7 +2916,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     fun memberSections(): List<Pair<Int, List<List<Pt>>>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList()
         return guides.filter { it.materialId != null && it.curveMid == null }.mapNotNull { g ->
-            val material = materials.firstOrNull { it.id == g.materialId } ?: return@mapNotNull null
+            val material = materials.firstOrNull { it.id == g.materialId && !it.isSheet } ?: return@mapNotNull null
             val a = here.model(g.start, g.startZMm); val b = here.model(g.end, g.endZMm)
             val along = b - a
             if (along.length < 1e-6 || abs(along.normalized() dot editPlane.toward) < 0.7) return@mapNotNull null
@@ -3052,6 +3053,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             StatusStrip(tool, drawingEnd = draftStart != null, hint = editHint) {
                 val red = Color(0xFFB3261E)
                 // Always first, in the same place: fit everything in view, and show or hide sizes.
+                // Only shows the model in 3D; nothing is converted.
+                if (show3d) ActionIcon("Back to 2D", R.drawable.ic_open_plane) { leave3d() }
+                else ActionIcon("View 3D", R.drawable.ic_cube) { open3dView() }
                 if (!show3d) {
                     ActionIcon("Fit", R.drawable.ic_fit) { fitView() }
                     ActionIcon("Sizes", R.drawable.ic_sizes, on = showSizes) { showSizes = !showSizes; preferences.edit().putBoolean("show_sizes", showSizes).apply() }
@@ -3107,11 +3111,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                             if (selectedGuideEndpoint != null || selectedCurveId != null) ActionIcon("Del point", R.drawable.ic_delete_point, tint = red, onClick = ::deleteSelectedGuidePoint)
                         }
                         if (tool == Tool.ADJUST && selectedGuideEndpoint == null && selectedCurveId == null) selectedWholeGuideId?.let { id -> ActionIcon("Clone", R.drawable.ic_clone) { cloneGuide(id) } }
-                        selectedGuideId?.let { id ->
-                            closedGuideShapes(guides).firstOrNull { path -> guides.firstOrNull { it.id == id }?.let { sameGuideObject(path.first(), it) } == true }?.let { shape ->
-                                ActionIcon("Material", R.drawable.ic_save_material) { saveMaterialShape = shape }
-                            }
-                        }
+                        // Sets what the selected line or shape is made of (Properties opens at its material list).
+                        if ((selectedWholeGuideId ?: selectedGuideId) != null) openProperties()?.let { ActionIcon("Material", R.drawable.ic_save_material, onClick = it) }
                         deleteCandidateId?.let { id -> ActionIcon("Delete", R.drawable.ic_delete, tint = red) { deleteMeasurement(id) } }
                         guideDeleteCandidateId?.let { id -> ActionIcon("Delete", R.drawable.ic_delete, tint = red) { deleteGuide(id) } }
                         if (!isBlankCanvas() && selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) ActionIcon("Crop", R.drawable.ic_crop) { startCrop() }
@@ -3221,7 +3222,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
           val width = (points.maxOf { it.x } - left).coerceAtLeast(0.001f); val height = (points.maxOf { it.y } - top).coerceAtLeast(0.001f)
           val shapeIds = guides.filter { sameGuideObject(it, path.first()) }.map { it.id }.toSet()
           val shapeExtrusion = extrusions.firstOrNull { it.guideIds.any { id -> id in shapeIds } }
-          ShapeEditDialog(path.first(), shapeExtrusion, guides, extrusions, unit, scale, width, height, onDismiss = { shapeEditId = null }, onSave = { color, transparency, widthValue, heightValue, depthValue, depthEdited, positionZ ->
+          val shapeGuides = guides.filter { sameGuideObject(it, path.first()) }
+          val current = shapeGuides.firstNotNullOfOrNull { g -> materials.firstOrNull { it.id == g.materialId } }
+          ShapeEditDialog(path.first(), shapeExtrusion, guides, extrusions, unit, scale, width, height, materials, MadeOf(current?.id, current != null && !current.isSheet), onDismiss = { shapeEditId = null }, onSave = { color, transparency, widthValue, heightValue, depthValue, depthEdited, positionZ, made ->
             pushUndo()
             val targetWidth = widthValue?.let { value -> scale?.let { value * it } }
             val targetHeight = heightValue?.let { value -> scale?.let { value * it } }
@@ -3237,6 +3240,18 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
             // A flat shape becomes a 3D object as soon as it has a depth.
             if (depthEdited && shapeExtrusion == null && depthValue != null && depthValue > 0) giveDepth(listOf(homeKey(path.first())), depthValue * unitFactorMm(unit))
+            val madeOf = materials.firstOrNull { it.id == made.materialId }
+            if (made != MadeOf(current?.id, current != null && !current.isSheet)) {
+                guides = guides.map { if (it.id in ids) it.copy(materialId = madeOf?.id, materialTurnDeg = 0.0) else it }
+                val sheetMm = madeOf?.sheetMm
+                when {
+                    // A sheet is a 3D object as thick as the sheet.
+                    sheetMm != null -> if (shapeExtrusion != null) extrusions = extrusions.map { if (it.id == shapeExtrusion.id) extrusionWithDepth(it, sheetMm, scale, unit) else it }
+                        else giveDepth(listOf(homeKey(path.first())), sheetMm)
+                    // A frame is only its edges.
+                    made.frame && shapeExtrusion != null -> extrusions = extrusions.filterNot { it.id == shapeExtrusion.id }
+                }
+            }
             if (shapeExtrusion != null && positionZ != null) extrusions = extrusions.map { if (it.id == shapeExtrusion.id) it.copy(positionZMm = positionZ * unitFactorMm(unit)) else it }
             shapeEditId = null
           })
@@ -3332,7 +3347,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 }
                 // A material makes the line a bar or pipe in 3D and in exports.
                 Text("Material", fontWeight = FontWeight.Medium)
-                (listOf<Material?>(null) + materials).forEach { material ->
+                (listOf<Material?>(null) + materials.filterNot { it.isSheet }).forEach { material ->
                     Row(Modifier.fillMaxWidth().clickable { materialId = material?.id }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                         RadioButton(selected = materialId == material?.id, onClick = { materialId = material?.id })
                         if (material != null) ProfilePreview(material, Modifier.size(32.dp))
@@ -3605,7 +3620,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val setup = modelSetup()
         val format = { mm: Double -> formatLength(mm, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2) }
         val pieces = allGuides().mapNotNull { g ->
-            val material = materials.firstOrNull { it.id == g.materialId } ?: return@mapNotNull null
+            val material = materials.firstOrNull { it.id == g.materialId && !it.isSheet } ?: return@mapNotNull null
             val mapping = setup.mapping(g.plane) ?: return@mapNotNull null
             val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1)
             val length = pts.withIndex().zipWithNext().sumOf { (a, b) ->
@@ -3613,9 +3628,28 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
             Triple(material, g.plane, length)
         }
+        // Sheets are counted by area: every closed shape made of one, in every view.
+        val sheets = ModelPlane.entries.flatMap { plane ->
+            val mapping = setup.mapping(plane) ?: return@flatMap emptyList()
+            closedGuideShapes(planeGeometry(plane).guides).mapNotNull { shape ->
+                val material = shape.firstNotNullOfOrNull { g -> materials.firstOrNull { it.id == g.materialId && it.isSheet } } ?: return@mapNotNull null
+                val pts = shapePoints(shape).map { Vec2(mapping.right(it), mapping.up(it)) }
+                Triple(material, plane, abs(pts.indices.sumOf { i -> val a = pts[i]; val b = pts[(i + 1) % pts.size]; a.x * b.y - b.x * a.y }) / 2)
+            }
+        }
         AlertDialog(onDismissRequest = { showMaterialList = false }, title = { Text("Materials used") }, text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (pieces.isEmpty()) Text("No line has a material yet. Tap a line, then Material.")
+                if (pieces.isEmpty() && sheets.isEmpty()) Text("Nothing has a material yet. Select a line or shape, then Material.")
+                sheets.groupBy { it.first.id }.values.forEach { group ->
+                    val material = group.first().first
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ProfilePreview(material, Modifier.size(36.dp))
+                        Column(Modifier.weight(1f)) { Text(material.name, fontWeight = FontWeight.Bold); Text(material.description, fontSize = 12.sp, color = Color(0xFF4D5A57)) }
+                    }
+                    val area = { mm2: Double -> "${java.text.DecimalFormat("0.###").format(mm2 / 1e6)} m²" }
+                    group.sortedByDescending { it.third }.forEachIndexed { i, (_, plane, a) -> Text("  ${i + 1}.  ${area(a)}${if (plane != ModelPlane.FRONT) "  (${plane.label})" else ""}", fontSize = 14.sp) }
+                    Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${area(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
                 pieces.groupBy { it.first.id }.values.forEach { group ->
                     val material = group.first().first
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3652,6 +3686,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         // The real width of the cross-section; the drawing is scaled to it, keeping its proportions and holes.
         var realWidth by remember(shape) { mutableStateOf(profile?.let { f.format(it.widthMm) } ?: "") }
         val realWidthMm = parseLengthMm(realWidth, LengthUnit.MM)
+        // Saved as a bar or pipe with this cross-section, or as a sheet (steel plate, plywood, glass) of some thickness.
+        var asSheet by remember(shape) { mutableStateOf(false) }
+        var sheetThickness by remember(shape) { mutableStateOf("3") }
+        val sheetMm = parseLengthMm(sheetThickness, LengthUnit.MM)
+        var finish by remember(shape) { mutableStateOf(Finish.METAL) }
         val scaled = profile?.let { p ->
             val k = (realWidthMm ?: p.widthMm) / p.widthMm
             fun scale(points: List<Vec2>) = points.map { Vec2(it.x * k, it.y * k) }
@@ -3664,14 +3703,22 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     val preview = Material("preview", name, scaled, guideColor(shape.first().colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it })
                     ProfilePreview(preview, Modifier.fillMaxWidth().height(110.dp))
                     Text("${preview.description}. Closed shapes inside it become holes. The material is shared by all projects: pick it in a line's details and the line becomes this shape along its length.", fontSize = 13.sp, color = Color(0xFF4D5A57))
-                    OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text("Tube 4*4") }, singleLine = true)
-                    OutlinedTextField(realWidth, { realWidth = it }, label = { Text("Real width (mm)") }, supportingText = { Text("The drawing is scaled to this width; height and holes follow.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(selected = !asSheet, onClick = { asSheet = false }, label = { Text("Bar or pipe", fontSize = 13.sp) })
+                        FilterChip(selected = asSheet, onClick = { asSheet = true; if (name.startsWith("Shape ")) name = "Steel sheet" }, label = { Text("Sheet", fontSize = 13.sp) })
+                    }
+                    OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text(if (asSheet) "Steel sheet 3 mm" else "Tube 4*4") }, singleLine = true)
+                    if (asSheet) OutlinedTextField(sheetThickness, { sheetThickness = it }, label = { Text("Thickness (mm)") }, supportingText = { Text("Shapes made of this sheet get this thickness.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                    FinishPicker(finish) { finish = it }
+                    if (!asSheet) OutlinedTextField(realWidth, { realWidth = it }, label = { Text("Real width (mm)") }, supportingText = { Text("The drawing is scaled to this width; height and holes follow.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                 }
             }
         }, confirmButton = {
-            TextButton(enabled = scaled != null && name.isNotBlank() && realWidthMm != null && realWidthMm > 0, onClick = {
-                val color = guideColor(shape.first().colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it }
-                materials = materials + Material(UUID.randomUUID().toString(), name.trim(), scaled!!, color)
+            TextButton(enabled = name.isNotBlank() && if (asSheet) sheetMm != null && sheetMm > 0 else scaled != null && realWidthMm != null && realWidthMm > 0, onClick = {
+                val drawnColor = guideColor(shape.first().colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it }
+                // Plain black drawings take a color that suits the look.
+                val color = if (drawnColor != 0xFF5F6B6D.toInt()) drawnColor else when (finish) { Finish.WOOD -> 0xFFC89B6A.toInt(); Finish.GLASS -> 0xFF9CC9E0.toInt(); Finish.STONE -> 0xFF9E9A94.toInt(); Finish.METAL -> 0xFF8A9497.toInt(); Finish.PLAIN -> drawnColor }
+                materials = materials + if (asSheet) Material(UUID.randomUUID().toString(), name.trim(), sheetProfile, color, sheetMm, finish) else Material(UUID.randomUUID().toString(), name.trim(), scaled!!, color, finish = finish)
                 MaterialStore.save(context, materials)
                 Toast.makeText(context, "Saved \"${name.trim()}\" to Materials", Toast.LENGTH_SHORT).show()
                 saveMaterialShape = null
@@ -5364,7 +5411,11 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     }
 }
 
-@Composable private fun ShapeEditDialog(guide: GuideLine, extrusion: Extrusion?, guides: List<GuideLine>, extrusions: List<Extrusion>, unit: String, scale: Double?, width: Float, height: Float, onDismiss: () -> Unit, onSave: (Int, Int?, Double?, Double?, Double?, Boolean, Double?) -> Unit) {
+/** What a closed shape is made of: nothing, a sheet that fills it, or bars or pipes along its edges (a frame). */
+private data class MadeOf(val materialId: String?, val frame: Boolean)
+
+@Composable private fun ShapeEditDialog(guide: GuideLine, extrusion: Extrusion?, guides: List<GuideLine>, extrusions: List<Extrusion>, unit: String, scale: Double?, width: Float, height: Float, materials: List<Material>, madeOf: MadeOf, onDismiss: () -> Unit, onSave: (Int, Int?, Double?, Double?, Double?, Boolean, Double?, MadeOf) -> Unit) {
+    var made by remember(guide.id) { mutableStateOf(madeOf) }
     var color by remember(guide.id) { mutableIntStateOf(guide.colorIndex) }
     var transparency by remember(guide.id) { mutableStateOf(guide.fillTransparency) }
     val originalWidth = remember(guide.id, unit) { guide.shapeWidthMm?.div(unitFactorMm(unit)) ?: scale?.let { width / it } }
@@ -5390,7 +5441,24 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 OutlinedTextField(shapeWidth, { if (decimalInputPattern.matches(it)) { shapeWidth = it; widthEdited = true } }, label = { Text("Width ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
                 OutlinedTextField(shapeHeight, { if (decimalInputPattern.matches(it)) { shapeHeight = it; heightEdited = true } }, label = { Text("Height ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
             }
-            // Every closed shape can be a 3D object: give it a depth here.
+            // A sheet fills the shape at its thickness; a frame turns each edge into a bar or pipe.
+            Text("Made of", fontWeight = FontWeight.Medium)
+            @Composable fun Choice(choice: MadeOf, material: Material?, title: String) {
+                Row(Modifier.fillMaxWidth().clickable { made = choice }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = made == choice, onClick = { made = choice })
+                    if (material != null) ProfilePreview(material, Modifier.size(28.dp))
+                    Column(Modifier.padding(start = 6.dp)) {
+                        Text(title, fontSize = 14.sp)
+                        material?.let { Text(it.description, fontSize = 11.sp, color = Color(0xFF4D5A57)) }
+                    }
+                }
+            }
+            Choice(MadeOf(null, false), null, "Nothing (a plain shape)")
+            materials.filter { it.isSheet }.forEach { Choice(MadeOf(it.id, false), it, "Sheet: ${it.name}") }
+            materials.filterNot { it.isSheet }.forEach { Choice(MadeOf(it.id, true), it, "Frame of lines: ${it.name}") }
+            if (made.frame) Text("Each edge becomes this bar or pipe; the shape itself has no body.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+            // Every closed shape can be a 3D object: give it a depth here (a sheet sets its own thickness).
+            if (!made.frame && materials.none { it.id == made.materialId })
                 OutlinedTextField(depth, { if (decimalInputPattern.matches(it)) { depth = it; depthEdited = true } }, label = { Text("Depth ${DepthWords.axis} ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             if (extrusion != null) {
                 OutlinedTextField(zDistance, { if (decimalInputPattern.matches(it)) { zDistance = it; zEdited = true } }, label = { Text(if (zBack) "${DepthWords.away} by ($unit)" else "${DepthWords.toward} by ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
@@ -5415,7 +5483,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 }
             }
         }
-    }, confirmButton = { TextButton(enabled = (shapeWidth.isBlank() || widthValue != null && widthValue > 0) && (shapeHeight.isBlank() || heightValue != null && heightValue > 0) && (depth.isBlank() || depthValue != null && depthValue >= 0) && (extrusion == null || positionValue != null && positionValue.isFinite()), onClick = { onSave(color, transparency, widthValue, heightValue, depthValue, depthEdited, if (extrusion != null) positionValue else null) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    }, confirmButton = { TextButton(enabled = (shapeWidth.isBlank() || widthValue != null && widthValue > 0) && (shapeHeight.isBlank() || heightValue != null && heightValue > 0) && (depth.isBlank() || depthValue != null && depthValue >= 0) && (extrusion == null || positionValue != null && positionValue.isFinite()), onClick = { onSave(color, transparency, widthValue, heightValue, depthValue, depthEdited, if (extrusion != null) positionValue else null, made) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable private fun LineEditDialog(line: MeasureLine, unit: String, points: Pair<String, String>?, onDismiss: () -> Unit, onSave: (Double, String, Int, Boolean, Boolean, Double, Double) -> Unit, onDelete: () -> Unit) {
@@ -5723,7 +5791,8 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
 private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
     val counts = HashMap<String, Int>()
     return guides.flatMap { guide ->
-        val material = guide.materialId?.let(materials::get) ?: return@flatMap emptyList()
+        // Sheets belong to closed shapes; only bars and pipes follow a line.
+        val material = guide.materialId?.let(materials::get)?.takeUnless { it.isSheet } ?: return@flatMap emptyList()
         val mapping = setup.mapping(guide.plane) ?: return@flatMap emptyList()
         val name = "${material.name} ${counts.merge(material.id, 1, Int::plus)}"
         val steps = if (guide.curveMid == null) 1 else 12
@@ -5747,7 +5816,7 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
 }
 
 /** The finished model: one mesh per remaining object, after cuts and joins, with what to warn about. */
-private class ModelBuild(val meshes: List<Mesh>, val objects: List<Pair<ModelPlane, Int>>, val warnings: List<MeshIssue>)
+private class ModelBuild(val meshes: List<Mesh>, val objects: List<Pair<ModelPlane, Int>>, val warnings: List<MeshIssue>, val finishes: List<Finish> = emptyList())
 
 /**
  * Builds every plane's solids and applies the 3D cuts and joins. With [strict], anything that would make a bad
@@ -5771,7 +5840,12 @@ private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops
     val overlaps = MeshBuilder.overlapIssues(specs, ignore)
     if (strict && overlaps.any { it.blocking }) throw MeshException(overlaps)
     val kept = combined.indices.filter { combined[it] != null }
-    return ModelBuild(kept.map { combined[it]!! } + members.map { it.second }, kept.map { keys[it] } + members.map { it.first }, issues + overlaps)
+    // A shape made of a sheet takes the sheet's color and look.
+    fun sheetOf(i: Int): Material? = objects[i].let { e -> guides.filter { it.plane == e.plane && it.id in e.guideIds }.firstNotNullOfOrNull { g -> g.materialId?.let(materials::get)?.takeIf { it.isSheet } } }
+    val shapeMeshes = kept.map { i -> val mesh = combined[i]!!; sheetOf(i)?.let { mesh.copy(argb = it.argb) } ?: mesh }
+    val memberFinishes = guides.filter { g -> g.materialId?.let(materials::get)?.isSheet == false }.associate { (it.plane to -(it.id + 1)) to materials.getValue(it.materialId!!).finish }
+    return ModelBuild(shapeMeshes + members.map { it.second }, kept.map { keys[it] } + members.map { it.first }, issues + overlaps,
+        kept.map { sheetOf(it)?.finish ?: Finish.PLAIN } + members.map { memberFinishes[it.first] ?: Finish.PLAIN })
 }
 
 private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, materials: Map<String, Material> = emptyMap()): List<Mesh> {

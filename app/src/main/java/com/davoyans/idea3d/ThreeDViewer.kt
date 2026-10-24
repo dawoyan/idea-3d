@@ -65,14 +65,14 @@ internal class ViewerCamera {
 internal class ViewerMesh private constructor(
     val vertices: FloatBuffer, private val cpuVertices: FloatArray, val normals: FloatBuffer, val colors: FloatBuffer, val count: Int,
     val picturePlane: FloatBuffer, val frontArrow: FloatBuffer, val measurements: List<ViewerMeasurement>, val triangleObjects: IntArray, val objectNames: List<String>,
-    val frame: ViewerFrame, val warnings: List<String>,
+    val frame: ViewerFrame, val warnings: List<String>, val texCoords: FloatBuffer, val groups: List<Triple<Finish, Int, Int>>,
 ) {
     fun vertex(i: Int, axis: Int) = cpuVertices[i * 3 + axis]
 
     companion object {
         fun fromStl(
             bytes: ByteArray, triangleColors: List<Int>, measurements: List<ViewerMeasurement> = emptyList(), triangleObjects: IntArray = IntArray(0), objectNames: List<String> = emptyList(),
-            warnings: List<String> = emptyList(), frame: ViewerFrame? = null,
+            warnings: List<String> = emptyList(), frame: ViewerFrame? = null, triangleFinishes: List<Finish> = emptyList(),
         ): ViewerMesh {
             val data = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
             require(bytes.size >= 84) { "Invalid 3D model" }
@@ -82,6 +82,8 @@ internal class ViewerMesh private constructor(
             val vertices = FloatArray(count * 9)
             val normals = FloatArray(count * 9)
             val colors = FloatArray(count * 12)
+            val texture = FloatArray(count * 6)
+            fun finishOf(t: Int) = triangleFinishes.getOrNull(t) ?: Finish.PLAIN
             val low = FloatArray(3) { Float.POSITIVE_INFINITY }; val high = FloatArray(3) { Float.NEGATIVE_INFINITY }
             repeat(count) { triangle ->
                 val nx = data.float; val ny = data.float; val nz = data.float
@@ -95,7 +97,15 @@ internal class ViewerMesh private constructor(
                     colors[ci] = 0.22f + 0.78f * android.graphics.Color.red(color) / 255f
                     colors[ci + 1] = 0.22f + 0.78f * android.graphics.Color.green(color) / 255f
                     colors[ci + 2] = 0.22f + 0.78f * android.graphics.Color.blue(color) / 255f
-                    colors[ci + 3] = 1f
+                    colors[ci + 3] = if (finishOf(triangle) == Finish.GLASS) 0.38f else 1f
+                }
+                // Textures lie flat on each face: the two axes across its normal, repeating every 600 mm.
+                val ax = kotlin.math.abs(nx); val ay = kotlin.math.abs(ny); val az = kotlin.math.abs(nz)
+                repeat(3) { vertex ->
+                    val index = triangle * 9 + vertex * 3
+                    val x = vertices[index]; val y = vertices[index + 1]; val z = vertices[index + 2]
+                    val (u, v) = when { ax >= ay && ax >= az -> z to y; ay >= az -> x to z; else -> x to y }
+                    texture[triangle * 6 + vertex * 2] = u / 600f; texture[triangle * 6 + vertex * 2 + 1] = v / 600f
                 }
                 data.short
             }
@@ -111,8 +121,15 @@ internal class ViewerMesh private constructor(
             val plane = floatArrayOf(x0,y0,z0, x1,y0,z0, x1,y0,z0, x1,y1,z0, x1,y1,z0, x0,y1,z0, x0,y1,z0, x0,y0,z0)
             val arrow = floatArrayOf(x0,y0,z0, x0,y0,z0+0.35f, x0,y0,z0+0.35f, x0+0.08f,y0,z0+0.25f, x0,y0,z0+0.35f, x0-0.08f,y0,z0+0.25f)
             val normalizedMeasurements = measurements.map { it.copy(x1 = space.toUnit(it.x1, 0), y1 = space.toUnit(it.y1, 1), x2 = space.toUnit(it.x2, 0), y2 = space.toUnit(it.y2, 1), z1 = space.toUnit(it.z1, 2), z2 = space.toUnit(it.z2, 2)) }
-            return ViewerMesh(buffer(vertices), vertices, buffer(normals), buffer(colors), count * 3, buffer(plane), buffer(arrow), normalizedMeasurements,
-                triangleObjects.takeIf { it.size == count } ?: IntArray(count) { -1 }, objectNames, space, warnings)
+            // Triangles are drawn grouped by finish, glass last so what is behind it shows through.
+            val order = (0 until count).sortedBy { t -> finishOf(t).let { if (it == Finish.GLASS) Int.MAX_VALUE else it.ordinal } }
+            fun reorder(values: FloatArray, per: Int) = FloatArray(values.size).also { out -> order.forEachIndexed { i, t -> System.arraycopy(values, t * per, out, i * per, per) } }
+            val objects = triangleObjects.takeIf { it.size == count } ?: IntArray(count) { -1 }
+            val groups = mutableListOf<Triple<Finish, Int, Int>>()
+            order.forEachIndexed { i, t -> val f = finishOf(t); if (groups.lastOrNull()?.first == f) groups[groups.lastIndex] = Triple(f, groups.last().second, groups.last().third + 3) else groups += Triple(f, i * 3, 3) }
+            val sortedVertices = reorder(vertices, 9)
+            return ViewerMesh(buffer(sortedVertices), sortedVertices, buffer(reorder(normals, 9)), buffer(reorder(colors, 12)), count * 3, buffer(plane), buffer(arrow), normalizedMeasurements,
+                IntArray(count) { objects[order[it]] }, objectNames, space, warnings, buffer(reorder(texture, 6)), groups)
         }
     }
 }
@@ -131,7 +148,18 @@ private class ModelRenderer(private val mesh: ViewerMesh, val camera: ViewerCame
         gl.glLightfv(GL10.GL_LIGHT0, GL10.GL_AMBIENT, floatArrayOf(0.55f, 0.55f, 0.55f, 1f), 0)
         gl.glLightfv(GL10.GL_LIGHT0, GL10.GL_DIFFUSE, floatArrayOf(0.75f, 0.75f, 0.75f, 1f), 0)
         gl.glEnableClientState(GL10.GL_VERTEX_ARRAY); gl.glEnableClientState(GL10.GL_NORMAL_ARRAY); gl.glEnableClientState(GL10.GL_COLOR_ARRAY)
+        gl.glLightfv(GL10.GL_LIGHT0, GL10.GL_SPECULAR, floatArrayOf(1f, 1f, 1f, 1f), 0)
+        gl.glBlendFunc(GL10.GL_SRC_ALPHA, GL10.GL_ONE_MINUS_SRC_ALPHA)
+        val ids = IntArray(3); gl.glGenTextures(3, ids, 0)
+        listOf(Finish.METAL, Finish.WOOD, Finish.STONE).forEachIndexed { i, finish ->
+            textures[finish] = ids[i]
+            gl.glBindTexture(GL10.GL_TEXTURE_2D, ids[i])
+            gl.glTexParameterf(GL10.GL_TEXTURE_2D, GL10.GL_TEXTURE_MIN_FILTER, GL10.GL_LINEAR.toFloat()); gl.glTexParameterf(GL10.GL_TEXTURE_2D, GL10.GL_TEXTURE_MAG_FILTER, GL10.GL_LINEAR.toFloat())
+            gl.glTexParameterf(GL10.GL_TEXTURE_2D, GL10.GL_TEXTURE_WRAP_S, GL10.GL_REPEAT.toFloat()); gl.glTexParameterf(GL10.GL_TEXTURE_2D, GL10.GL_TEXTURE_WRAP_T, GL10.GL_REPEAT.toFloat())
+            val bitmap = finishTexture(finish); android.opengl.GLUtils.texImage2D(GL10.GL_TEXTURE_2D, 0, bitmap, 0); bitmap.recycle()
+        }
     }
+    private val textures = HashMap<Finish, Int>()
     override fun onSurfaceChanged(gl: GL10, width: Int, height: Int) {
         surfaceWidth = width; surfaceHeight = height
         gl.glViewport(0, 0, width, height)
@@ -159,9 +187,21 @@ private class ModelRenderer(private val mesh: ViewerMesh, val camera: ViewerCame
             gl.glColor4f(0.85f, 0.1f, 0.1f, 1f); gl.glDrawArrays(GL10.GL_LINES, 0, 6)
         }
         gl.glEnable(GL10.GL_LIGHTING); gl.glEnableClientState(GL10.GL_NORMAL_ARRAY); gl.glEnableClientState(GL10.GL_COLOR_ARRAY)
-        mesh.vertices.position(0); mesh.normals.position(0); mesh.colors.position(0)
+        mesh.vertices.position(0); mesh.normals.position(0); mesh.colors.position(0); mesh.texCoords.position(0)
         gl.glVertexPointer(3, GL10.GL_FLOAT, 0, mesh.vertices); gl.glNormalPointer(GL10.GL_FLOAT, 0, mesh.normals); gl.glColorPointer(4, GL10.GL_FLOAT, 0, mesh.colors)
-        gl.glDrawArrays(GL10.GL_TRIANGLES, 0, mesh.count)
+        gl.glEnableClientState(GL10.GL_TEXTURE_COORD_ARRAY); gl.glTexCoordPointer(2, GL10.GL_FLOAT, 0, mesh.texCoords)
+        mesh.groups.forEach { (finish, first, vertexCount) ->
+            val texture = textures[finish]
+            if (texture != null) { gl.glEnable(GL10.GL_TEXTURE_2D); gl.glBindTexture(GL10.GL_TEXTURE_2D, texture); gl.glTexEnvf(GL10.GL_TEXTURE_ENV, GL10.GL_TEXTURE_ENV_MODE, GL10.GL_MODULATE.toFloat()) } else gl.glDisable(GL10.GL_TEXTURE_2D)
+            // Metal and glass shine; wood and stone barely.
+            val shine = when (finish) { Finish.METAL -> 0.9f; Finish.GLASS -> 0.8f; Finish.PLAIN -> 0.15f; else -> 0.05f }
+            gl.glMaterialfv(GL10.GL_FRONT_AND_BACK, GL10.GL_SPECULAR, floatArrayOf(shine, shine, shine, 1f), 0)
+            gl.glMaterialf(GL10.GL_FRONT_AND_BACK, GL10.GL_SHININESS, if (finish == Finish.METAL || finish == Finish.GLASS) 60f else 10f)
+            if (finish == Finish.GLASS) { gl.glEnable(GL10.GL_BLEND); gl.glDepthMask(false) }
+            gl.glDrawArrays(GL10.GL_TRIANGLES, first, vertexCount)
+            if (finish == Finish.GLASS) { gl.glDisable(GL10.GL_BLEND); gl.glDepthMask(true) }
+        }
+        gl.glDisable(GL10.GL_TEXTURE_2D); gl.glDisableClientState(GL10.GL_TEXTURE_COORD_ARRAY)
         if (callback != null) {
             val bitmap = runCatching {
                 require(surfaceWidth > 0 && surfaceHeight > 0)
@@ -383,3 +423,25 @@ private fun CompactToggle(label: String, on: Boolean, onChange: (Boolean) -> Uni
             .clickable { onChange(!on) }.padding(horizontal = 8.dp, vertical = 5.dp))
 }
 
+
+/** Light grey patterns that tint a material's color: brushed metal, wood grain and speckled stone. */
+private fun finishTexture(finish: Finish): Bitmap {
+    val size = 256
+    val random = java.util.Random(finish.ordinal * 7919L + 17)
+    val pixels = IntArray(size * size)
+    val streaks = FloatArray(size) { 0.86f + random.nextFloat() * 0.14f }
+    for (y in 0 until size) for (x in 0 until size) {
+        val shade = when (finish) {
+            Finish.METAL -> (streaks[y] + (random.nextFloat() - 0.5f) * 0.05f)
+            Finish.WOOD -> {
+                // Rings bent by a slow wave, with fine fibres along the grain.
+                val ring = kotlin.math.sin((y + 9f * kotlin.math.sin(x / 37f) + 4f * kotlin.math.sin(x / 11f)) / 5.5f)
+                0.78f + 0.14f * ring * ring + (random.nextFloat() - 0.5f) * 0.05f
+            }
+            else -> 0.8f + random.nextFloat() * 0.2f - if (random.nextFloat() < 0.04f) 0.18f else 0f
+        }.coerceIn(0f, 1f)
+        val c = (shade * 255).toInt()
+        pixels[y * size + x] = android.graphics.Color.rgb(c, c, c)
+    }
+    return Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888)
+}
