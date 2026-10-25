@@ -1884,10 +1884,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     return
                 }
                 selectedCurveId = null
-                selectedExtrusionId?.let { id -> extrusions.firstOrNull { it.id == id }?.let { extrusion ->
-                    if (distance(point, extrusion.vanishing) <= hitRadius * 2 && distance(point, extrusion.vanishing) < distance(point, extrusion.handle)) return
-                } }
-                extrusions.firstOrNull { distance(point, depthHandle(it, it.handle)) <= hitRadius * 2 }?.let { selectedExtrusionId = it.id; selectedEndpoint = null; selectedGuideEndpoint = null; selectedWholeLineId = null; selectedWholeGuideId = null; selectedLabelId = null; return }
                 selectedExtrusionId = null
                 val priorLineId = selectedWholeLineId ?: selectedEndpoint?.lineId ?: selectedLineId.takeIf { selectedGuideId == null }
                 val priorGuideId = selectedWholeGuideId ?: selectedGuideEndpoint?.guideId ?: selectedGuideId.takeIf { selectedWholeLineId == null && selectedEndpoint == null }
@@ -2167,14 +2163,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             if (curve != null) { activeCurveId = curve.id; if (tool == Tool.ADJUST) { selectedCurveId = curve.id; selectedExtrusionId = null; selectedGuideEndpoint = null; selectedWholeGuideId = null }; curveDragLast = sourcePoint; pushUndo(); return }
         }
         if (tool != Tool.ADJUST) return
-        selectedExtrusionId?.let { id ->
-            val extrusion = extrusions.firstOrNull { it.id == id } ?: return
-            val handle = depthHandle(extrusion, extrusion.handle)
-            if (distance(sourcePoint, extrusion.vanishing) <= hitRadius * 2 && distance(sourcePoint, extrusion.vanishing) < distance(sourcePoint, handle)) {
-                vanishingDragLast = sourcePoint; pushUndo()
-            } else if (distance(sourcePoint, handle) <= hitRadius * 2) { draggingExtrusion = true; pushUndo() }
-            return
-        }
         selectedEndpoint?.let { endpoint ->
             val line = lines.firstOrNull { it.id == endpoint.lineId } ?: return
             if (distance(sourcePoint, if (endpoint.isStart) line.start else line.end) <= hitRadius * 2) { activePoint = endpoint; pushUndo() }
@@ -5002,27 +4990,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         }
                     }
                 }
-                drawContext.canvas.save()
-                extrusions.forEach { extrusion ->
-                    extrusionFaces(extrusion, guides, bitmap.width, bitmap.height).forEach { face ->
-                        val path = androidx.compose.ui.graphics.Path().apply {
-                            val first = viewAt(face.points.first())
-                            moveTo(first.x, first.y)
-                            face.points.drop(1).forEach { point -> viewAt(point).let { lineTo(it.x, it.y) } }
-                            close()
-                        }
-                        drawPath(path, guideColor(face.guide.colorIndex).copy(alpha = face.opacity))
-                        if (face.light != 0f) drawPath(path, (if (face.light > 0f) Color.White else Color.Black).copy(alpha = 0.05f * abs(face.light)))
-                        drawContext.canvas.clipPath(path, androidx.compose.ui.graphics.ClipOp.Difference)
-                    }
-                }
-                drawContext.canvas.restore()
-                extrusions.forEach { extrusion ->
-                    extrusionEdges(extrusion, guides, bitmap.width, bitmap.height).forEach { (start, end, guide) ->
-                        drawLine(guideColor(guide.colorIndex), viewAt(start), viewAt(end), (guide.strokeWidth * 0.5f).coerceAtLeast(1f) * zoom)
-                        drawLine(Color.White, viewAt(start), viewAt(end), (guide.strokeWidth * 0.2f).coerceAtLeast(0.5f) * zoom)
-                    }
-                }
+                // Shapes with depth are drawn flat like any other shape; their 3D look is in View 3D.
                 drawContext.canvas.restore()
                 // Imported models: the outline of each one's shadow on this view.
                 models.forEach { (id, argb, hull) ->
@@ -5085,18 +5053,6 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         paint.style = Paint.Style.FILL; paint.color = AndroidColor.BLACK
                         drawContext.canvas.nativeCanvas.drawText(text, center.x, center.y, paint)
                     }
-                }
-                if (tool == Tool.ADJUST) extrusions.firstOrNull { it.id == selectedExtrusionId }?.let { extrusion ->
-                    fun cube(center: Offset, color: Color) {
-                        val r = 11.dp.toPx()
-                        drawCircle(Color.White, r * 1.5f, center)
-                        drawCircle(color, r * 1.5f, center, style = Stroke(2.dp.toPx()))
-                        val a = center + Offset(0f, -r); val b = center + Offset(r, -r * 0.45f); val c = center + Offset(r, r * 0.55f)
-                        val d = center + Offset(0f, r); val e = center + Offset(-r, r * 0.55f); val f = center + Offset(-r, -r * 0.45f)
-                        listOf(a to b, b to c, c to d, d to e, e to f, f to a, a to center, c to center, e to center).forEach { (start, end) -> drawLine(color, start, end, 2.dp.toPx()) }
-                    }
-                    if (vanishingBlink) cube(viewAt(depthHandle(extrusion, extrusion.handle)), Color(0xFF0066BE))
-                    cube(viewAt(extrusion.vanishing), Color(0xFFD00000))
                 }
                 // Every line's ends get a dot, so a line seen end on (a point) is still visible.
                 guides.sortedBy { if (selectedGuide != null && sameGuideObject(it, selectedGuide)) 0 else 1 }
@@ -7051,34 +7007,6 @@ private fun exportAnnotated(context: Context, original: Bitmap, lines: List<Meas
                 val path = android.graphics.Path().apply { moveTo(points.first().x, points.first().y); points.drop(1).forEach { lineTo(it.x, it.y) }; close() }
                 canvas.clipOutPath(path)
             }
-        }
-    }
-    canvas.save()
-    if (showGuides) extrusions.forEach { extrusion ->
-        extrusionFaces(extrusion, guides, original.width, original.height).forEach { face ->
-            val path = android.graphics.Path().apply {
-                moveTo(face.points.first().x, face.points.first().y)
-                face.points.drop(1).forEach { lineTo(it.x, it.y) }
-                close()
-            }
-            val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = guideColor(face.guide.colorIndex).toArgb()
-                alpha = (255f * face.opacity).roundToInt()
-                style = Paint.Style.FILL
-            }
-            canvas.drawPath(path, fill)
-            if (face.light != 0f) {
-                val shade = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = if (face.light > 0f) AndroidColor.WHITE else AndroidColor.BLACK; alpha = (255f * 0.05f * abs(face.light)).roundToInt(); style = Paint.Style.FILL }
-                canvas.drawPath(path, shade)
-            }
-            canvas.clipOutPath(path)
-        }
-    }
-    canvas.restore()
-    if (showGuides) extrusions.forEach { extrusion ->
-        extrusionEdges(extrusion, guides, original.width, original.height).forEach { (start, end, guide) ->
-            canvas.drawLine(start.x, start.y, end.x, end.y, linePaint(guideColor(guide.colorIndex).toArgb(), (guide.strokeWidth * 0.5f).coerceAtLeast(1f)))
-            canvas.drawLine(start.x, start.y, end.x, end.y, linePaint(AndroidColor.WHITE, (guide.strokeWidth * 0.2f).coerceAtLeast(0.5f)))
         }
     }
     canvas.restore()
