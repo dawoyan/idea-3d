@@ -2097,24 +2097,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         extrusions = extrusions.map { if (guide.id in it.guideIds) it.copy(guideIds = it.guideIds + newId) else it }
         selectedGuideId = guide.id; selectedCurveId = null; selectedGuideEndpoint = GuideEndpoint(guide.id, false); selectedWholeGuideId = null; selectedEndpoint = null
     }
-    fun cloneGuide(id: Int) {
-        val image = bitmap ?: return
-        val original = guides.firstOrNull { it.id == id } ?: return
-        val source = guides.filter { sameGuideObject(it, original) }
-        if (source.isEmpty()) return
-        val shift = min(image.width, image.height) * 0.03f
-        val maxX = source.maxOf { max(it.start.x, it.end.x) }
-        val maxY = source.maxOf { max(it.start.y, it.end.y) }
-        val dx = if (maxX + shift <= image.width) shift else -shift
-        val dy = if (maxY + shift <= image.height) shift else -shift
-        var next = nextGuideId(guides)
-        var nextPath = nextGuidePathId(guides)
-        val paths = source.mapNotNull { it.pathId }.distinct().associateWith { nextPath++ }
-        val group = if (original.groupId != null) (guides.mapNotNull { it.groupId }.maxOrNull() ?: 0) + 1 else null
-        val copies = source.map { guide -> guide.copy(id = next++, start = Pt(guide.start.x + dx, guide.start.y + dy), end = Pt(guide.end.x + dx, guide.end.y + dy), curveMid = guide.curveMid?.let { Pt(it.x + dx, it.y + dy) }, manual = true, pathId = guide.pathId?.let { paths[it] }, groupId = group) }
-        pushUndo(); guides = guides + copies
-        selectedExtrusionId = null; selectedGuideEndpoint = null; selectedWholeGuideId = copies.first().id; selectedGuideId = copies.first().id
-    }
     fun handleDragStart(sourcePoint: Pt, hitRadius: Double) {
         if (selectMode) {
             // Dragging a picked item moves all of them; dragging elsewhere draws a box to pick items.
@@ -3080,26 +3062,53 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (on) { tool = Tool.ADJUST; clearOwnSelection(); selectedForeign = null; selectedGhostPoint = null; panOnEmptyDrag = false }
     }
     /** Copies of the picked items, a little down and right, in their own views; the copies are picked. */
-    fun copyPicked() {
-        if (pickedItems.isEmpty()) return
-        pushUndo()
-        val here = modelSetup().mapping(editPlane)
-        val offset = here?.modelDelta(40.0, 40.0)
+    /**
+     * Copies items into their own view, a little down and right of the original, with new ids and new path and
+     * group numbers so copy and original stay separate shapes. [full] keeps the material, fill and 3D depth;
+     * otherwise the copy is just its lines. Returns the copies' keys.
+     */
+    fun copyItems(keys: List<Pair<ModelPlane, Int>>, full: Boolean): List<Pair<ModelPlane, Int>> {
+        val setup = modelSetup(); val here = setup.mapping(editPlane)
+        val frame = frameOf(editPlane)
+        val step = (min(frame.width, frame.height) * 0.03).coerceAtLeast(20.0)
+        val offset = here?.modelDelta(step, step)
         val copies = mutableListOf<Pair<ModelPlane, Int>>()
-        pickedItems.forEach { key ->
-            val geometry = planeGeometry(key.first); val own = modelSetup().mapping(key.first) ?: return@forEach
-            val shift = offset?.let { own.pixelDelta(it) } ?: Pt(40f, 40f)
+        keys.distinctBy { k -> itemGuides(k).minOfOrNull { it.id }?.let { k.first to it } ?: k }.forEach { key ->
+            val geometry = planeGeometry(key.first); val own = setup.mapping(key.first) ?: return@forEach
+            val source = itemGuides(key)
+            if (source.isEmpty()) return@forEach
+            val shift = offset?.let { own.pixelDelta(it) } ?: Pt(step.toFloat(), step.toFloat())
+            val dz = offset?.let { it dot key.first.toward } ?: 0.0
             fun moved(p: Pt) = Pt(p.x + shift.x, p.y + shift.y)
             var id = (geometry.guides.maxOfOrNull { it.id } ?: 0) + 1
-            val path = (geometry.guides.mapNotNull { it.pathId }.maxOrNull() ?: 0) + 1
-            val source = itemGuides(key)
-            val mapping = source.associate { it.id to id++ }
-            val copied = source.map { g -> g.copy(id = mapping.getValue(g.id), start = moved(g.start), end = moved(g.end), curveMid = g.curveMid?.let(::moved), pathId = if (source.size > 1) path else null, groupId = null) }
-            val extrusion = extrusionOf(key)?.let { e -> e.copy(id = (geometry.extrusions.maxOfOrNull { it.id } ?: 0) + 1, guideIds = e.guideIds.mapNotNull { mapping[it] }, origin = moved(e.origin), handle = moved(e.handle)) }
+            var path = (geometry.guides.mapNotNull { it.pathId }.maxOrNull() ?: 0) + 1
+            var group = (geometry.guides.mapNotNull { it.groupId }.maxOrNull() ?: 0) + 1
+            val ids = source.associate { it.id to id++ }
+            val paths = source.mapNotNull { it.pathId }.distinct().associateWith { path++ }
+            val groups = source.mapNotNull { it.groupId }.distinct().associateWith { group++ }
+            val copied = source.map { g -> g.copy(id = ids.getValue(g.id), start = moved(g.start), end = moved(g.end), curveMid = g.curveMid?.let(::moved), startZMm = g.startZMm + dz, endZMm = g.endZMm + dz,
+                pathId = g.pathId?.let(paths::get), groupId = g.groupId?.let(groups::get), manual = true, midDepthMm = null,
+                materialId = if (full) g.materialId else null, materialTurnDeg = if (full) g.materialTurnDeg else 0.0, fillTransparency = if (full) g.fillTransparency else null) }
+            val extrusion = if (!full) null else extrusionOf(key)?.let { e -> e.copy(id = (geometry.extrusions.maxOfOrNull { it.id } ?: 0) + 1, guideIds = e.guideIds.mapNotNull { ids[it] }, origin = moved(e.origin), handle = moved(e.handle), positionZMm = e.positionZMm + dz) }
             setPlaneShapes(key.first, geometry.guides + copied, geometry.extrusions + listOfNotNull(extrusion))
             copies += key.first to copied.first().id
         }
-        pickedItems = copies; pickedPoints = emptyList()
+        return copies
+    }
+    fun copyPicked(full: Boolean) {
+        if (pickedItems.isEmpty()) return
+        pushUndo()
+        pickedItems = copyItems(pickedItems, full); pickedPoints = emptyList()
+    }
+    /** Clone in Adjust: the selected line or shape (with its group); [full] copies material, fill and depth too. */
+    fun cloneSelected(full: Boolean) {
+        val guide = (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } } ?: return
+        pushUndo()
+        val copy = copyItems(withGroup(homeKey(guide)), full).firstOrNull() ?: return
+        // Select the copy as it shows in this view.
+        val shownId = if (copy.first == editPlane) copy.second else encodedId(copy.first, copy.second)
+        selectedExtrusionId = null; selectedGuideEndpoint = null
+        guides.firstOrNull { it.id == shownId }?.let { selectedWholeGuideId = it.id; selectedGuideId = it.id }
     }
     /** Makes picked closed shapes 3D (20 mm deep, editable in Properties). */
     /** Turns closed shapes into 3D objects [depthMm] deep. */
@@ -3291,7 +3300,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Merge", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n == 2, onClick = ::cutPicked)
-                        ActionIcon("Copy", R.drawable.ic_clone, enabled = n >= 1, onClick = ::copyPicked)
+                        ActionIcon("Copy lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
+                        ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
                         ActionIcon("Box: ${if (boxPicksItems) "items" else "points"}", R.drawable.ic_select_area, on = boxPicksItems) { boxPicksItems = !boxPicksItems }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total > 0) { pickedItems = emptyList(); pickedPoints = emptyList() }
                         ActionIcon("Delete", R.drawable.ic_delete, enabled = total >= 1, tint = red, onClick = ::deletePicked)
@@ -3327,7 +3337,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                             ActionIcon("Curve pt", R.drawable.ic_point_curve, on = pointKind == PointKind.CURVE) { pointKind = PointKind.CURVE }
                             if (selectedGuideEndpoint != null || selectedCurveId != null) ActionIcon("Del point", R.drawable.ic_delete_point, tint = red, onClick = ::deleteSelectedGuidePoint)
                         }
-                        if (tool == Tool.ADJUST && selectedGuideEndpoint == null && selectedCurveId == null) selectedWholeGuideId?.let { id -> ActionIcon("Clone", R.drawable.ic_clone) { cloneGuide(id) } }
+                        if (tool == Tool.ADJUST && selectedGuideEndpoint == null && selectedCurveId == null) selectedWholeGuideId?.let {
+                            // Two clones: just the lines, or everything (material, fill and 3D depth).
+                            ActionIcon("Clone lines", R.drawable.ic_clone) { cloneSelected(false) }
+                            ActionIcon("Clone all", R.drawable.ic_clone_filled) { cloneSelected(true) }
+                        }
                         // Sets what the selected line or shape is made of (Properties opens at its material list).
                         if ((selectedWholeGuideId ?: selectedGuideId) != null) openProperties()?.let { ActionIcon("Material", R.drawable.ic_save_material, onClick = it) }
                         deleteCandidateId?.let { id -> ActionIcon("Delete", R.drawable.ic_delete, tint = red) { deleteMeasurement(id) } }
