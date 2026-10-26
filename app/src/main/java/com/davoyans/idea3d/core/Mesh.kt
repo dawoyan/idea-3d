@@ -100,8 +100,10 @@ object Polygon {
                 val ia = remaining[(i + remaining.size - 1) % remaining.size]; val ib = remaining[i]; val ic = remaining[(i + 1) % remaining.size]
                 val a = points[ia]; val b = points[ib]; val c = points[ic]
                 if (orient(a, b, c) <= 1e-12) continue
+                // Points lying exactly on a corner (the two ends of a bridge into a hole) don't block an ear.
+                fun same(p: Vec2, q: Vec2) = abs(p.x - q.x) < 1e-9 && abs(p.y - q.y) < 1e-9
                 val blocked = remaining.any { p ->
-                    p != ia && p != ib && p != ic && points[p].let { q -> orient(a, b, q) >= -1e-12 && orient(b, c, q) >= -1e-12 && orient(c, a, q) >= -1e-12 }
+                    p != ia && p != ib && p != ic && points[p].let { q -> !same(q, a) && !same(q, b) && !same(q, c) && orient(a, b, q) >= -1e-12 && orient(b, c, q) >= -1e-12 && orient(c, a, q) >= -1e-12 }
                 }
                 if (blocked) continue
                 result.add(Triangle(ia, ib, ic)); remaining.removeAt(i); clipped = true; break
@@ -161,6 +163,55 @@ object MeshBuilder {
             triangles.add(Triangle(i + n, j + n, j))
             triangles.add(Triangle(i + n, j, i))
         }
+        return Mesh(spec.name, vertices, triangles, spec.argb)
+    }
+
+    /**
+     * A flat solid with holes (a ring, a plate with openings): [spec]'s outline with each of [holes] (x, y loops in
+     * the spec's plane, lying inside it) open right through. Each hole is joined to the outline by a bridge so the
+     * faces fill as one polygon.
+     */
+    fun extrudeWithHoles(spec: SolidSpec, holes: List<List<Vec2>>): Mesh {
+        if (holes.isEmpty()) return extrude(spec)
+        var outer = simplify(spec.outline)
+        if (outer.size < 3) throw MeshException(listOf(MeshIssue(spec.name, "outline is too small")))
+        if (Polygon.signedArea(outer.map { Vec2(it.x, it.y) }) < 0) outer = outer.reversed()
+        val z = outer.maxOf { it.z }; val thickness = outer.maxOf { it.thicknessMm }
+        val loops = listOf(outer.map { Vec2(it.x, it.y) }) + holes.filter { it.size >= 3 }.map { h -> if (Polygon.signedArea(h) > 0) h.reversed() else h }
+        val pts = loops.flatten()
+        val starts = loops.runningFold(0) { acc, l -> acc + l.size }
+        var poly = (0 until loops[0].size).toMutableList()
+        fun crosses(a: Vec2, b: Vec2, c: Vec2, d: Vec2): Boolean {
+            fun o(p: Vec2, q: Vec2, r: Vec2) = (q - p) cross (r - p)
+            val d1 = o(c, d, a); val d2 = o(c, d, b); val d3 = o(a, b, c); val d4 = o(a, b, d)
+            return (d1 > 1e-12 && d2 < -1e-12 || d1 < -1e-12 && d2 > 1e-12) && (d3 > 1e-12 && d4 < -1e-12 || d3 < -1e-12 && d4 > 1e-12)
+        }
+        val allEdges = loops.indices.flatMap { l -> loops[l].indices.map { i -> starts[l] + i to starts[l] + (i + 1) % loops[l].size } }
+        // Holes farthest right first, each bridged from its rightmost point to the nearest outline point it can see.
+        (1 until loops.size).sortedByDescending { l -> loops[l].maxOf { it.x } }.forEach { l ->
+            val m = starts[l] + loops[l].indices.maxBy { loops[l][it].x }
+            val hole = pts[m]
+            val k = poly.indices.sortedBy { (pts[poly[it]] - hole).let { d -> d.x * d.x + d.y * d.y } }.firstOrNull { k ->
+                val a = pts[poly[k]]
+                poly.indices.none { i -> val e1 = poly[i]; val e2 = poly[(i + 1) % poly.size]; e1 != poly[k] && e2 != poly[k] && crosses(a, hole, pts[e1], pts[e2]) } &&
+                    allEdges.none { (e1, e2) -> e1 != m && e2 != m && crosses(a, hole, pts[e1], pts[e2]) }
+            } ?: throw MeshException(listOf(MeshIssue(spec.name, "a hole could not be joined to the outline")))
+            val ring = (0..loops[l].size).map { starts[l] + (m - starts[l] + it) % loops[l].size }
+            poly = (poly.subList(0, k + 1) + ring + poly[k] + poly.subList(k + 1, poly.size)).toMutableList()
+        }
+        val caps = Polygon.triangulate(poly.map { pts[it] }) ?: throw MeshException(listOf(MeshIssue(spec.name, "the shape with holes could not be filled")))
+        val n = pts.size
+        val vertices = pts.map { spec.plane.toModel(it.x, it.y, z) } + pts.map { spec.plane.toModel(it.x, it.y, z - thickness) }
+        val triangles = mutableListOf<Triangle>()
+        caps.forEach { t ->
+            val a = poly[t.a]; val b = poly[t.b]; val c = poly[t.c]
+            if (a == b || b == c || a == c) return@forEach
+            triangles.add(Triangle(a, b, c)); triangles.add(Triangle(c + n, b + n, a + n))
+        }
+        loops.indices.forEach { l -> for (i in loops[l].indices) {
+            val p = starts[l] + i; val q = starts[l] + (i + 1) % loops[l].size
+            triangles.add(Triangle(p + n, q + n, q)); triangles.add(Triangle(p + n, q, p))
+        } }
         return Mesh(spec.name, vertices, triangles, spec.argb)
     }
 

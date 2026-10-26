@@ -190,7 +190,7 @@ private data class FeatureSnap(val point: Pt, val found: Boolean)
 private data class ScreenLine(val id: Int, val start: Offset, val end: Offset)
 private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "", val plane: ModelPlane = ModelPlane.FRONT)
 private fun MeasureLine.hasDepth() = abs(startZMm) > 0.000001 || abs(endZMm) > 0.000001
-private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null)
+private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null, val hole: Boolean = false)
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
 private data class SelectedAlignmentObject(val guideIds: Set<Int>, val lineIds: Set<Int>, val points: List<Pt>)
 private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0, val plane: ModelPlane = ModelPlane.FRONT)
@@ -697,6 +697,7 @@ private object ProjectStore {
             if (guide.plane != ModelPlane.FRONT) put("plane", guide.plane.name)
             guide.materialId?.let { put("material", it) }
             if (guide.materialTurnDeg != 0.0) put("materialTurn", guide.materialTurnDeg)
+            if (guide.hole) put("hole", true)
         }) }
         val extrusions = JSONArray()
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
@@ -779,7 +780,7 @@ private object ProjectStore {
         val values = json.getJSONArray("lines")
         val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key, ModelPlane.of(line.optString("plane")))) } }
         val guideValues = json.optJSONArray("guides") ?: JSONArray()
-        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(0, 20, 50, 90, 100) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0)) } }
+        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(0, 20, 50, 90, 100) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0, hole = guide.optBoolean("hole", false))) } }
         val figure = ComparisonFigure.entries.firstOrNull { it.name == json.optString("figure") } ?: if (!json.has("figure") && json.optBoolean("silhouette")) ComparisonFigure.STANDING else null
         val transparency = json.optInt("transparency", 0).takeIf { it in listOf(0, 10, 90, 100) } ?: 0
         val extrusionValues = json.optJSONArray("extrusions") ?: JSONArray()
@@ -818,6 +819,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
 @Composable private fun Idea3dApp(sharedImage: Uri?, onSharedImageConsumed: () -> Unit) {
     val context = LocalContext.current
     val preferences = remember { context.getSharedPreferences("idea3d-settings", Context.MODE_PRIVATE) }
+    remember { ActionLog.start(context) }
     remember { MeasurementPrecision.load(context) }
     val scope = rememberCoroutineScope()
     var projectExportId by remember { mutableStateOf<String?>(null) }
@@ -1197,7 +1199,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (editPlane != ModelPlane.FRONT) {
             val canvas = planeCanvas ?: return
             val width = canvas.width.toLong() + left + right; val height = canvas.height.toLong() + top + bottom
-            if (width > 32767 || height > 32767 || width * height > 40_000_000L) { Toast.makeText(context, "Canvas is too large. Use smaller margins.", Toast.LENGTH_LONG).show(); return }
+            if (width > 32767 || height > 32767 || width * height > 40_000_000L) { logToast(context, "Canvas is too large. Use smaller margins.", Toast.LENGTH_LONG).show(); return }
             shiftPlaneCanvas(left.toFloat(), top.toFloat(), width.toInt(), height.toInt())
             cropFrame = CropFrame(frame.left, frame.top, frame.right + left + right, frame.bottom + top + bottom)
             selectedVertices = emptyList(); zoom = 1f; pan = Offset.Zero; showCanvasSize = false
@@ -1206,14 +1208,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val source = bitmap ?: return
         val width = source.width.toLong() + left + right; val height = source.height.toLong() + top + bottom
         if (width > 32767 || height > 32767 || width * height > 40_000_000L) {
-            Toast.makeText(context, "Canvas is too large. Use smaller margins.", Toast.LENGTH_LONG).show(); return
+            logToast(context, "Canvas is too large. Use smaller margins.", Toast.LENGTH_LONG).show(); return
         }
         val expanded = try {
             Bitmap.createBitmap(width.toInt(), height.toInt(), Bitmap.Config.ARGB_8888).also { output ->
                 AndroidCanvas(output).apply { drawColor(AndroidColor.WHITE); drawBitmap(source, left.toFloat(), top.toFloat(), null) }
             }
         } catch (_: OutOfMemoryError) {
-            Toast.makeText(context, "Not enough memory for that canvas size.", Toast.LENGTH_LONG).show(); return
+            logToast(context, "Not enough memory for that canvas size.", Toast.LENGTH_LONG).show(); return
         }
         fun moved(point: Pt) = Pt(point.x + left, point.y + top)
         bitmap = expanded
@@ -1265,16 +1267,16 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     val projectPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { ProjectStore.importProject(context, uri) } }
-            result.onSuccess { library = ProjectStore.list(context); Toast.makeText(context, "Project imported", Toast.LENGTH_SHORT).show() }
-                .onFailure { Toast.makeText(context, "Could not import project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+            result.onSuccess { library = ProjectStore.list(context); logToast(context, "Project imported", Toast.LENGTH_SHORT).show() }
+                .onFailure { logToast(context, "Could not import project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
     val projectExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         val id = projectExportId; projectExportId = null
         if (uri != null && id != null) scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { ProjectStore.exportProject(context, id, uri) } }
-            result.onSuccess { Toast.makeText(context, "Project exported", Toast.LENGTH_SHORT).show() }
-                .onFailure { Toast.makeText(context, "Could not export project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+            result.onSuccess { logToast(context, "Project exported", Toast.LENGTH_SHORT).show() }
+                .onFailure { logToast(context, "Could not export project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
     fun writeStagedModel(uri: Uri?, extension: String) {
@@ -1285,8 +1287,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val stream = context.contentResolver.openOutputStream(uri) ?: error("Cannot open the selected file")
                 staged.inputStream().use { input -> stream.use { output -> input.copyTo(output) } }
             } }
-            result.onSuccess { staged.delete(); Toast.makeText(context, "${extension.uppercase()} model exported", Toast.LENGTH_LONG).show() }
-                .onFailure { Toast.makeText(context, "3D export failed: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+            result.onSuccess { staged.delete(); logToast(context, "${extension.uppercase()} model exported", Toast.LENGTH_LONG).show() }
+                .onFailure { logToast(context, "3D export failed: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         } else staged.delete()
     }
     /** Reads a downloaded 3D model and places it, one solid piece, in the middle of this view. */
@@ -1314,8 +1316,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 importedModels = importedModels + ImportedModel(modelId, mesh.name, center, rx = if (upright) -90.0 else 0.0)
                 selectedModelId = modelId
                 val (low, high) = mesh.bounds; val f = java.text.DecimalFormat("0.#")
-                Toast.makeText(context, "Imported ${mesh.name}: ${mesh.triangles.size} triangles, ${f.format(high.x - low.x)} × ${f.format(high.y - low.y)} × ${f.format(high.z - low.z)} mm. Tap it twice for its size and position.", Toast.LENGTH_LONG).show()
-            }.onFailure { Toast.makeText(context, "Could not import: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+                logToast(context, "Imported ${mesh.name}: ${mesh.triangles.size} triangles, ${f.format(high.x - low.x)} × ${f.format(high.y - low.y)} × ${f.format(high.z - low.z)} mm. Tap it twice for its size and position.", Toast.LENGTH_LONG).show()
+            }.onFailure { logToast(context, "Could not import: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(::importModel) }
@@ -1689,7 +1691,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val (join, target) = solidPick ?: return
         solidPick = null
         if (other == null) return
-        if (other == target) { Toast.makeText(context, "Pick a different object", Toast.LENGTH_SHORT).show(); return }
+        if (other == target) { logToast(context, "Pick a different object", Toast.LENGTH_SHORT).show(); return }
         val op = SolidOp(target, other, join)
         if (join) { pushUndo(); solidOps = solidOps + op } else pendingCut = op
     }
@@ -1913,7 +1915,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val pts = listOf(corner, Pt(end.x, corner.y), end, Pt(corner.x, end.y))
         guides = guides + pts.indices.map { i -> GuideLine(firstId + i, pts[i], pts[(i + 1) % 4], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth) }
         tool = Tool.NONE; selectedGuideId = firstId; selectedWholeGuideId = null; guideDeleteCandidateId = firstId
-        if (square) Toast.makeText(context, "Square", Toast.LENGTH_SHORT).show()
+        if (square) logToast(context, "Square", Toast.LENGTH_SHORT).show()
     }
     fun handleTap(point: Pt, hitRadius: Double) {
         if (selectMode) {
@@ -2502,6 +2504,18 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val cutter = guides.firstOrNull { it.id == action.secondId }
         val target = if (operation == "cut-first") second else first
         val razor = if (operation == "cut-first") first else second
+        // A cutter lying wholly inside the shape makes a hole in it (a ring from two circles, say): the cutter stays
+        // as the hole's outline, grouped with the shape, and the hole goes through it in 3D.
+        if ((operation == "cut-first" || operation == "cut-second") && target != null && razor != null && shapePoints(razor).all { pointInsidePolygon(it, shapePoints(target)) }) {
+            pushUndo()
+            val holeIds = razor.map { it.id }.toSet()
+            guides = guides.map { if (it.id in holeIds) it.copy(hole = true, fillTransparency = null, materialId = null) else it }
+            extrusions = extrusions.filterNot { e -> e.guideIds.any { it in holeIds } }
+            val keys = listOf(homeKey(target.first()), homeKey(razor.first()))
+            itemGroups = itemGroups.map { g -> g.filterNot { m -> keys.any { sameItem(it, m) } } }.filter { it.size >= 2 } + listOf(keys)
+            logToast(context, "Cut a hole: the inner shape is now a hole that goes through in 3D", Toast.LENGTH_SHORT).show()
+            return
+        }
         val result = when (operation) {
             "merge" -> second?.let { shapeBoolean(first, it, android.graphics.Path.Op.UNION) }
             "cut-first", "cut-second" -> if (target != null && razor != null) shapeBoolean(target, razor, android.graphics.Path.Op.DIFFERENCE) else null
@@ -2509,7 +2523,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             else -> null
         }
         if (result.isNullOrEmpty()) {
-            Toast.makeText(context, "Cannot create editable shapes from this cut.", Toast.LENGTH_LONG).show()
+            logToast(context, "Cannot create editable shapes from this cut.", Toast.LENGTH_LONG).show()
             return
         }
         val removed = if (operation == "merge") first + second.orEmpty() else target ?: return
@@ -3031,7 +3045,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             } }
             if (projectId != openedProject) return@launch
             result.onSuccess { (mesh, ids) -> viewerModel = mesh; viewerObjects = ids; show3d = true }
-                .onFailure { error -> Toast.makeText(context, "3D view: ${error.localizedMessage}", Toast.LENGTH_LONG).show(); if (viewerModel == null) show3d = false }
+                .onFailure { error -> logToast(context, "3D view: ${error.localizedMessage}", Toast.LENGTH_LONG).show(); if (viewerModel == null) show3d = false }
         }
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
@@ -3123,7 +3137,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 fun remap(k: Pair<ModelPlane, Int>) = if (k.first == plane) extrusionIds[k.second]?.let { target to it } ?: k else k
                 op.copy(target = remap(op.target), tool = remap(op.tool))
             }
-            Toast.makeText(context, "It now lies flat in ${target.label}, so it moved to the ${target.label} view", Toast.LENGTH_SHORT).show()
+            logToast(context, "It now lies flat in ${target.label}, so it moved to the ${target.label} view", Toast.LENGTH_SHORT).show()
         }
         pointMoves.forEach { (sel, d) -> moveGhostPoint(sel, d) }
     }
@@ -3151,10 +3165,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (pickedItems.size < 2) return
         pushUndo()
         val inGroup = itemGroups.filter { group -> group.any { m -> pickedItems.any { sameItem(m, it) } } }
-        if (inGroup.size == 1 && pickedItems.all { p -> inGroup[0].any { sameItem(p, it) } }) { itemGroups = itemGroups.filterNot { it === inGroup[0] }; Toast.makeText(context, "Ungrouped", Toast.LENGTH_SHORT).show(); return }
+        if (inGroup.size == 1 && pickedItems.all { p -> inGroup[0].any { sameItem(p, it) } }) { itemGroups = itemGroups.filterNot { it === inGroup[0] }; logToast(context, "Ungrouped", Toast.LENGTH_SHORT).show(); return }
         val merged: List<Pair<ModelPlane, Int>> = (inGroup.flatten() + pickedItems).fold(emptyList()) { acc, k -> if (acc.any { sameItem(it, k) }) acc else acc + k }
         itemGroups = itemGroups.filterNot { it in inGroup } + listOf(merged)
-        Toast.makeText(context, "Grouped ${pickedItems.size} items: they are picked and moved together", Toast.LENGTH_SHORT).show()
+        logToast(context, "Grouped ${pickedItems.size} items: they are picked and moved together", Toast.LENGTH_SHORT).show()
     }
     fun pickedIsGroup() = pickedItems.size >= 2 && itemGroups.any { group -> pickedItems.all { p -> group.any { sameItem(p, it) } } }
     /** Merge: two 3D objects become one solid; two shapes in the same view become one outline. */
@@ -3202,16 +3216,16 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             setPlaneShapes(plane, guidesNow.map { if (it.id in members) it.copy(groupId = group) else it }, geometry.extrusions)
             any = true
         }
-        if (any) Toast.makeText(context, "Welded: they share the touching points and move together", Toast.LENGTH_SHORT).show()
+        if (any) logToast(context, "Welded: they share the touching points and move together", Toast.LENGTH_SHORT).show()
         return any
     }
     fun mergePicked() {
-        if (pickedItems.size < 2) { Toast.makeText(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
+        if (pickedItems.size < 2) { logToast(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         val first = pickedItems.first(); val rest = pickedItems.drop(1)
         val firstSolid = extrusionOf(first)
         if (firstSolid != null && rest.all { extrusionOf(it) != null }) {
             pushUndo(); solidOps = solidOps + rest.map { SolidOp(first.first to firstSolid.id, it.first to extrusionOf(it)!!.id, join = true) }
-            pickedItems = emptyList(); Toast.makeText(context, "Joined in 3D", Toast.LENGTH_SHORT).show(); return
+            pickedItems = emptyList(); logToast(context, "Joined in 3D", Toast.LENGTH_SHORT).show(); return
         }
         if (rest.size == 1 && rest[0].first == first.first && isClosedShape(first) && isClosedShape(rest[0])) {
             if (editPlane != first.first) switchPlane(first.first)
@@ -3219,11 +3233,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             pickedItems = emptyList(); return
         }
         if (weldItems(pickedItems, anchored = false)) { pickedItems = emptyList(); return }
-        Toast.makeText(context, "Merge needs lines that touch (an end on the other line), two overlapping shapes in the same view, or 3D objects", Toast.LENGTH_LONG).show()
+        logToast(context, "Merge needs lines that touch (an end on the other line), two overlapping shapes in the same view, or 3D objects", Toast.LENGTH_LONG).show()
     }
     /** Cut: the second picked item is cut out of the first. */
     fun cutPicked() {
-        if (pickedItems.size != 2) { Toast.makeText(context, "Pick two items: first the one to cut, then the cutter", Toast.LENGTH_LONG).show(); return }
+        if (pickedItems.size != 2) { logToast(context, "Pick two items: first the one to cut, then the cutter", Toast.LENGTH_LONG).show(); return }
         val (target, cutter) = pickedItems
         val targetSolid = extrusionOf(target); val cutterSolid = extrusionOf(cutter)
         if (targetSolid != null && cutterSolid != null) { pendingCut = SolidOp(target.first to targetSolid.id, cutter.first to cutterSolid.id, join = false); pickedItems = emptyList(); return }
@@ -3232,7 +3246,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             applyShapeOperation(JunctionAction(if (isClosedShape(cutter)) JunctionKind.SHAPE_OVERLAP else JunctionKind.CUT_SHAPE_LINE, target.second, cutter.second, Pt(0f, 0f)), if (isClosedShape(cutter)) "cut-second" else "line")
             pickedItems = emptyList(); return
         }
-        Toast.makeText(context, "Cut needs a shape and a shape or straight line in the same view, or two 3D objects", Toast.LENGTH_LONG).show()
+        logToast(context, "Cut needs a shape and a shape or straight line in the same view, or two 3D objects", Toast.LENGTH_LONG).show()
     }
     /** Arrange: line up the picked items' centers on this view's horizontal or vertical, or space them evenly. */
     fun arrangePicked(horizontal: Boolean, distribute: Boolean) {
@@ -3242,7 +3256,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val boxes = itemBoxes + pointBoxes
         @Suppress("UNCHECKED_CAST")
         fun moveAny(k: Any, d: Vec3) = if (k is Triple<*, *, *>) moveGhostPoint(k as Triple<ModelPlane, Int, Boolean>, d) else moveItem(k as Pair<ModelPlane, Int>, d)
-        if (boxes.size < 2 || distribute && boxes.size < 3) { Toast.makeText(context, if (distribute) "Pick at least three items to space them" else "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
+        if (boxes.size < 2 || distribute && boxes.size < 3) { logToast(context, if (distribute) "Pick at least three items to space them" else "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         pushUndo()
         fun cx(b: FloatArray) = (b[0] + b[2]) / 2.0
         fun cy(b: FloatArray) = (b[1] + b[3]) / 2.0
@@ -3329,7 +3343,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         copies.forEach { key -> val g = planeGeometry(key.first); val ids = itemGuides(key).map { it.id }.toSet()
             setPlaneShapes(key.first, g.guides.map { if (it.id in ids) it.copy(fillTransparency = 100) else it }, g.extrusions) }
         copies.firstOrNull()?.let { copy -> (if (copy.first == editPlane) copy.second else encodedId(copy.first, copy.second)).let { id -> if (guides.any { it.id == id }) { selectedForeign = null; selectedWholeGuideId = id; selectedGuideId = id } } }
-        Toast.makeText(context, "Outline made: plain lines over the original", Toast.LENGTH_SHORT).show()
+        logToast(context, "Outline made: plain lines over the original", Toast.LENGTH_SHORT).show()
     }
     /** Clone in Adjust: the selected line or shape (with its group); [full] copies material, fill and depth too. */
     fun cloneSelected(full: Boolean) {
@@ -3421,6 +3435,57 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (point != null) { if (point.first == editPlane) { selectedGuideEndpoint = GuideEndpoint(point.second, point.third); selectedGuideId = point.second }; movePointDialog = true }
         else if (item != null) { selectedWholeGuideId = item.second; selectedGuideId = item.second; openProperties()?.invoke() }
     }
+    /** A short name for an item: its 3D object's name, Circle, Oval, Shape, Broken line or Line, with its material. */
+    fun itemName(key: Pair<ModelPlane, Int>): String {
+        val pieces = itemGuides(key)
+        val material = pieces.firstNotNullOfOrNull { g -> materials.firstOrNull { it.id == g.materialId } }?.name
+        val base = extrusionOf(key)?.let { objectName(key.first to it.id) }
+            ?: pieces.firstOrNull()?.let { g -> circleOf(g, planeGeometry(key.first).guides) }?.let { c -> if (c.any { it.hole }) "Hole" else "Circle" }
+            ?: if (isClosedShape(key)) "Shape" else if (pieces.size > 1) "Broken line" else "Line"
+        return base + (material?.let { " · $it" } ?: "")
+    }
+    /**
+     * The name of what is selected, shown in red in place of the file name (Shape 2, Circle, Line, Point…), or null
+     * when nothing is selected.
+     */
+    fun selectionName(): String? {
+        if (show3d) return null
+        if (selectMode) return when (val n = pickedItems.size + pickedPoints.size) { 0 -> null; 1 -> pickedItems.singleOrNull()?.let { itemName(it) } ?: "Point"; else -> "$n picked" }
+        selectedModelId?.let { id -> return importedModels.firstOrNull { it.id == id }?.name ?: "Model" }
+        selectedForeign?.let { return objectName(it) }
+        if (selectedGuideEndpoint != null || selectedEndpoint != null || selectedVertices.isNotEmpty()) return if (selectedVertices.size > 1) "${selectedVertices.size} points" else "Point"
+        (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { return itemName(homeKey(it)) }
+        selectedLineId?.let { id -> lines.firstOrNull { it.id == id } }?.let { return it.label.ifBlank { "Measurement" } }
+        return null
+    }
+    /** Opens the selected thing's own properties (what tapping its name does). */
+    fun openSelection() {
+        if (selectMode) { if (pickedItems.size + pickedPoints.size == 1) propertiesPicked(); return }
+        selectedModelId?.let { modelDialogId = it; return }
+        selectedForeign?.let { foreignDialog = it; return }
+        openProperties()?.invoke() ?: selectedLineId?.let { showLineEdit = true }
+    }
+    /** Deletes what is selected (undo brings it back). */
+    fun deleteSelection() {
+        if (selectMode) { deletePicked(); return }
+        selectedModelId?.let { id -> pushUndo(); importedModels = importedModels.filterNot { it.id == id }; selectedModelId = null; return }
+        selectedForeign?.let { (plane, extrusionId) ->
+            val g = planeGeometry(plane)
+            val ids = g.extrusions.firstOrNull { it.id == extrusionId }?.let { e -> extrusionGuides(e, g.guides).map { it.id }.toSet() } ?: return
+            pushUndo(); setPlaneShapes(plane, g.guides.filterNot { it.id in ids }, g.extrusions.filterNot { it.id == extrusionId }); selectedForeign = null; return
+        }
+        if (selectedGuideEndpoint != null || selectedCurveId != null) { deleteSelectedGuidePoint(); return }
+        (selectedWholeGuideId ?: selectedGuideId)?.let { id ->
+            // A shape's holes go with it.
+            val shape = closedGuideShapes(guides).firstOrNull { p -> p.any { it.id == id } }
+            val holes = shape?.let { s -> closedGuideShapes(guides).filter { h -> h.all { it.hole } && shapePoints(h).all { pointInsidePolygon(it, shapePoints(s)) } } }.orEmpty().flatten().map { it.id }.toSet()
+            deleteGuide(id)
+            // deleteGuide already saved the undo step, so one Undo brings back the shape and its holes.
+            if (holes.isNotEmpty()) guides = guides.filterNot { it.id in holes }
+            selectedWholeGuideId = null; selectedGuideId = null; guideDeleteCandidateId = null; return
+        }
+        selectedLineId?.let { deleteMeasurement(it); selectedLineId = null }
+    }
 
     BackHandler(enabled = presentation || bitmap != null || showSettings || showMaterials) {
         when {
@@ -3462,15 +3527,32 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             onColor = { next -> defaultColor = next; preferences.edit().putInt("default-color", next).apply() },
             onUnitVisibility = { next -> unitVisibility = next; preferences.edit().putString("unit-visibility", next).apply() },
             onExportGuides = { enabled -> exportGuides = enabled; preferences.edit().putBoolean("export-guides", enabled).apply() },
-            onExportLog = { if (bitmap != null) { exportMeasurementLog(context, lines, scale, unit); Toast.makeText(context, "Measurement log saved", Toast.LENGTH_SHORT).show() } },
-            onExportBoschLog = { exportBoschDiagnosticLog(context); Toast.makeText(context, "Bosch diagnostic log saved", Toast.LENGTH_SHORT).show() },
+            onCopyDebugLog = {
+                val summary = buildString {
+                    append("Idea 3D ${runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()}\n")
+                    if (bitmap != null) {
+                        append("Project \"$projectName\", view ${editPlane.label}${if (editPlane in mirroredViews) " (other side)" else ""}, tool $tool${if (selectMode) ", select mode" else ""}\n")
+                        ModelPlane.entries.forEach { p -> val g = planeGeometry(p); append("${p.label}: ${g.guides.size} lines, ${closedGuideShapes(g.guides).size} shapes, ${g.extrusions.size} 3D objects, ${g.lines.size} measurements\n") }
+                        append("Selected: line ${selectedWholeGuideId ?: selectedGuideId}, object $selectedForeign, model $selectedModelId, picked $pickedItems\n")
+                    }
+                    append("Last actions:\n"); append(ActionLog.text())
+                }
+                (context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("Idea 3D debug log", summary))
+                logToast(context, "Debug log copied: paste it into your message", Toast.LENGTH_LONG).show()
+            },
+            onExportLog = { if (bitmap != null) { exportMeasurementLog(context, lines, scale, unit); logToast(context, "Measurement log saved", Toast.LENGTH_SHORT).show() } },
+            onExportBoschLog = { exportBoschDiagnosticLog(context); logToast(context, "Bosch diagnostic log saved", Toast.LENGTH_SHORT).show() },
             onBack = { showSettings = false }
         )
     } else Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         snackbarHost = { SnackbarHost(snackbarHost) },
         topBar = { if (bitmap != null) TopAppBar(title = {
-            if (tool != Tool.CROP) OutlinedButton(onClick = { showPictureEdit = true }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp)) {
+            // With something selected, its name (in red, slowly blinking) stands here and opens its properties;
+            // otherwise the file name, which opens the file menu.
+            val selected = if (tool != Tool.CROP) selectionName() else null
+            if (selected != null) SelectionTitle(selected) { openSelection() }
+            else if (tool != Tool.CROP) OutlinedButton(onClick = { showPictureEdit = true }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Text(projectName.ifBlank { "Idea 3D" }, fontWeight = FontWeight.Bold, letterSpacing = 0.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }, actions = {
@@ -3491,6 +3573,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     if (scale == null) tool = Tool.CALIBRATE
                 }
             }, enabled = draftStart != null || undoHistory.isNotEmpty() || lines.isNotEmpty() || guides.isNotEmpty()) { Icon(painterResource(R.drawable.ic_undo), contentDescription = "Undo", tint = Color(0xFFB3261E)) }
+            // Delete what is selected, right by Undo (which brings it back).
+            if (selectionName() != null) IconButton(onClick = { ActionLog.add("tap Delete"); deleteSelection() }) { Icon(painterResource(R.drawable.ic_delete), contentDescription = "Delete selected", tint = Color(0xFFB3261E)) }
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
@@ -3581,7 +3665,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     }
                     selectMode -> {
                         val n = pickedItems.size; val total = n + pickedPoints.size
-                        ActionIcon("Properties", R.drawable.ic_properties, enabled = total == 1, onClick = ::propertiesPicked)
                         // One picked line or shape: choose what it is made of.
                         val pickedGuide = pickedItems.singleOrNull()?.takeIf { pickedPoints.isEmpty() }?.let { (plane, id) -> guides.firstOrNull { it.id == if (plane == editPlane) id else encodedId(plane, id) } }
                         ActionIcon("Material", R.drawable.ic_save_material, enabled = pickedGuide != null) {
@@ -3600,15 +3683,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
                         ActionIcon("Box: ${if (boxPicksItems) "items" else "points"}", R.drawable.ic_select_area, on = boxPicksItems) { boxPicksItems = !boxPicksItems }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total > 0) { pickedItems = emptyList(); pickedPoints = emptyList() }
-                        ActionIcon("Delete", R.drawable.ic_delete, enabled = total >= 1, tint = red, onClick = ::deletePicked)
                     }
                     else -> {
-                        selectedModelId?.let { id ->
-                            ActionIcon("Model", R.drawable.ic_properties) { modelDialogId = id }
-                            ActionIcon("Delete", R.drawable.ic_delete, tint = red) { pushUndo(); importedModels = importedModels.filterNot { it.id == id }; selectedModelId = null }
-                        }
-                        // Most used first: Properties, Material, Turn, Clone, Weld, Delete.
-                        openProperties()?.let { ActionIcon("Properties", R.drawable.ic_properties, onClick = it) }
+                        // Most used first: Material, Grow, Outline, Turn, Clone, Weld (Properties and Delete are in the title bar).
                         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
                             val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
                             ActionIcon("Material", R.drawable.ic_save_material) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
@@ -3630,10 +3707,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                                 guides.firstOrNull { it.id == wholeId }?.let { g ->
                                     val key = homeKey(g)
                                     val others = planeGeometry(key.first).guides.map { key.first to it.id }.filterNot { sameItem(key, it) }
-                                    if (!weldItems(listOf(key) + others, anchored = true)) Toast.makeText(context, "Nothing touches this line: put an end of one line on the other", Toast.LENGTH_LONG).show()
+                                    if (!weldItems(listOf(key) + others, anchored = true)) logToast(context, "Nothing touches this line: put an end of one line on the other", Toast.LENGTH_LONG).show()
                                 }
                             }
-                            ActionIcon("Delete", R.drawable.ic_delete, tint = red) { deleteGuide(wholeId); selectedWholeGuideId = null; selectedGuideId = null }
                         }
                         if (tool == Tool.ADJUST && selectedForeign == null && (selectedGuideEndpoint != null || selectedEndpoint != null)) ActionIcon("Move by", R.drawable.ic_move_point) { movePointDialog = true }
                         // The same Align buttons as in Select, doing the same thing.
@@ -3660,8 +3736,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         }
                         if (tool == Tool.ADJUST && panOnEmptyDrag) ActionIcon("Box", R.drawable.ic_select_area) { panOnEmptyDrag = false }
                         if (tool == Tool.ADJUST && selectedExtrusionId != null) ActionIcon("Depth", R.drawable.ic_cube) { extrusionEditId = selectedExtrusionId }
-                        deleteCandidateId?.let { id -> ActionIcon("Delete", R.drawable.ic_delete, tint = red) { deleteMeasurement(id) } }
-                        if (tool != Tool.ADJUST) guideDeleteCandidateId?.let { id -> ActionIcon("Delete", R.drawable.ic_delete, tint = red) { deleteGuide(id) } }
                         if (!isBlankCanvas() && selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) ActionIcon("Crop", R.drawable.ic_crop) { startCrop() }
                     }
                 }
@@ -3704,7 +3778,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     // Keep the user's manual level rotation; Auto only rectifies perspective.
                     zoom = 1f; pan = Offset.Zero
                     projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { corrected.bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) } }
-                } else Toast.makeText(context, "Add two parallel-side references and one connecting reference", Toast.LENGTH_SHORT).show()
+                } else logToast(context, "Add two parallel-side references and one connecting reference", Toast.LENGTH_SHORT).show()
             })
             // The end-point hint lives in the status strip so the canvas never shifts mid-gesture.
             if (tool == Tool.CALIBRATE) CalibrationList(lines, unit, Modifier.fillMaxWidth().heightIn(max = 96.dp)) { line -> selectedLineId = line.id; showLineEdit = true }
@@ -4048,20 +4122,20 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val depthChanged = startMm != line.startZMm || endMm != line.endZMm
             val fixed = value > 0 && (line.isScaleReference || lengthEdited)
             val dz = abs(endMm - startMm) / unitFactorMm(unit)
-            if (fixed && dz > value) { Toast.makeText(context, "Z difference cannot exceed the measurement length", Toast.LENGTH_LONG).show(); return@save }
-            if ((depthChanged || lengthEdited && line.hasDepth()) && fixed && scale == null) { Toast.makeText(context, "Set a calibration scale first", Toast.LENGTH_LONG).show(); return@save }
+            if (fixed && dz > value) { logToast(context, "Z difference cannot exceed the measurement length", Toast.LENGTH_LONG).show(); return@save }
+            if ((depthChanged || lengthEdited && line.hasDepth()) && fixed && scale == null) { logToast(context, "Set a calibration scale first", Toast.LENGTH_LONG).show(); return@save }
             var start = line.start; var end = line.end
             val moveStart = startMm != line.startZMm && endMm == line.endZMm
             if ((depthChanged || lengthEdited && line.hasDepth()) && fixed && scale != null) {
                 val oldLength = frontLength(start, end, scale!!, axisScale)
-                if (distance(start, end) < 0.00001) { Toast.makeText(context, "Cannot set direction for a zero-length line", Toast.LENGTH_LONG).show(); return@save }
+                if (distance(start, end) < 0.00001) { logToast(context, "Cannot set direction for a zero-length line", Toast.LENGTH_LONG).show(); return@save }
                 val projection = projectedLengthForFixedTrue(value, dz) ?: 0.0
                 val ratio = (projection / oldLength).toFloat()
                 if (moveStart) start = Pt(end.x + (start.x - end.x) * ratio, end.y + (start.y - end.y) * ratio)
                 else end = Pt(start.x + (end.x - start.x) * ratio, start.y + (end.y - start.y) * ratio)
                 val oldPoint = if (moveStart) line.start else line.end
                 if (line.pathId != null && lines.any { it.id != line.id && it.pathId == line.pathId && it.isScaleReference && (distance(it.start, oldPoint) < 0.6 || distance(it.end, oldPoint) < 0.6) }) {
-                    Toast.makeText(context, "Split this point from the adjoining fixed-length segment first", Toast.LENGTH_LONG).show(); return@save
+                    logToast(context, "Split this point from the adjoining fixed-length segment first", Toast.LENGTH_LONG).show(); return@save
                 }
             }
             pushUndo()
@@ -4089,14 +4163,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         ModelReportDialog(report, unit, onDismiss = { modelReport = null }, onStl = { modelReport = null; stlExporter.launch("$safeName.stl") }, on3mf = { modelReport = null; threeMfExporter.launch("$safeName.3mf") })
     }
     if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
-        bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); Toast.makeText(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
+        bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); logToast(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onSaveMaterial = {
         // The selected shape, or else the biggest closed shape that isn't a hole inside another one.
         val shapes = closedGuideShapes(guides)
         val chosen = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { g -> shapes.firstOrNull { path -> sameGuideObject(path.first(), g) } }
             ?: shapes.filter { shape -> shapes.none { other -> other !== shape && shapePoints(shape).all { pointInsidePolygon(it, shapePoints(other)) } } }
                 .maxByOrNull { shape -> val p = shapePoints(shape); abs(p.indices.sumOf { i -> val a = p[i]; val b = p[(i + 1) % p.size]; (a.x * b.y - b.x * a.y).toDouble() }) }
-        if (chosen == null) Toast.makeText(context, "Draw a closed shape first: the outline of the cross-section, with any holes inside it.", Toast.LENGTH_LONG).show()
+        if (chosen == null) logToast(context, "Draw a closed shape first: the outline of the cross-section, with any holes inside it.", Toast.LENGTH_LONG).show()
         else { showPictureEdit = false; saveMaterialShape = chosen }
     }, onExport3d = {
         val exportGuidesSnapshot = allGuides(); val exportExtrusionsSnapshot = allExtrusions()
@@ -4317,7 +4391,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val color = if (drawnColor != 0xFF5F6B6D.toInt()) drawnColor else when (finish) { Finish.WOOD -> 0xFFC89B6A.toInt(); Finish.GLASS -> 0xFF9CC9E0.toInt(); Finish.STONE -> 0xFF9E9A94.toInt(); Finish.METAL -> 0xFF8A9497.toInt(); Finish.PLAIN -> drawnColor }
                 materials = materials + if (asSheet) Material(UUID.randomUUID().toString(), name.trim(), sheetProfile, color, sheetMm, finish) else Material(UUID.randomUUID().toString(), name.trim(), scaled!!, color, finish = finish)
                 MaterialStore.save(context, materials)
-                Toast.makeText(context, "Saved \"${name.trim()}\" to Materials", Toast.LENGTH_SHORT).show()
+                logToast(context, "Saved \"${name.trim()}\" to Materials", Toast.LENGTH_SHORT).show()
                 saveMaterialShape = null
             }) { Text("Save") }
         }, dismissButton = { TextButton(onClick = { saveMaterialShape = null }) { Text("Cancel") } })
@@ -4457,6 +4531,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     onUnitVisibility: (String) -> Unit,
     onExportGuides: (Boolean) -> Unit,
     onExportLog: () -> Unit,
+    onCopyDebugLog: () -> Unit,
     onExportBoschLog: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -4542,6 +4617,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 Text("Current picture", fontWeight = FontWeight.Bold)
                 Text("Export a plain text record of the measurements on the open picture.", fontSize = 13.sp, color = Color(0xFF53615D))
                 OutlinedButton(onClick = onExportLog, enabled = hasProject, shape = RoundedCornerShape(8.dp)) { Text("Export measurement log") }
+                // The last actions and messages, to paste into a message when something goes wrong.
+                Button(onClick = onCopyDebugLog, shape = RoundedCornerShape(8.dp)) { Text("Copy debug log (last actions)") }
             }
         }
     }
@@ -4712,9 +4789,34 @@ private sealed class ModelReport {
     }
 }
 
+/**
+ * The last actions and messages, for "Copy debug log" in Settings: taps on buttons and tools, and every message
+ * shown. Kept in memory, newest last.
+ */
+internal object ActionLog {
+    private val entries = ArrayDeque<String>()
+    private val time = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US)
+    private var file: File? = null
+    /** Keeps the log in the app's storage, so it survives a restart or a crash (whose details are logged too). */
+    @Synchronized fun start(context: Context) {
+        if (file != null) return
+        file = File(context.filesDir, "action-log.txt").also { f -> runCatching { f.readLines().takeLast(60).forEach { entries.addLast(it) } } }
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error -> add("CRASH: ${error.stackTraceToString().lines().take(12).joinToString(" | ")}"); previous?.uncaughtException(thread, error) }
+    }
+    @Synchronized fun add(entry: String) {
+        entries.addLast("${time.format(java.util.Date())} $entry"); while (entries.size > 60) entries.removeFirst()
+        runCatching { file?.writeText(entries.joinToString("\n")) }
+    }
+    @Synchronized fun text(): String = entries.joinToString("\n")
+}
+
+/** A message on screen, also written to the debug log. */
+private fun logToast(context: Context, text: CharSequence, duration: Int): Toast { ActionLog.add("message: $text"); return Toast.makeText(context, text, duration) }
+
 /** One action in the top row: a small icon with its name under it. */
 @Composable private fun ActionIcon(label: String, icon: Int, enabled: Boolean = true, on: Boolean = false, tint: Color = Color(0xFF173C39), onClick: () -> Unit) {
-    Column(Modifier.width(54.dp).background(if (on) Color(0xFFCFE3DF) else Color.Transparent, RoundedCornerShape(8.dp)).clickable(enabled = enabled, onClick = onClick).padding(vertical = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.width(54.dp).background(if (on) Color(0xFFCFE3DF) else Color.Transparent, RoundedCornerShape(8.dp)).clickable(enabled = enabled) { ActionLog.add("tap $label"); onClick() }.padding(vertical = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Icon(painterResource(icon), contentDescription = label, tint = if (enabled) tint else Color(0xFFB4BEBA), modifier = Modifier.size(22.dp))
         Text(label, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (enabled) Color(0xFF173C39) else Color(0xFFB4BEBA))
     }
@@ -4942,13 +5044,23 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
         Box(
             Modifier.size(42.dp)
                 .background(if (selected) Color(0xFFE2ECE9) else Color.Transparent, CircleShape)
-                .combinedClickable(enabled = enabled, onClick = action, onLongClick = onLongPress),
+                .combinedClickable(enabled = enabled, onClick = { ActionLog.add("tool $label"); action() }, onLongClick = onLongPress?.let { f -> { ActionLog.add("hold $label"); f() } }),
             contentAlignment = Alignment.Center
         ) { Icon(painterResource(icon), contentDescription = description, tint = Color.Unspecified, modifier = Modifier.size(26.dp)) }
         Text(label, fontSize = 11.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, color = if (enabled) Color(0xFF173C39) else Color(0xFF8A9691))
     }
 }
 /** Modify (the editing tool): an icon whose border blinks orange while it is on. */
+/** The selected thing's name in the title bar: red, in a slowly blinking red border; a tap opens its properties. */
+@Composable private fun SelectionTitle(name: String, onClick: () -> Unit) {
+    var bright by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) { while (true) { delay(900); bright = !bright } }
+    OutlinedButton(onClick = { ActionLog.add("open $name"); onClick() }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp),
+        border = androidx.compose.foundation.BorderStroke(2.dp, if (bright) Color(0xFFD32F2F) else Color(0xFFF2B8B5))) {
+        Text(name, fontWeight = FontWeight.Bold, color = Color(0xFFD32F2F), maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
 @Composable private fun ModifyButton(on: Boolean, onClick: () -> Unit, modifier: Modifier) {
     var blink by remember { mutableStateOf(true) }
     LaunchedEffect(on) { blink = true; while (on) { delay(500); blink = !blink } }
@@ -5417,7 +5529,13 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 } }
                 val shapes = drawableGuideShapes(guides)
                 val separators = shapes.flatMap { attachedRegions(it, guides) }.flatMap { it.separatorIds }.toSet()
-                shapes.forEach { shape ->
+                // Holes stay empty: no fill is painted inside them.
+                drawContext.canvas.save()
+                shapes.filter { s -> s.all { it.hole } }.forEach { hole ->
+                    val pts = shapePoints(hole)
+                    if (pts.isNotEmpty()) drawContext.canvas.clipPath(androidx.compose.ui.graphics.Path().apply { val f = viewAt(pts.first()); moveTo(f.x, f.y); pts.drop(1).forEach { viewAt(it).let { p -> lineTo(p.x, p.y) } }; close() }, androidx.compose.ui.graphics.ClipOp.Difference)
+                }
+                shapes.filterNot { s -> s.all { it.hole } }.forEach { shape ->
                     (shape.first().fillTransparency ?: if (extrusions.any { extrusion -> (extrusion.depthMm ?: 0.0) > 0.0 && shape.all { guide -> extrusionGuides(extrusion, guides).any { it.id == guide.id } } }) 90 else null)?.let { transparency ->
                         drawContext.canvas.save()
                         (listOf(shapePoints(shape)) + attachedRegions(shape, guides).map { it.points }).forEach { points ->
@@ -5430,6 +5548,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         drawContext.canvas.restore()
                     }
                 }
+                drawContext.canvas.restore()
                 drawContext.canvas.save()
                 shapes.forEach { shape ->
                     (listOf(shapePoints(shape)) + attachedRegions(shape, guides).map { it.points }).forEach { points ->
@@ -5464,7 +5583,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 val filledIds = (drawableGuideShapes(guides) + closedGuideShapes(guides)).filter { shape ->
                     val t = shape.first().fillTransparency ?: if (extrusions.any { e -> (e.depthMm ?: 0.0) > 0.0 && shape.all { g -> extrusionGuides(e, guides).any { it.id == g.id } } }) 90 else null
                     t != null && t < 100
-                }.flatten().map { it.id }.toSet()
+                }.flatten().map { it.id }.toSet() + guides.filter { it.hole }.map { it.id }
                 // Circles already labeled (an outline lying exactly on its shape shares the label).
                 val labeledCircles = mutableSetOf<List<Int>>()
                 guides.forEach { guide ->
@@ -6530,8 +6649,8 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
         val models = shapes.mapNotNull { shape ->
             val name = "${if (plane == ModelPlane.FRONT) "" else "${plane.label} "}Shape ${++count}"
             val extrusion = planeExtrusions.firstOrNull { ex -> extrusionGuides(ex, planeGuides).any { g -> shape.any { it.id == g.id } } }
-            // A flat shape (no depth) is simply not part of the 3D model.
-            if (extrusion == null) return@mapNotNull null
+            // A flat shape (no depth) is simply not part of the 3D model; nor is a hole (it is cut out of its shape).
+            if (extrusion == null || shape.all { it.hole }) return@mapNotNull null
             solidCount++
             val depth = extrusion.depthMm?.takeIf { it.isFinite() && it > 0 }
             if (depth == null) { issues += MeshIssue(name, "needs a positive depth"); return@mapNotNull null }
@@ -6624,7 +6743,16 @@ private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops
     // A drawing made only of bars and pipes needs no closed shape.
     val specs = if (members.isNotEmpty()) buildSolidSpecs(guides, extrusions, setup, objects, strict = false) else buildSolidSpecs(guides, extrusions, setup, objects)
     val issues = mutableListOf<MeshIssue>()
-    val raw = specs.map { spec -> try { MeshBuilder.extrude(spec) } catch (e: MeshException) { issues += e.issues; null } }
+    // Holes (shapes cut out of a shape and lying wholly inside it) are left open right through the object.
+    val raw = specs.map { spec ->
+        val mapping = setup.mapping(spec.plane)
+        val outer = spec.outline.map { Pt(it.x.toFloat(), it.y.toFloat()) }
+        val holes = if (mapping == null) emptyList() else closedGuideShapes(guides.filter { it.plane == spec.plane }).filter { s -> s.all { it.hole } }
+            .map { hole -> shapePoints(hole).map { Pt(mapping.right(it).toFloat(), mapping.up(it).toFloat()) } }
+            .filter { pts -> pts.size >= 3 && pts.all { pointInsidePolygon(it, outer) } }
+            .map { pts -> pts.map { Vec2(it.x.toDouble(), it.y.toDouble()) } }
+        try { if (holes.isEmpty()) MeshBuilder.extrude(spec) else MeshBuilder.extrudeWithHoles(spec, holes) } catch (e: MeshException) { issues += e.issues; null }
+    }
     if (issues.any { it.blocking }) throw MeshException(issues)
     val keys = objects.map { it.plane to it.id }
     val operations = ops.mapNotNull { op -> val target = keys.indexOf(op.target); val tool = keys.indexOf(op.tool); if (target < 0 || tool < 0 || target == tool) null else SolidOperation(target, tool, op.join, op.keepTool) }
@@ -7528,7 +7656,10 @@ private fun exportAnnotated(context: Context, original: Bitmap, lines: List<Meas
     }
     val shapes = drawableGuideShapes(guides)
     val separators = shapes.flatMap { attachedRegions(it, guides) }.flatMap { it.separatorIds }.toSet()
-    if (showGuides) shapes.forEach { shape ->
+    // Holes stay empty in the picture too.
+    canvas.save()
+    if (showGuides) shapes.filter { s -> s.all { it.hole } }.forEach { canvas.clipOutPath(shapePath(it)) }
+    if (showGuides) shapes.filterNot { s -> s.all { it.hole } }.forEach { shape ->
         (shape.first().fillTransparency ?: if (extrusions.any { extrusion -> (extrusion.depthMm ?: 0.0) > 0.0 && shape.all { guide -> extrusionGuides(extrusion, guides).any { it.id == guide.id } } }) 90 else null)?.let { transparency ->
             canvas.save()
             (listOf(shapePoints(shape)) + attachedRegions(shape, guides).map { it.points }).forEach { points ->
@@ -7542,6 +7673,7 @@ private fun exportAnnotated(context: Context, original: Bitmap, lines: List<Meas
             canvas.restore()
         }
     }
+    canvas.restore()
     canvas.save()
     if (showGuides) shapes.forEach { shape ->
         (listOf(shapePoints(shape)) + attachedRegions(shape, guides).map { it.points }).forEach { points ->

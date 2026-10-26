@@ -438,4 +438,13 @@ class ImportTest {
         val (low, high) = placed.bounds
         assertEquals(6.0, (low.y + high.y) / 2, 1e-6); assertEquals(80.0, high.x - low.x, 1e-6)
     }
+
+    @Test fun ringHasItsHole() {
+        val outer = (0 until 64).map { i -> val t = 2 * PI * i / 64; OutlinePoint(100 * cos(t), 100 * kotlin.math.sin(t), 0.0, 18.0) }
+        val hole = (0 until 32).map { i -> val t = 2 * PI * i / 32; Vec2(40 * cos(t), 40 * kotlin.math.sin(t)) }
+        val ring = MeshBuilder.extrudeWithHoles(SolidSpec("Ring", outer, 0), listOf(hole))
+        assertTrue(MeshBuilder.validate(ring).isEmpty())
+        val expected = (Polygon.signedArea(outer.map { Vec2(it.x, it.y) }) - kotlin.math.abs(Polygon.signedArea(hole))) * 18.0
+        assertEquals(expected, ring.signedVolume, expected * 1e-6)
+    }
 }
