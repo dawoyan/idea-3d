@@ -170,7 +170,7 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
             Text("Materials", Modifier.weight(1f), fontSize = 26.sp, fontWeight = FontWeight.Black)
             Button(onClick = { adding = true }, shape = RoundedCornerShape(8.dp)) { Text("Add") }
         }
-        Text("Shared by all projects. To make one from a drawing: in any project, draw the cross-section (a hole inside makes it hollow), select it with Adjust and tap Save as material. Then pick it in a line's details: the line becomes that bar or pipe in 3D and in exports.", fontSize = 13.sp, color = Color(0xFF4D5A57))
+        Text("Shared by all projects. To make one from a drawing: in any project, draw the cross-section (a hole inside makes it hollow), select it with Modify, then file menu → Save drawing as material. Then pick it in a line's details: the line becomes that bar or pipe in 3D and in exports.", fontSize = 13.sp, color = Color(0xFF4D5A57))
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             materials.forEach { material ->
                 Card(Modifier.fillMaxWidth().clickable { editing = material }, shape = RoundedCornerShape(8.dp)) {
