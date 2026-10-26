@@ -3671,7 +3671,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             fun resize(point: Pt) = Pt(left + (point.x - left) * sx, top + (point.y - top) * sy)
             val ids = guides.filter { sameGuideObject(it, path.first()) }.map { it.id }.toSet()
             val changed = abs(sx - 1f) > 0.0001f || abs(sy - 1f) > 0.0001f
-            guides = guides.map { guide -> if (guide.id in ids) guide.copy(start = resize(guide.start), end = resize(guide.end), curveMid = guide.curveMid?.let(::resize), colorIndex = color, fillTransparency = if (guide.pathId == path.first().pathId) transparency else guide.fillTransparency, lengthMm = if (changed) null else guide.lengthMm, shapeWidthMm = if (guide.id == path.first().id) widthValue?.times(unitFactorMm(unit)) else guide.shapeWidthMm, shapeHeightMm = if (guide.id == path.first().id) heightValue?.times(unitFactorMm(unit)) else guide.shapeHeightMm) else guide }
+            guides = guides.map { guide -> if (guide.id in ids) guide.copy(start = resize(guide.start), end = resize(guide.end), curveMid = guide.curveMid?.let(::resize), colorIndex = color, fillTransparency = if (guide.pathId == path.first().pathId) (if (transparency == 100 && made.materialId != null && !made.frame) null else transparency) else guide.fillTransparency, lengthMm = if (changed) null else guide.lengthMm, shapeWidthMm = if (guide.id == path.first().id) widthValue?.times(unitFactorMm(unit)) else guide.shapeWidthMm, shapeHeightMm = if (guide.id == path.first().id) heightValue?.times(unitFactorMm(unit)) else guide.shapeHeightMm) else guide }
             extrusions = extrusions.map { extrusion -> if (extrusion.guideIds.any { it in ids }) { val resized = extrusion.copy(origin = resize(extrusion.origin), handle = resize(extrusion.handle)); resized.depthMm?.let { extrusionWithDepth(resized, it, scale, unit) } ?: resized } else extrusion }
             if (depthEdited && shapeExtrusion != null) extrusions = extrusions.map { extrusion ->
                 if (extrusion.id != shapeExtrusion.id) extrusion else if (depthValue == null) extrusion.copy(depthMm = null) else extrusionWithDepth(extrusion, depthValue * unitFactorMm(unit), scale, unit)
@@ -5291,7 +5291,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 val shapes = drawableGuideShapes(guides)
                 val separators = shapes.flatMap { attachedRegions(it, guides) }.flatMap { it.separatorIds }.toSet()
                 shapes.forEach { shape ->
-                    (shape.first().fillTransparency ?: if (extrusions.any { extrusion -> extrusionDepth(extrusion, bitmap.width, bitmap.height) >= 0.001f && shape.all { guide -> extrusionGuides(extrusion, guides).any { it.id == guide.id } } }) 90 else null)?.let { transparency ->
+                    (shape.first().fillTransparency ?: if (extrusions.any { extrusion -> (extrusion.depthMm ?: 0.0) > 0.0 && shape.all { guide -> extrusionGuides(extrusion, guides).any { it.id == guide.id } } }) 90 else null)?.let { transparency ->
                         drawContext.canvas.save()
                         (listOf(shapePoints(shape)) + attachedRegions(shape, guides).map { it.points }).forEach { points ->
                             if (points.isNotEmpty()) {
@@ -5354,8 +5354,22 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         if (!separator) drawLine(Color.White, start, end, (guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * zoom)
                     }
                     // The label shows the line's true 3D length (the same in every view) and its material.
-                    val materialName = guide.materialId?.let(materialNames::get)
-                    if (showSizes && (guide.lengthMm != null || materialName != null)) drawingScale?.takeIf { it > 0 }?.let { pxPerUnit ->
+                    // One label per object for its material; a circle gets a single "Ø diameter" label instead of one per piece.
+                    val objectGuides = guides.filter { sameGuideObject(it, guide) }
+                    val firstOfObject = objectGuides.minOf { it.id } == guide.id
+                    val materialName = guide.materialId?.let(materialNames::get)?.takeIf { firstOfObject }
+                    val circle = guide.pathId != null && objectGuides.size >= 6 && objectGuides.all { it.curveMid != null }
+                    if (circle && firstOfObject && showSizes) drawingScale?.takeIf { it > 0 }?.let { pxPerUnit ->
+                        val pts = objectGuides.map { it.start }
+                        val diameterPx = pts.maxOf { a -> pts.maxOf { b -> distance(a, b) } }
+                        val center = viewAt(Pt(pts.map { it.x }.average().toFloat(), pts.minOf { it.y }))
+                        val text = "Ø ${formatMeasure(diameterPx / pxPerUnit, unit)} $unit" + (materialName?.let { " · $it" } ?: "")
+                        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; textSize = 14.sp.toPx(); isFakeBoldText = true; style = Paint.Style.STROKE; strokeWidth = 4.dp.toPx(); color = AndroidColor.WHITE }
+                        drawContext.canvas.nativeCanvas.drawText(text, center.x, center.y - 10.dp.toPx(), paint)
+                        paint.style = Paint.Style.FILL; paint.color = AndroidColor.BLACK
+                        drawContext.canvas.nativeCanvas.drawText(text, center.x, center.y - 10.dp.toPx(), paint)
+                    }
+                    if (!circle && showSizes && (guide.lengthMm != null || materialName != null)) drawingScale?.takeIf { it > 0 }?.let { pxPerUnit ->
                         val pts = guidePoints(guide); val n = (pts.size - 1).coerceAtLeast(1)
                         val seen = pts.zipWithNext().sumOf { (a, b) -> distance(a, b) } / pxPerUnit * unitFactorMm(unit)
                         val mm = pts.withIndex().zipWithNext().sumOf { (a, b) ->
@@ -6041,8 +6055,10 @@ private data class MadeOf(val materialId: String?, val frame: Boolean)
             // A sheet fills the shape at its thickness; a frame turns each edge into a bar or pipe.
             Text("Made of", fontWeight = FontWeight.Medium)
             @Composable fun Choice(choice: MadeOf, material: Material?, title: String) {
-                Row(Modifier.fillMaxWidth().clickable { made = choice }, verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = made == choice, onClick = { made = choice })
+                // A sheet fills the shape, so "Lines only" turns into a light fill.
+                fun pick() { made = choice; if (choice.materialId != null && !choice.frame && transparency == 100) transparency = 90 }
+                Row(Modifier.fillMaxWidth().clickable { pick() }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = made == choice, onClick = { pick() })
                     if (material != null) ProfilePreview(material, Modifier.size(28.dp))
                     Column(Modifier.padding(start = 6.dp)) {
                         Text(title, fontSize = 14.sp)
@@ -6323,7 +6339,7 @@ private data class StlShape(val contour: List<Pt>, val depth: Double, val face: 
 private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>, setup: ModelSetup, objectsOut: MutableList<Extrusion>? = null, strict: Boolean = true): List<SolidSpec> {
     val issues = mutableListOf<MeshIssue>()
     val specs = mutableListOf<SolidSpec>()
-    var count = 0
+    var count = 0; var solidCount = 0
     ModelPlane.entries.forEach { plane ->
         val planeGuides = guides.filter { it.plane == plane }
         val planeExtrusions = extrusions.filter { it.plane == plane }
@@ -6333,7 +6349,9 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
         val models = shapes.mapNotNull { shape ->
             val name = "${if (plane == ModelPlane.FRONT) "" else "${plane.label} "}Shape ${++count}"
             val extrusion = planeExtrusions.firstOrNull { ex -> extrusionGuides(ex, planeGuides).any { g -> shape.any { it.id == g.id } } }
-            if (extrusion == null) { issues += MeshIssue(name, "has no 3D depth yet; use Make 3D or exclude it"); return@mapNotNull null }
+            // A flat shape (no depth) is simply not part of the 3D model.
+            if (extrusion == null) return@mapNotNull null
+            solidCount++
             val depth = extrusion.depthMm?.takeIf { it.isFinite() && it > 0 }
             if (depth == null) { issues += MeshIssue(name, "needs a positive depth"); return@mapNotNull null }
             val path = shapePath(shape)
@@ -6376,7 +6394,7 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
         }
     }
     if (!strict) return specs
-    if (count == 0) error("Draw a closed shape and add 3D depth first")
+    if (solidCount == 0) error("Nothing is 3D yet: select a shape, then Modify → Grow, or give it a sheet material")
     if (issues.isNotEmpty()) throw MeshException(issues)
     return specs
 }
@@ -7320,7 +7338,7 @@ private fun exportAnnotated(context: Context, original: Bitmap, lines: List<Meas
     val shapes = drawableGuideShapes(guides)
     val separators = shapes.flatMap { attachedRegions(it, guides) }.flatMap { it.separatorIds }.toSet()
     if (showGuides) shapes.forEach { shape ->
-        (shape.first().fillTransparency ?: if (extrusions.any { extrusion -> extrusionDepth(extrusion, original.width, original.height) >= 0.001f && shape.all { guide -> extrusionGuides(extrusion, guides).any { it.id == guide.id } } }) 90 else null)?.let { transparency ->
+        (shape.first().fillTransparency ?: if (extrusions.any { extrusion -> (extrusion.depthMm ?: 0.0) > 0.0 && shape.all { guide -> extrusionGuides(extrusion, guides).any { it.id == guide.id } } }) 90 else null)?.let { transparency ->
             canvas.save()
             (listOf(shapePoints(shape)) + attachedRegions(shape, guides).map { it.points }).forEach { points ->
                 if (points.isNotEmpty()) {
