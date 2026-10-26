@@ -1485,7 +1485,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
         return false
     }
-    fun ownGeometryNear(point: Pt, hitRadius: Double) = closestGuideEndpoint(point, guides, hitRadius) != null || closestEndpoint(point, lines, hitRadius) != null ||
+    fun ownGeometryNear(point: Pt, hitRadius: Double) = closestGuideEndpoint(point, pointGuides(guides), hitRadius) != null || closestEndpoint(point, lines, hitRadius) != null ||
         closestGuide(point, guides, hitRadius * 1.7) != null || closedGuideShapes(guides).any { pointInsidePolygon(point, shapePoints(it)) }
     fun clearOwnSelection() {
         selectedExtrusionId = null; selectedCurveId = null; selectedVertices = emptyList(); selectedLineId = null; selectedEndpoint = null; selectedGuideId = null
@@ -1865,7 +1865,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
 
     /** A tap while drawing lands on a nearby line: on its end point when close to one, else on the line itself. */
     fun snapToLines(point: Pt, hitRadius: Double): Pt {
-        closestGuideEndpoint(point, guides, hitRadius * 1.2)?.let { e -> guides.firstOrNull { it.id == e.guideId }?.let { return if (e.isStart) it.start else it.end } }
+        closestGuideEndpoint(point, pointGuides(guides), hitRadius * 1.2)?.let { e -> guides.firstOrNull { it.id == e.guideId }?.let { return if (e.isStart) it.start else it.end } }
         closestGuide(point, guides, hitRadius * 0.8)?.let { g -> return guidePointAt(g, guideNearestParameter(g, point)) }
         return point
     }
@@ -1946,9 +1946,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val priorLineId = selectedWholeLineId ?: selectedEndpoint?.lineId ?: selectedLineId.takeIf { selectedGuideId == null }
                 val priorGuideId = selectedWholeGuideId ?: selectedGuideEndpoint?.guideId ?: selectedGuideId.takeIf { selectedWholeLineId == null && selectedEndpoint == null }
                 val preferredEndpoint = priorLineId?.let { id -> closestEndpoint(point, lines.filter { it.id == id }, hitRadius) }
-                val preferredGuideEndpoint = priorGuideId?.let { id -> closestGuideEndpoint(point, guides.filter { it.id == id }, hitRadius) }
+                val preferredGuideEndpoint = priorGuideId?.let { id -> closestGuideEndpoint(point, pointGuides(guides).filter { it.id == id }, hitRadius) }
                 val endpoint = preferredEndpoint ?: if (preferredGuideEndpoint == null) closestEndpoint(point, lines, hitRadius) else null
-                val guideEndpoint = preferredGuideEndpoint ?: if (preferredEndpoint == null) closestGuideEndpoint(point, guides, hitRadius) else null
+                val guideEndpoint = preferredGuideEndpoint ?: if (preferredEndpoint == null) closestGuideEndpoint(point, pointGuides(guides), hitRadius) else null
                 selectedLabelId = null; selectedWholeLineId = null; selectedWholeGuideId = null; selectedGuideEndpoint = null
                 if (endpoint != null) { selectedEndpoint = endpoint; selectedLineId = endpoint.lineId; selectedGuideId = null }
                 else if (guideEndpoint != null) {
@@ -2161,7 +2161,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
         if (tool == Tool.ADJUST && !selectMode && growStart?.invoke(sourcePoint, hitRadius) == true) return
         // Rectangle and Circle can be dragged out: from a corner (or the center) to where the finger lifts.
-        if (tool == Tool.LINES && draftStart == null && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE) && closestGuideEndpoint(sourcePoint, guides, hitRadius * 1.5) == null) {
+        if (tool == Tool.LINES && draftStart == null && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE) && closestGuideEndpoint(sourcePoint, pointGuides(guides), hitRadius * 1.5) == null) {
             shapeDragging = true; draftStart = if (lineDrawing == LineDrawing.CIRCLE) sourcePoint else snapToLines(sourcePoint, hitRadius); pendingEnd = draftStart; return
         }
         // Dragging the selected imported model moves it within this view.
@@ -2171,7 +2171,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
         if (tool == Tool.ADJUST && startForeignDrag(sourcePoint, hitRadius)) return
         // Lines and Measure: an existing end point under the finger is moved, not drawn from.
-        if (tool == Tool.LINES && draftStart == null) closestGuideEndpoint(sourcePoint, guides, hitRadius * 1.5)?.let { e ->
+        if (tool == Tool.LINES && draftStart == null) closestGuideEndpoint(sourcePoint, pointGuides(guides), hitRadius * 1.5)?.let { e ->
             val guide = guides.firstOrNull { it.id == e.guideId } ?: return@let
             selectedGuideEndpoint = e; selectedGuideId = e.guideId; activeGuideEndpoint = e; activeGuideVertexPoint = if (e.isStart) guide.start else guide.end; pushUndo(); return
         }
@@ -2184,7 +2184,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val heldVertex = selectedGuideEndpoint?.let { e -> guides.firstOrNull { it.id == e.guideId }?.let { if (e.isStart) it.start else it.end } }
             val heldPoint = selectedEndpoint?.let { e -> lines.firstOrNull { it.id == e.lineId }?.let { if (e.isStart) it.start else it.end } }
             if ((heldVertex == null || distance(sourcePoint, heldVertex) > hitRadius) && (heldPoint == null || distance(sourcePoint, heldPoint) > hitRadius)) {
-                closestGuideEndpoint(sourcePoint, guides, hitRadius)?.let { e -> clearOwnSelection(); selectedForeign = null; selectedGuideEndpoint = e; selectedGuideId = e.guideId }
+                closestGuideEndpoint(sourcePoint, pointGuides(guides), hitRadius)?.let { e -> clearOwnSelection(); selectedForeign = null; selectedGuideEndpoint = e; selectedGuideId = e.guideId }
                     ?: closestEndpoint(sourcePoint, lines, hitRadius)?.let { e -> clearOwnSelection(); selectedForeign = null; selectedEndpoint = e; selectedLineId = e.lineId }
             }
         }
@@ -2196,7 +2196,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 activeWholeGuideId = selectedWholeGuideId; activeWholeGuideLastPoint = sourcePoint; pushUndo(); return
             }
         }
-        if (tool == Tool.ADJUST && closestEndpoint(sourcePoint, lines, hitRadius) == null && closestGuideEndpoint(sourcePoint, guides, hitRadius) == null && closestLine(sourcePoint, lines)?.let { distanceToLine(sourcePoint, it) <= hitRadius } != true && closestGuide(sourcePoint, guides, hitRadius) == null && selectedExtrusionId == null) {
+        if (tool == Tool.ADJUST && closestEndpoint(sourcePoint, lines, hitRadius) == null && closestGuideEndpoint(sourcePoint, pointGuides(guides), hitRadius) == null && closestLine(sourcePoint, lines)?.let { distanceToLine(sourcePoint, it) <= hitRadius } != true && closestGuide(sourcePoint, guides, hitRadius) == null && selectedExtrusionId == null) {
             selectionStart = sourcePoint; selectionEnd = sourcePoint; return
         }
         if (tool == Tool.LINES || tool == Tool.ADJUST) {
@@ -2779,6 +2779,18 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     fun handleDragCancel() { foreignDrag = null; selectionStart = null; selectionEnd = null; handleDragEnd() }
     fun nudgeSelected(dx: Float, dy: Float) {
         selectedForeignPoint?.let { nudgeForeignPoint(it, dx, dy); return }
+        // A whole 3D object from another view, or an imported model: one step in the arrow's direction.
+        val objectStep = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble())
+        selectedForeign?.let { (plane, extrusionId) ->
+            val g = planeGeometry(plane)
+            val seed = g.extrusions.firstOrNull { it.id == extrusionId }?.let { e -> extrusionGuides(e, g.guides).firstOrNull() } ?: return
+            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushUndo(); moveItem(plane to seed.id, it.normalized() * objectStep) }
+            return
+        }
+        selectedModelId?.let { id ->
+            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { d -> pushUndo(); importedModels = importedModels.map { if (it.id == id) it.copy(center = it.center + d.normalized() * objectStep) else it } }
+            return
+        }
         selectedGhostPoint?.let { sel ->
             val step = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble())
             modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushUndo(); moveGhostPoint(sel, it.normalized() * step) }
@@ -2880,7 +2892,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     /** Puts the current plane's geometry aside and edits [next]; nothing is lost and undo still covers both. */
     fun switchPlane(next: ModelPlane) {
         if (next == editPlane) return
-        (selectedWholeGuideId ?: selectedGuideId)?.let { id -> if (guides.any { it.id == id }) crossViewSelection = editPlane to id }
+        // What is selected, by its own view and id, so it stays selected (with its fine-move arrows) in the next view.
+        val keepGuide = (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let(::homeKey)
+        val keepWhole = selectedWholeGuideId != null
+        val keepEnd = selectedGuideEndpoint?.let { e -> guides.firstOrNull { it.id == e.guideId }?.let { g -> homeKey(g).let { Triple(it.first, it.second, e.isStart) } } }
+        val keepPoints = selectedVertices.mapNotNull { v -> guides.firstOrNull { distance(it.start, v) < 0.6 || distance(it.end, v) < 0.6 }?.let { g -> homeKey(g).let { Triple(it.first, it.second, distance(g.start, v) < 0.6) } } } +
+            selectedGhostPoints + listOfNotNull(selectedGhostPoint)
+        val keepForeign = selectedForeign
         val full = ModelPlane.entries.associateWith { planeGeometry(it) }
         // Measurements stay in their view; lines from every view come along, projected.
         showView(next, full)
@@ -2891,6 +2909,25 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (tool == Tool.CALIBRATE || tool == Tool.CROP) tool = Tool.NONE
         selectedForeign = null; foreignDrag = null; selectedForeignPoint = null; solidPick = null; joinPick = null; selectedGhostPoint = null; ghostDragLast = null
         crossViewSelection?.takeIf { it.first == next && guides.any { g -> g.id == it.second } }?.let { selectedWholeGuideId = it.second; selectedGuideId = it.second }
+        // The kept selection as it shows here: an own line, a line projected from its view, or a 3D object from there.
+        fun shownId(home: Pair<ModelPlane, Int>): Int? = (if (home.first == next) home.second else encodedId(home.first, home.second)).takeIf { id -> guides.any { it.id == id } }
+        val keptEnd = keepEnd?.let { (plane, id, start) -> shownId(plane to id)?.let { selectedGuideEndpoint = GuideEndpoint(it, start); selectedGuideId = it; true } }
+        if (keepEnd != null && keptEnd == null) selectedGhostPoint = keepEnd
+        if (keepEnd == null) keepGuide?.let { home ->
+            val id = shownId(home)
+            if (id != null) { selectedGuideId = id; if (keepWhole) selectedWholeGuideId = id }
+            else planeGeometry(home.first).let { g -> g.extrusions.firstOrNull { e -> extrusionGuides(e, g.guides).any { it.id == home.second } } }?.let { selectedForeign = home.first to it.id }
+        }
+        if (keepPoints.isNotEmpty()) {
+            val own = keepPoints.filter { it.first == next }
+            selectedVertices = own.mapNotNull { (_, id, start) -> guides.firstOrNull { it.id == id }?.let { if (start) it.start else it.end } }
+            selectedGhostPoints = keepPoints.filter { it.first != next }
+        }
+        keepForeign?.let { (plane, extrusionId) ->
+            // An object drawn in the next view is selected there as its own shape.
+            if (plane == next) extrusions.firstOrNull { it.id == extrusionId }?.let { e -> extrusionGuides(e, guides).firstOrNull()?.let { selectedWholeGuideId = it.id; selectedGuideId = it.id } }
+            else selectedForeign = keepForeign
+        }
         zoom = 1f; pan = Offset.Zero; fitPending = true
     }
 
@@ -3330,7 +3367,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan },
                 onDoubleTap = { setPresentation(false) }, doubleTapEnabled = true,
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
-                selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null), onNudge = ::nudgeSelected
+                selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null || selectedForeign != null || selectedModelId != null), onNudge = ::nudgeSelected
             )
             IconButton(onClick = { setPresentation(false) }, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).background(Color(0xCC17211E), CircleShape)) {
                 Icon(painterResource(R.drawable.ic_fullscreen_exit), contentDescription = "Exit full screen", tint = Color.White)
@@ -3566,7 +3603,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan }, onDoubleTap = { }, doubleTapEnabled = false,
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
-                selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null), onNudge = ::nudgeSelected
+                selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null || selectedForeign != null || selectedModelId != null), onNudge = ::nudgeSelected
             )
             }
             // Leveling and perspective correction work on the photo, so they belong to the front plane.
@@ -6694,6 +6731,11 @@ private fun projectToGuide(point: Pt, guide: GuideLine): Pt {
 private fun closestGuide(point: Pt, guides: List<GuideLine>, radius: Double): GuideLine? =
     guides.minByOrNull { distance(point, projectToGuide(point, it)) }?.takeIf { distance(point, projectToGuide(point, it)) <= radius }
 
+/** Lines whose end points can be picked: all but a circle's pieces, whose joints are hidden (the circle is one thing). */
+private fun pointGuides(guides: List<GuideLine>): List<GuideLine> {
+    val circles = guides.filter { it.pathId != null }.groupBy { it.plane to it.pathId }.values.filter { p -> p.size >= 6 && p.all { it.curveMid != null } }.flatten().map { it.id }.toSet()
+    return if (circles.isEmpty()) guides else guides.filterNot { it.id in circles }
+}
 private fun closestGuideEndpoint(point: Pt, guides: List<GuideLine>, radius: Double): GuideEndpoint? =
     guides.flatMap { guide -> listOf(GuideEndpoint(guide.id, true) to guide.start, GuideEndpoint(guide.id, false) to guide.end) }
         .minByOrNull { distance(point, it.second) }
