@@ -2999,6 +2999,53 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     fun pickedIsGroup() = pickedItems.size >= 2 && itemGroups.any { group -> pickedItems.all { p -> group.any { sameItem(p, it) } } }
     /** Merge: two 3D objects become one solid; two shapes in the same view become one outline. */
+    /**
+     * Welds lines that touch: where an end of one lies on another line (at its end or anywhere along it), that line is
+     * split there so both share the point, and all touching items become one object that moves together. With
+     * [anchored], only items touching the first one are welded to it. Returns whether anything was welded.
+     */
+    fun weldItems(keys: List<Pair<ModelPlane, Int>>, anchored: Boolean): Boolean {
+        var any = false
+        var undoPushed = false
+        keys.groupBy { it.first }.forEach { (plane, planeKeys) ->
+            val items = planeKeys.distinctBy { k -> itemGuides(k).minOfOrNull { it.id } ?: k.second }
+            if (items.size < 2) return@forEach
+            val geometry = planeGeometry(plane)
+            val frame = frameOf(plane)
+            val tolerance = max(3.0, min(frame.width, frame.height) * 0.004)
+            val guidesNow = geometry.guides.toMutableList()
+            val ids = items.map { k -> itemGuides(k).map { it.id }.toMutableSet() }
+            var nextId = (guidesNow.maxOfOrNull { it.id } ?: 0) + 1
+            val welded = mutableSetOf<Int>()
+            for (i in ids.indices) for (j in ids.indices) {
+                if (i == j || anchored && i != 0 && j != 0) continue
+                val ends = guidesNow.filter { it.id in ids[i] }.flatMap { listOf(it.start, it.end) }.distinctBy { (it.x * 10).roundToInt() to (it.y * 10).roundToInt() }
+                for (p in ends) {
+                    val target = guidesNow.filter { it.id in ids[j] }.minByOrNull { g -> distance(p, guidePointAt(g, guideNearestParameter(g, p))) } ?: continue
+                    val q = guidePointAt(target, guideNearestParameter(target, p))
+                    if (distance(p, q) > tolerance) continue
+                    welded += i; welded += j
+                    // The touching end moves exactly onto the line.
+                    for (k in guidesNow.indices) { val g = guidesNow[k]; if (g.id in ids[i]) guidesNow[k] = g.copy(start = if (distance(g.start, p) < 0.01) q else g.start, end = if (distance(g.end, p) < 0.01) q else g.end) }
+                    // A straight line touched in its middle is split there, so the two share a corner.
+                    if (target.curveMid == null && distance(q, target.start) > tolerance && distance(q, target.end) > tolerance) {
+                        val at = guidesNow.indexOfFirst { it.id == target.id }
+                        val second = target.copy(id = nextId++, start = q)
+                        guidesNow[at] = target.copy(end = q); guidesNow.add(at + 1, second)
+                        ids[j] += second.id
+                    }
+                }
+            }
+            if (welded.size < 2) return@forEach
+            if (!undoPushed) { pushUndo(); undoPushed = true }
+            val group = (guidesNow.mapNotNull { it.groupId }.maxOrNull() ?: 0) + 1
+            val members = welded.flatMap { ids[it] }.toSet()
+            setPlaneShapes(plane, guidesNow.map { if (it.id in members) it.copy(groupId = group) else it }, geometry.extrusions)
+            any = true
+        }
+        if (any) Toast.makeText(context, "Welded: they share the touching points and move together", Toast.LENGTH_SHORT).show()
+        return any
+    }
     fun mergePicked() {
         if (pickedItems.size < 2) { Toast.makeText(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         val first = pickedItems.first(); val rest = pickedItems.drop(1)
@@ -3012,7 +3059,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             applyShapeOperation(JunctionAction(JunctionKind.SHAPE_OVERLAP, first.second, rest[0].second, Pt(0f, 0f)), "merge")
             pickedItems = emptyList(); return
         }
-        Toast.makeText(context, "Merge needs two overlapping shapes drawn in the same view, or 3D objects", Toast.LENGTH_LONG).show()
+        if (weldItems(pickedItems, anchored = false)) { pickedItems = emptyList(); return }
+        Toast.makeText(context, "Merge needs lines that touch (an end on the other line), two overlapping shapes in the same view, or 3D objects", Toast.LENGTH_LONG).show()
     }
     /** Cut: the second picked item is cut out of the first. */
     fun cutPicked() {
@@ -3317,7 +3365,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon("Space H", R.drawable.ic_even_h, enabled = total >= 3) { arrangePicked(horizontal = true, distribute = true) }
                         ActionIcon("Space V", R.drawable.ic_even_v, enabled = total >= 3) { arrangePicked(horizontal = false, distribute = true) }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
-                        ActionIcon("Merge", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
+                        ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n == 2, onClick = ::cutPicked)
                         ActionIcon("Copy lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
                         ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
@@ -3365,6 +3413,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         }
                         if (tool == Tool.ADJUST && selectedGuideEndpoint == null && selectedCurveId == null) selectedWholeGuideId?.let {
                             // Two clones: just the lines, or everything (material, fill and 3D depth).
+                            // Weld this line to every line it touches (an end on the other line, or the other's end on it).
+                            ActionIcon("Weld", R.drawable.ic_merge) {
+                                guides.firstOrNull { it.id == selectedWholeGuideId }?.let { g ->
+                                    val key = homeKey(g)
+                                    val others = planeGeometry(key.first).guides.map { key.first to it.id }.filterNot { sameItem(key, it) }
+                                    if (!weldItems(listOf(key) + others, anchored = true)) Toast.makeText(context, "Nothing touches this line: put an end of one line on the other", Toast.LENGTH_LONG).show()
+                                }
+                            }
                             ActionIcon("Clone lines", R.drawable.ic_clone) { cloneSelected(false) }
                             ActionIcon("Clone all", R.drawable.ic_clone_filled) { cloneSelected(true) }
                         }
