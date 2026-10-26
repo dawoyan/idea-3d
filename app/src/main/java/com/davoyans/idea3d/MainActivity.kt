@@ -838,6 +838,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var selectedCurveId by remember { mutableStateOf<Int?>(null) }
     var pointKind by remember { mutableStateOf(PointKind.BREAKPOINT) }
     var guideLengthEditId by remember { mutableStateOf<Int?>(null) }
+    // The line whose material is being chosen (a short dialog of its own).
+    var lineMaterialId by remember { mutableStateOf<Int?>(null) }
     var pendingAlignment by remember { mutableStateOf<Boolean?>(null) }
     var selectedVertices by remember { mutableStateOf(emptyList<Pt>()) }
     var panOnEmptyDrag by remember { mutableStateOf(false) }
@@ -3278,7 +3280,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 // Turn whatever is selected, like the picture's turn buttons when cropping.
                 val canTurn = !show3d && pick == null && (selectedModelId != null || (selectMode && (pickedItems.isNotEmpty() || pickedPoints.size >= 2)) ||
                     !selectMode && tool == Tool.ADJUST && (selectedWholeGuideId != null || selectedGuideId != null || selectedForeign != null || selectedVertices.size >= 2))
-                if (canTurn) {
+                // Placed after Properties and Material, so those two are always in view.
+                @Composable fun TurnIcons() {
+                    if (!canTurn) return
                     ActionIcon("Turn ↺", R.drawable.ic_rotate_left) { turnSelection(turnStep) }
                     ActionIcon("Turn ↻", R.drawable.ic_rotate_right) { turnSelection(-turnStep) }
                     ActionIcon("${turnStep.toInt()}°", R.drawable.ic_sizes) { turnStep = if (turnStep == 15.0) 90.0 else if (turnStep == 90.0) 5.0 else 15.0 }
@@ -3293,6 +3297,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     selectMode -> {
                         val n = pickedItems.size; val total = n + pickedPoints.size
                         ActionIcon("Properties", R.drawable.ic_properties, enabled = total == 1, onClick = ::propertiesPicked)
+                        // One picked line or shape: choose what it is made of.
+                        val pickedGuide = pickedItems.singleOrNull()?.takeIf { pickedPoints.isEmpty() }?.let { (plane, id) -> guides.firstOrNull { it.id == if (plane == editPlane) id else encodedId(plane, id) } }
+                        ActionIcon("Material", R.drawable.ic_save_material, enabled = pickedGuide != null) {
+                            pickedGuide?.let { g -> if (closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), g) }) shapeEditId = g.id else lineMaterialId = g.id }
+                        }
+                        TurnIcons()
                         ActionIcon("Align H", R.drawable.ic_align_horizontal, enabled = total >= 2) { arrangePicked(horizontal = true, distribute = false) }
                         ActionIcon("Align V", R.drawable.ic_align_vertical, enabled = total >= 2) { arrangePicked(horizontal = false, distribute = false) }
                         ActionIcon("Space H", R.drawable.ic_even_h, enabled = total >= 3) { arrangePicked(horizontal = true, distribute = true) }
@@ -3312,6 +3322,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                             ActionIcon("Delete", R.drawable.ic_delete, tint = red) { pushUndo(); importedModels = importedModels.filterNot { it.id == id }; selectedModelId = null }
                         }
                         openProperties()?.let { ActionIcon("Properties", R.drawable.ic_properties, onClick = it) }
+                        // What the selected line or shape is made of, always right after Properties: a line gets the
+                        // bar and pipe list, a shape its sheet or frame choice.
+                        (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
+                            val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
+                            ActionIcon("Material", R.drawable.ic_save_material) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
+                        }
+                        TurnIcons()
                         // The same Align buttons as in Select, doing the same thing.
                         if (tool == Tool.ADJUST && selectedVertices.size + selectedGhostPoints.size >= 2) {
                             ActionIcon("Align H", R.drawable.ic_align_horizontal) { requestAlignment(true) }
@@ -3342,8 +3359,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                             ActionIcon("Clone lines", R.drawable.ic_clone) { cloneSelected(false) }
                             ActionIcon("Clone all", R.drawable.ic_clone_filled) { cloneSelected(true) }
                         }
-                        // Sets what the selected line or shape is made of (Properties opens at its material list).
-                        if ((selectedWholeGuideId ?: selectedGuideId) != null) openProperties()?.let { ActionIcon("Material", R.drawable.ic_save_material, onClick = it) }
                         deleteCandidateId?.let { id -> ActionIcon("Delete", R.drawable.ic_delete, tint = red) { deleteMeasurement(id) } }
                         guideDeleteCandidateId?.let { id -> ActionIcon("Delete", R.drawable.ic_delete, tint = red) { deleteGuide(id) } }
                         if (!isBlankCanvas() && selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) ActionIcon("Crop", R.drawable.ic_crop) { startCrop() }
@@ -3525,6 +3540,38 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 }
             } }, confirmButton = {}, dismissButton = { TextButton(onClick = { pendingAlignment = null }) { Text("Cancel") } })
     }
+    lineMaterialId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
+        var chosen by remember(id) { mutableStateOf(guide.materialId) }
+        var turn by remember(id) { mutableStateOf(guide.materialTurnDeg) }
+        AlertDialog(onDismissRequest = { lineMaterialId = null }, title = { Text("Material of this line") }, text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("The line becomes this bar or pipe in 3D, as long as the line.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+                (listOf<Material?>(null) + materials.filterNot { it.isSheet }).forEach { material ->
+                    Row(Modifier.fillMaxWidth().clickable { chosen = material?.id }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = chosen == material?.id, onClick = { chosen = material?.id })
+                        if (material != null) ProfilePreview(material, Modifier.size(32.dp), turn)
+                        Column(Modifier.padding(start = 8.dp)) {
+                            Text(material?.name ?: "None (plain line)", fontSize = 14.sp)
+                            material?.let { Text(it.description, fontSize = 12.sp, color = Color(0xFF4D5A57)) }
+                        }
+                    }
+                }
+                if (chosen != null) {
+                    Text("Turn around the line: ${java.text.DecimalFormat("0.#").format(((turn % 360) + 360) % 360)}°", fontWeight = FontWeight.Medium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(-90.0 to "−90°", -15.0 to "−15°", 15.0 to "+15°", 90.0 to "+90°").forEach { (step, label) ->
+                            OutlinedButton(onClick = { turn = ((turn + step) % 360 + 360) % 360 }, contentPadding = PaddingValues(horizontal = 4.dp), modifier = Modifier.weight(1f).height(38.dp)) { Text(label, fontSize = 12.sp, maxLines = 1) }
+                        }
+                    }
+                }
+                TextButton(onClick = { lineMaterialId = null; showMaterials = true }) { Text("Edit materials…") }
+            }
+        }, confirmButton = { TextButton(onClick = {
+            pushUndo()
+            guides = guides.map { if (sameGuideObject(it, guide)) it.copy(materialId = chosen, materialTurnDeg = turn) else it }
+            lineMaterialId = null
+        }) { Text("Save") } }, dismissButton = { TextButton(onClick = { lineMaterialId = null }) { Text("Cancel") } })
+    } ?: run { lineMaterialId = null } }
     guideLengthEditId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
         var length by remember(id, unit) { mutableStateOf("") }
         var materialId by remember(id) { mutableStateOf(guide.materialId) }
