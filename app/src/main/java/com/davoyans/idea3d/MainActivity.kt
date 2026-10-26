@@ -1843,6 +1843,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         joinPick = pick.copy(selected = if (index in pick.selected) pick.selected - index else if (pick.selected.size < 2) pick.selected + index else pick.selected)
     }
 
+    /** A tap while drawing lands on a nearby line: on its end point when close to one, else on the line itself. */
+    fun snapToLines(point: Pt, hitRadius: Double): Pt {
+        closestGuideEndpoint(point, guides, hitRadius * 1.2)?.let { e -> guides.firstOrNull { it.id == e.guideId }?.let { return if (e.isStart) it.start else it.end } }
+        closestGuide(point, guides, hitRadius * 0.8)?.let { g -> return guidePointAt(g, guideNearestParameter(g, point)) }
+        return point
+    }
     fun handleTap(point: Pt, hitRadius: Double) {
         if (selectMode) {
             // A point under the finger wins over the line it belongs to.
@@ -1964,6 +1970,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 } else { pendingBrokenSegment = false; showDistanceEntry = true }
             }
             Tool.LINES -> if (lineDrawing == LineDrawing.BROKEN) {
+                val point = snapToLines(point, hitRadius)
                 if (draftStart == null) {
                     activePolylineId = nextGuidePathId(guides)
                     draftStart = point
@@ -1973,16 +1980,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     draftStart = point
                 }
             } else if (draftStart == null) {
-                val selected = closestGuide(point, guides, hitRadius * 0.7)
-                if (selected != null) {
-                    selectedGuideId = selected.id
-                    guideDeleteCandidateId = selected.id
-                } else {
-                    selectedGuideId = null
-                    guideDeleteCandidateId = null
-                    draftStart = point
-                }
+                // Drawing: a tap on an existing line starts the new line there; it doesn't select that line.
+                selectedGuideId = null
+                guideDeleteCandidateId = null
+                draftStart = snapToLines(point, hitRadius)
             } else {
+                val point = snapToLines(point, hitRadius)
                 if (distance(draftStart!!, point) > 4.0 && lineDrawing == LineDrawing.CIRCLE) {
                     // A circle: eight curved pieces around the first tap (the center), through the second tap.
                     pushUndo()
