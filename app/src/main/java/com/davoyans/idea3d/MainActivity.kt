@@ -3257,10 +3257,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
      * group numbers so copy and original stay separate shapes. [full] keeps the material, fill and 3D depth;
      * otherwise the copy is just its lines. Returns the copies' keys.
      */
-    fun copyItems(keys: List<Pair<ModelPlane, Int>>, full: Boolean): List<Pair<ModelPlane, Int>> {
+    fun copyItems(keys: List<Pair<ModelPlane, Int>>, full: Boolean, inPlace: Boolean = false): List<Pair<ModelPlane, Int>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane)
         val frame = frameOf(editPlane)
-        val step = (min(frame.width, frame.height) * 0.03).coerceAtLeast(20.0)
+        val step = if (inPlace) 0.0 else (min(frame.width, frame.height) * 0.03).coerceAtLeast(20.0)
         val offset = here?.modelDelta(step, step)
         val copies = mutableListOf<Pair<ModelPlane, Int>>()
         keys.distinctBy { k -> itemGuides(k).minOfOrNull { it.id }?.let { k.first to it } ?: k }.forEach { key ->
@@ -3289,6 +3289,20 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (pickedItems.isEmpty()) return
         pushUndo()
         pickedItems = copyItems(pickedItems, full); pickedPoints = emptyList()
+    }
+    /**
+     * Outline: the selected shape's or object's border as plain lines, in the same place (the original keeps its fill,
+     * material and depth). The new outline is selected, ready to move or use.
+     */
+    fun outlineOf(keys: List<Pair<ModelPlane, Int>>) {
+        if (keys.isEmpty()) return
+        pushUndo()
+        val copies = copyItems(keys, full = false, inPlace = true)
+        // Lines only: no fill, so it stays a figure of lines even where the original is solid.
+        copies.forEach { key -> val g = planeGeometry(key.first); val ids = itemGuides(key).map { it.id }.toSet()
+            setPlaneShapes(key.first, g.guides.map { if (it.id in ids) it.copy(fillTransparency = 100) else it }, g.extrusions) }
+        copies.firstOrNull()?.let { copy -> (if (copy.first == editPlane) copy.second else encodedId(copy.first, copy.second)).let { id -> if (guides.any { it.id == id }) { selectedForeign = null; selectedWholeGuideId = id; selectedGuideId = id } } }
+        Toast.makeText(context, "Outline made: plain lines over the original", Toast.LENGTH_SHORT).show()
     }
     /** Clone in Adjust: the selected line or shape (with its group); [full] copies material, fill and depth too. */
     fun cloneSelected(full: Boolean) {
@@ -3554,6 +3568,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n == 2, onClick = ::cutPicked)
+                        ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
                         ActionIcon("Copy lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
                         ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
                         ActionIcon("Box: ${if (boxPicksItems) "items" else "points"}", R.drawable.ic_select_area, on = boxPicksItems) { boxPicksItems = !boxPicksItems }
@@ -3572,9 +3587,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                             ActionIcon("Material", R.drawable.ic_save_material) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
                             // Grow: shows arrows to pull the shape into a 3D object (or change its depth).
                             if (tool == Tool.ADJUST && inShape) ActionIcon("Grow", R.drawable.ic_cube, on = growMode) { growMode = !growMode }
+                            if (inShape) ActionIcon("Outline", R.drawable.ic_outline) { outlineOf(listOf(homeKey(guide))) }
                         }
                         // A 3D object from another view: Grow shows its front and back arrows.
                         if (tool == Tool.ADJUST && selectedForeign != null) ActionIcon("Grow", R.drawable.ic_cube, on = growMode) { growMode = !growMode }
+                        if (tool == Tool.ADJUST) selectedForeign?.let { (plane, extrusionId) ->
+                            ActionIcon("Outline", R.drawable.ic_outline) { planeGeometry(plane).let { g -> g.extrusions.firstOrNull { it.id == extrusionId }?.let { e -> extrusionGuides(e, g.guides).firstOrNull() } }?.let { outlineOf(listOf(plane to it.id)) } }
+                        }
                         TurnIcons()
                         if (tool == Tool.ADJUST && selectedGuideEndpoint == null && selectedCurveId == null) selectedWholeGuideId?.let { wholeId ->
                             ActionIcon("Clone lines", R.drawable.ic_clone) { cloneSelected(false) }
@@ -5412,9 +5431,18 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     drawPath(path, Color(argb).copy(alpha = 1f), style = Stroke(1.5.dp.toPx()))
                 }
                 val selectedGuide = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }
+                // Filled shapes (a fill, a sheet material or depth) get a thin single border; the thick double line is for
+                // plain lines and unfilled outlines.
+                val filledIds = drawableGuideShapes(guides).filter { shape ->
+                    val t = shape.first().fillTransparency ?: if (extrusions.any { e -> (e.depthMm ?: 0.0) > 0.0 && shape.all { g -> extrusionGuides(e, guides).any { it.id == g.id } } }) 90 else null
+                    t != null && t < 100
+                }.flatten().map { it.id }.toSet()
+                // Circles already labeled (an outline lying exactly on its shape shares the label).
+                val labeledCircles = mutableSetOf<List<Int>>()
                 guides.forEach { guide ->
                     val start = viewAt(guide.start); val end = viewAt(guide.end)
                     val separator = guide.id in separators
+                    val border = guide.id in filledIds
                     val width = if (separator) (guide.strokeWidth * 0.35f).coerceAtLeast(1f) else guide.strokeWidth
                     val lineColor = guideColor(guide.colorIndex).copy(alpha = if (separator) 0.45f else 1f)
                     if (guide.curveMid != null) {
@@ -5422,8 +5450,11 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val path = androidx.compose.ui.graphics.Path().apply { moveTo(start.x, start.y); quadraticTo(2f * mid.x - (start.x + end.x) / 2f, 2f * mid.y - (start.y + end.y) / 2f, end.x, end.y) }
                         // A selected curved shape (a circle, say) turns red as a whole.
                         val chosen = !separator && tool != Tool.LINES && selectedGuide != null && sameGuideObject(guide, selectedGuide)
-                        drawPath(path, if (chosen) Color(0xFFCF2020) else lineColor, style = Stroke(width * zoom))
-                        if (!separator) drawPath(path, Color.White, style = Stroke((guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * zoom))
+                        if (border) drawPath(path, if (chosen) Color(0xFFCF2020) else lineColor, style = Stroke((if (chosen) 2.5 else 1.2).dp.toPx()))
+                        else {
+                            drawPath(path, if (chosen) Color(0xFFCF2020) else lineColor, style = Stroke(width * zoom))
+                            if (!separator) drawPath(path, Color.White, style = Stroke((guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * zoom))
+                        }
                         // A single curve shows its end dots and its bend handle; a circle's pieces don't.
                         val circlePiece = guide.pathId != null && guides.count { it.pathId == guide.pathId && it.plane == guide.plane } >= 6 && guides.filter { it.pathId == guide.pathId && it.plane == guide.plane }.all { it.curveMid != null }
                         if (!circlePiece && guide.id == selectedGuideId && (tool == Tool.LINES || tool == Tool.ADJUST)) {
@@ -5431,6 +5462,9 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                             drawCircle(Color.White, 10.dp.toPx(), mid)
                             drawCircle(if (curveBlink) Color(0xFF0066BE) else Color.White, 8.dp.toPx(), mid)
                         }
+                    } else if (border) {
+                        val chosen = !separator && selectedGuide != null && sameGuideObject(guide, selectedGuide)
+                        drawLine(if (chosen) Color(0xFFCF2020) else lineColor, start, end, (if (chosen) 2.5 else 1.2).dp.toPx())
                     } else if (!separator && selectedGuide != null && sameGuideObject(guide, selectedGuide)) {
                         drawLine(Color(0xFFCF2020), start, end, (guide.strokeWidth + 2f) * zoom)
                         drawLine(Color.White, start, end, (guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * zoom)
@@ -5444,7 +5478,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     val firstOfObject = objectGuides.minOf { it.id } == guide.id
                     val materialName = guide.materialId?.let(materialNames::get)?.takeIf { firstOfObject }
                     val circle = guide.pathId != null && objectGuides.size >= 6 && objectGuides.all { it.curveMid != null }
-                    if (circle && firstOfObject && showSizes) drawingScale?.takeIf { it > 0 }?.let { pxPerUnit ->
+                    val circleKey = if (circle) objectGuides.map { it.start }.let { p -> listOf(p.minOf { it.x }, p.minOf { it.y }, p.maxOf { it.x }, p.maxOf { it.y }).map { it.roundToInt() } } else null
+                    if (circle && firstOfObject && showSizes && labeledCircles.add(circleKey!!)) drawingScale?.takeIf { it > 0 }?.let { pxPerUnit ->
                         val pts = objectGuides.map { it.start }
                         val diameterPx = pts.maxOf { a -> pts.maxOf { b -> distance(a, b) } }
                         val center = viewAt(Pt(pts.map { it.x }.average().toFloat(), pts.minOf { it.y }))
