@@ -448,3 +448,103 @@ class ImportTest {
         assertEquals(expected, ring.signedVolume, expected * 1e-6)
     }
 }
+
+class DxfExportTest {
+    private fun circlePieces(cx: Double, cy: Double, r: Double): List<DxfSegment> = (0 until 8).map { i ->
+        fun at(a: Double) = Vec2(cx + r * cos(a), cy + r * kotlin.math.sin(a))
+        val a = 2 * PI * i / 8; val b = 2 * PI * (i + 1) / 8
+        DxfSegment(at(a), at(b), at((a + b) / 2))
+    }
+    /** Group code / value pairs of a DXF text. */
+    private fun pairs(dxf: String): List<Pair<String, String>> = dxf.trimEnd('\n').split('\n').chunked(2).map { it[0].trim() to it.getOrElse(1) { "" } }
+
+    @Test fun lineIsWrittenInMillimeters() {
+        val dxf = DxfExport.write(listOf(DxfExport.openEntity(DxfLayers.GEOMETRY, DxfSegment(Vec2(0.0, 0.0), Vec2(250.5, 100.0)))))
+        val p = pairs(dxf)
+        assertEquals("AC1015", p[p.indexOf("9" to "\$ACADVER") + 1].second)
+        assertEquals("4", p[p.indexOf("9" to "\$INSUNITS") + 1].second)
+        val line = p.indexOf("0" to "LINE")
+        assertTrue(line > 0)
+        val after = p.drop(line).takeWhile { it != ("0" to "ENDSEC") }
+        assertTrue(("8" to DxfLayers.GEOMETRY) in after)
+        assertTrue(("11" to "250.5") in after && ("21" to "100") in after)
+        assertEquals("0" to "EOF", p.last())
+    }
+
+    @Test fun eightCurvedPiecesOfACircleAreOneCircle() {
+        val e = DxfExport.closedEntity(DxfLayers.GEOMETRY, circlePieces(10.0, 20.0, 200.0))
+        assertTrue(e is DxfCircle)
+        e as DxfCircle
+        assertEquals(200.0, e.radius, DxfExport.arcTolerance(200.0))
+        assertEquals(10.0, e.center.x, DxfExport.arcTolerance(200.0)); assertEquals(20.0, e.center.y, DxfExport.arcTolerance(200.0))
+    }
+
+    @Test fun closedShapeWithHoleIsAPolylineAndAHoleCircle() {
+        val square = listOf(Vec2(0.0, 0.0), Vec2(300.0, 0.0), Vec2(300.0, 300.0), Vec2(0.0, 300.0))
+        val outline = square.indices.map { DxfSegment(square[it], square[(it + 1) % 4]) }
+        val shape = DxfExport.closedEntity(DxfLayers.GEOMETRY, outline)
+        val hole = DxfExport.closedEntity(DxfLayers.HOLES, circlePieces(150.0, 150.0, 50.0))
+        assertTrue(shape is DxfPolyline && shape.closed && shape.vertices.size == 4)
+        assertTrue(hole is DxfCircle && hole.layer == DxfLayers.HOLES)
+        val p = pairs(DxfExport.write(listOf(shape, hole)))
+        val poly = p.indexOf("0" to "LWPOLYLINE")
+        assertTrue(poly > 0)
+        assertEquals("4", p.drop(poly).first { it.first == "90" }.second)
+        assertEquals("1", p.drop(poly).first { it.first == "70" }.second)
+        val circle = p.indexOf("0" to "CIRCLE")
+        assertTrue(("8" to DxfLayers.HOLES) in p.drop(circle).take(8))
+        // Every layer used is declared.
+        DxfLayers.all.forEach { (name, _) -> assertTrue(("2" to name) in p) }
+    }
+
+    @Test fun curvesBecomeArcsOrStayWithinTolerance() {
+        // A quarter circle through its middle: an exact ARC, counterclockwise from 0 to 90 degrees.
+        val r = 100.0
+        val quarter = DxfSegment(Vec2(r, 0.0), Vec2(0.0, r), Vec2(r * cos(PI / 4), r * kotlin.math.sin(PI / 4)))
+        val arc = DxfExport.openEntity(DxfLayers.GEOMETRY, quarter)
+        if (arc is DxfArc) {
+            assertEquals(0.0, arc.startDeg, 1.0); assertEquals(90.0, arc.endDeg, 1.0); assertEquals(r, arc.radius, 0.5)
+        } else {
+            // A quadratic can't follow a quarter circle within 0.1 mm at this size: then it is flattened within tolerance.
+            arc as DxfPolyline
+            arc.vertices.zipWithNext().forEach { (a, b) ->
+                val m = Vec2((a.x + b.x) / 2, (a.y + b.y) / 2)
+                val nearest = (0..2000).map { DxfExport.pointAt(quarter, it / 2000.0) }.minOf { kotlin.math.hypot(it.x - m.x, it.y - m.y) }
+                assertTrue(nearest <= DxfExport.TOLERANCE_MM + 0.01)
+            }
+        }
+        // A strongly bent curve far from any circle is flattened, each chord within the tolerance.
+        val bent = DxfSegment(Vec2(0.0, 0.0), Vec2(1000.0, 0.0), Vec2(500.0, 800.0))
+        val flat = DxfExport.openEntity(DxfLayers.GEOMETRY, bent)
+        assertTrue(flat is DxfPolyline || flat is DxfArc)
+        if (flat is DxfPolyline) assertTrue(flat.vertices.size > 10)
+    }
+
+    @Test fun labelsAreTextOnTheirLayersAndAscii() {
+        val label = DxfText(DxfLayers.MATERIAL_LABELS, Vec2(5.0, 6.0), 12.0, "\u00D8 401 mm \u00B7 Plywood 18 mm")
+        val measure = DxfText(DxfLayers.MEASUREMENTS, Vec2(0.0, 0.0), 12.0, "Width: 1200 mm")
+        val dxf = DxfExport.write(listOf(label, measure))
+        assertTrue(dxf.all { it.code < 128 })
+        val p = pairs(dxf)
+        val texts = p.indices.filter { p[it] == ("0" to "TEXT") }
+        assertEquals(2, texts.size)
+        assertTrue(("1" to "\\U+00D8 401 mm \\U+00B7 Plywood 18 mm") in p)
+        assertTrue(("8" to DxfLayers.MATERIAL_LABELS) in p && ("8" to DxfLayers.MEASUREMENTS) in p)
+    }
+
+    @Test fun badGeometryIsRefusedNotWritten() {
+        val failures = listOf(
+            { DxfExport.openEntity(DxfLayers.GEOMETRY, DxfSegment(Vec2(Double.NaN, 0.0), Vec2(1.0, 1.0))) },
+            { DxfExport.openEntity(DxfLayers.GEOMETRY, DxfSegment(Vec2(1.0, 1.0), Vec2(1.0, 1.0))) },
+            { DxfExport.closedEntity(DxfLayers.GEOMETRY, emptyList()) },
+        ).count { runCatching { it() }.isFailure }
+        assertEquals(3, failures)
+    }
+
+    @Test fun handlesAreUnique() {
+        val dxf = DxfExport.write(listOf(DxfLine(DxfLayers.GEOMETRY, Vec2(0.0, 0.0), Vec2(1.0, 0.0)), DxfCircle(DxfLayers.HOLES, Vec2(0.0, 0.0), 2.0)))
+        val handles = pairs(dxf).filter { it.first == "5" || it.first == "105" }.map { it.second }
+        assertEquals(handles.size, handles.toSet().size)
+    }
+}
+

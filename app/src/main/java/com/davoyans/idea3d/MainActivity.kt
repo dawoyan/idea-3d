@@ -157,6 +157,12 @@ import com.davoyans.idea3d.core.Csg
 import com.davoyans.idea3d.core.MeshIssue
 import com.davoyans.idea3d.core.ModelExport
 import com.davoyans.idea3d.core.ModelImport
+import com.davoyans.idea3d.core.DxfEntity
+import com.davoyans.idea3d.core.DxfExport
+import com.davoyans.idea3d.core.DxfLayers
+import com.davoyans.idea3d.core.DxfLine
+import com.davoyans.idea3d.core.DxfSegment
+import com.davoyans.idea3d.core.DxfText
 import com.davoyans.idea3d.core.OutlinePoint
 import com.davoyans.idea3d.core.SolidSpec
 import com.davoyans.idea3d.core.SolidCombiner
@@ -1339,6 +1345,63 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }.getOrDefault(emptyList()) }
     }
     fun modelAt(point: Pt): Int? = modelOutlines.lastOrNull { it.third.size >= 3 && pointInsidePolygon(point, it.third) }?.first
+    // 2D DXF export of the view on screen: the dialog, then the file the system picker creates.
+    var showDxfExport by remember { mutableStateOf(false) }
+    var pendingDxf by remember { mutableStateOf<Triple<String, Int, Int>?>(null) }
+    /**
+     * The view on screen as DXF entities, in millimeters along the view's own axes as seen (mirrored for Back,
+     * Bottom and Left): lines and curves of this view and those shown here from the other views, closed outlines,
+     * holes, measurements, and (with [includeLabels]) measurement and material labels. An item that can't be
+     * written is skipped and counted; imported meshes are not part of the 2D drawing.
+     */
+    fun dxfOfView(includeLabels: Boolean): Pair<List<DxfEntity>, Int> {
+        val here = modelSetup().mapping(editPlane) ?: error("Calibrate this view first: its drawing has no real size yet")
+        val mirrored = editPlane in mirroredViews
+        val sx = if (mirrored && editPlane != ModelPlane.TOP) -1.0 else 1.0
+        val sy = if (mirrored && editPlane == ModelPlane.TOP) -1.0 else 1.0
+        fun at(p: Pt, z: Double) = here.model(p, z).let { m -> Vec2((m dot editPlane.right) * sx, (m dot editPlane.up) * sy) }
+        fun seg(g: GuideLine) = DxfSegment(at(g.start, g.startZMm), at(g.end, g.endZMm), g.curveMid?.let { at(it, (g.startZMm + g.endZMm) / 2) })
+        fun pointLike(s: DxfSegment) = s.mid == null && hypot(s.a.x - s.b.x, s.a.y - s.b.y) < 1e-6
+        val out = mutableListOf<DxfEntity>(); var skipped = 0
+        fun attempt(block: () -> Unit) { try { block() } catch (e: Exception) { skipped++ } }
+        val shapes = closedGuideShapes(guides)
+        val inShapes = shapes.flatten().map { it.id }.toSet()
+        shapes.forEach { path -> attempt { out += DxfExport.closedEntity(if (path.all { it.hole }) DxfLayers.HOLES else DxfLayers.GEOMETRY, path.map(::seg)) } }
+        // A line pointing straight into the screen is a point here: nothing to draw, not a failure.
+        guides.filterNot { it.id in inShapes }.forEach { g -> attempt { val s = seg(g); if (!pointLike(s)) out += DxfExport.openEntity(if (g.hole) DxfLayers.HOLES else DxfLayers.GEOMETRY, s) } }
+        lines.forEach { l -> attempt { val a = at(l.start, l.startZMm); val b = at(l.end, l.endZMm); if (hypot(a.x - b.x, a.y - b.y) > 1e-6) out += DxfLine(DxfLayers.MEASUREMENTS, a, b) } }
+        if (includeLabels && out.isNotEmpty()) {
+            val pts = guides.flatMap { listOf(it.start, it.end) } + lines.flatMap { listOf(it.start, it.end) }
+            val extent = pts.map { at(it, 0.0) }.let { v -> max((v.maxOfOrNull { it.x } ?: 0.0) - (v.minOfOrNull { it.x } ?: 0.0), (v.maxOfOrNull { it.y } ?: 0.0) - (v.minOfOrNull { it.y } ?: 0.0)) }
+            val height = max(2.5, extent * 0.015)
+            lines.forEach { l -> attempt {
+                val value = if (l.lengthSource == LengthSource.UNKNOWN) "?" else "${formatMeasure(l.value, unit)} $unit"
+                val a = at(l.start, l.startZMm); val b = at(l.end, l.endZMm)
+                out += DxfText(DxfLayers.MEASUREMENTS, Vec2((a.x + b.x) / 2, (a.y + b.y) / 2 + height * 0.4), height, listOf(l.label, value).filter { it.isNotBlank() }.joinToString(": "))
+            } }
+            // One material label per object: at a shape's middle, or a line's middle.
+            val labeled = mutableSetOf<Int>()
+            guides.filter { it.materialId != null && !it.hole }.forEach { g -> attempt {
+                if (guides.any { o -> o.id in labeled && sameGuideObject(o, g) }) return@attempt
+                val name = materials.firstOrNull { it.id == g.materialId }?.name ?: return@attempt
+                labeled += g.id
+                val shape = shapes.firstOrNull { p -> p.any { it.id == g.id } }
+                val spot = if (shape != null) shapePoints(shape).map { at(it, g.startZMm) }.let { v -> Vec2(v.map { it.x }.average(), v.map { it.y }.average()) }
+                    else seg(g).let { s -> DxfExport.pointAt(s, 0.5) }
+                out += DxfText(DxfLayers.MATERIAL_LABELS, spot, height, name)
+            } }
+        }
+        return out to skipped
+    }
+    val dxfExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/dxf")) { uri ->
+        val (content, count, skipped) = pendingDxf ?: return@rememberLauncherForActivityResult
+        pendingDxf = null
+        if (uri != null) scope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { (context.contentResolver.openOutputStream(uri) ?: error("Cannot open the selected file")).use { it.write(content.toByteArray(Charsets.US_ASCII)) } } }
+            result.onSuccess { logToast(context, "DXF exported: $count item${if (count == 1) "" else "s"}" + if (skipped > 0) ", $skipped skipped (couldn't be written)" else "", Toast.LENGTH_LONG).show() }
+                .onFailure { logToast(context, "Could not save the DXF: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+        }
+    }
     val stlExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/stl")) { writeStagedModel(it, "stl") }
     val threeMfExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/3mf")) { writeStagedModel(it, "3mf") }
     LaunchedEffect(sharedImage) { sharedImage?.let { importPicture(it); onSharedImageConsumed() } }
@@ -3879,6 +3942,20 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             showPointDepth = false
         })
     }
+    if (showDxfExport) {
+        val viewName = if (editPlane in mirroredViews) oppositeLabel(editPlane) else editPlane.label
+        DxfExportDialog(viewName, hasMeshes = importedModels.isNotEmpty(), onDismiss = { showDxfExport = false }) { includeLabels ->
+            showDxfExport = false
+            runCatching { dxfOfView(includeLabels) }.onSuccess { (entities, skipped) ->
+                if (entities.isEmpty()) logToast(context, "Nothing to export in the $viewName view" + if (skipped > 0) " ($skipped item${if (skipped == 1) "" else "s"} couldn't be written)" else "", Toast.LENGTH_LONG).show()
+                else {
+                    pendingDxf = Triple(DxfExport.write(entities), entities.size, skipped)
+                    val base = projectName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Idea-3D" }
+                    dxfExporter.launch("$base-$viewName.dxf")
+                }
+            }.onFailure { logToast(context, "DXF export: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+        }
+    }
     modelDialogId?.let { id ->
         val model = importedModels.firstOrNull { it.id == id }
         val base = importedMeshes[id]
@@ -4205,7 +4282,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); logToast(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
-    }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onSaveMaterial = {
+    }, onExportDxf = { showPictureEdit = false; showDxfExport = true }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onSaveMaterial = {
         // The selected shape, or else the biggest closed shape that isn't a hole inside another one.
         val shapes = closedGuideShapes(guides)
         val chosen = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { g -> shapes.firstOrNull { path -> sameGuideObject(path.first(), g) } }
@@ -6132,7 +6209,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     )
 }
 
-@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
+@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
     var name by remember { mutableStateOf(currentName) }
     var unit by remember { mutableStateOf(currentUnit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
@@ -6146,6 +6223,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 OutlinedTextField(name, { name = it }, label = { Text("Picture name") }, singleLine = true)
                 OutlinedButton(onClick = onExportImage) { Text("Export picture") }
                 OutlinedButton(onClick = onExport3d) { Text("Export 3D model (STL or 3MF)") }
+                OutlinedButton(onClick = onExportDxf) { Text("Export 2D drawing (DXF)") }
                 OutlinedButton(onClick = onImportModel) { Text("Import 3D model (STL, OBJ, 3MF)") }
                 OutlinedButton(onClick = onSaveMaterial) { Text("Save drawing as material") }
                 OutlinedButton(onClick = onMaterialList) { Text("Materials used (lengths)") }
@@ -6287,6 +6365,21 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
             face(front, shape.color.copy(alpha = 0.20f), edge)
         }
     }
+}
+
+/** Export the view on screen as a 2D DXF drawing: which view, labels on or off, and what is left out. */
+@Composable private fun DxfExportDialog(viewName: String, hasMeshes: Boolean, onDismiss: () -> Unit, onExport: (Boolean) -> Unit) {
+    var includeLabels by remember { mutableStateOf(true) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Export 2D drawing (DXF)") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("The $viewName view, as it is on screen, in millimeters. Layers: Geometry, Holes, Measurements, Material labels.", fontSize = 13.sp)
+            Row(Modifier.fillMaxWidth().clickable { includeLabels = !includeLabels }, verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = includeLabels, onCheckedChange = { includeLabels = it })
+                Text("Include labels (measurement values and material names)")
+            }
+            Text("Imported 3D models (STL, OBJ, 3MF) are not included in the 2D DXF export${if (hasMeshes) "; this project has some" else ""}. 3D objects drawn in another view are exported from that view.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+        }
+    }, confirmButton = { TextButton(onClick = { onExport(includeLabels) }) { Text("Export") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 /**
