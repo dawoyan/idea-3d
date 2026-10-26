@@ -1879,7 +1879,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val pieces = (0 until 8).map { i -> val a = 2 * PI * i / 8; val b = 2 * PI * (i + 1) / 8
             GuideLine(firstId + i, at(a), if (i == 7) at(0.0) else at(b), manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, curveMid = at((a + b) / 2)) }
         guides = guides + pieces
-        selectedGuideId = null
+        // One circle per use: the tool switches off and the circle stays selected (for Material, Grow or Modify),
+        // so a tap on it can't start another circle.
+        tool = Tool.NONE; selectedGuideId = firstId
     }
     /** A closed rectangle from one corner to the opposite one (a square when nearly square). */
     fun addRectangle(corner: Pt, opposite: Pt) {
@@ -1889,6 +1891,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val pathId = nextGuidePathId(guides); val firstId = nextGuideId(guides)
         val pts = listOf(corner, Pt(end.x, corner.y), end, Pt(corner.x, end.y))
         guides = guides + pts.indices.map { i -> GuideLine(firstId + i, pts[i], pts[(i + 1) % 4], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth) }
+        tool = Tool.NONE; selectedGuideId = firstId
         if (square) Toast.makeText(context, "Square", Toast.LENGTH_SHORT).show()
     }
     fun handleTap(point: Pt, hitRadius: Double) {
@@ -2025,7 +2028,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 // Drawing: a tap on an existing line starts the new line there; it doesn't select that line.
                 selectedGuideId = null
                 guideDeleteCandidateId = null
-                draftStart = snapToLines(point, hitRadius)
+                // A circle's center stays where tapped; other drawings start on the line under the finger.
+                draftStart = if (lineDrawing == LineDrawing.CIRCLE) point else snapToLines(point, hitRadius)
             } else {
                 val point = snapToLines(point, hitRadius)
                 if (distance(draftStart!!, point) > 4.0 && lineDrawing == LineDrawing.CIRCLE) addCircle(draftStart!!, point)
@@ -2158,7 +2162,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (tool == Tool.ADJUST && !selectMode && growStart?.invoke(sourcePoint, hitRadius) == true) return
         // Rectangle and Circle can be dragged out: from a corner (or the center) to where the finger lifts.
         if (tool == Tool.LINES && draftStart == null && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE) && closestGuideEndpoint(sourcePoint, guides, hitRadius * 1.5) == null) {
-            shapeDragging = true; draftStart = snapToLines(sourcePoint, hitRadius); pendingEnd = draftStart; return
+            shapeDragging = true; draftStart = if (lineDrawing == LineDrawing.CIRCLE) sourcePoint else snapToLines(sourcePoint, hitRadius); pendingEnd = draftStart; return
         }
         // Dragging the selected imported model moves it within this view.
         if (selectedModelId != null && modelAt(sourcePoint) == selectedModelId) { pushUndo(); modelDragLast = sourcePoint; return }
