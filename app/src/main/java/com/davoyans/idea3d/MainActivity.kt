@@ -768,13 +768,13 @@ private object ProjectStore {
             BitmapFactory.decodeFile(image.absolutePath, options)
             require(options.outWidth > 0 && options.outHeight > 0) { "Invalid project image" }
             data.put("id", id)
-            save(context, decode(data, System.currentTimeMillis()))
+            save(context, decode(data, System.currentTimeMillis()).withPositiveIds())
         } catch (error: Exception) {
             delete(context, id)
             throw error
         }
     }
-    private fun read(file: File): SavedProject = decode(JSONObject(file.readText()), file.lastModified())
+    private fun read(file: File): SavedProject = decode(JSONObject(file.readText()), file.lastModified()).withPositiveIds()
     private fun decode(json: JSONObject, fallbackTime: Long): SavedProject {
         val values = json.getJSONArray("lines")
         val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key, ModelPlane.of(line.optString("plane")))) } }
@@ -1902,7 +1902,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         guides = guides + pieces
         // One circle per use: the tool switches off and the circle stays selected (for Material, Grow or Modify),
         // so a tap on it can't start another circle.
-        tool = Tool.NONE; selectedGuideId = firstId
+        tool = Tool.NONE; selectedGuideId = firstId; selectedWholeGuideId = null; guideDeleteCandidateId = firstId
     }
     /** A closed rectangle from one corner to the opposite one (a square when nearly square). */
     fun addRectangle(corner: Pt, opposite: Pt) {
@@ -1912,7 +1912,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val pathId = nextGuidePathId(guides); val firstId = nextGuideId(guides)
         val pts = listOf(corner, Pt(end.x, corner.y), end, Pt(corner.x, end.y))
         guides = guides + pts.indices.map { i -> GuideLine(firstId + i, pts[i], pts[(i + 1) % 4], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth) }
-        tool = Tool.NONE; selectedGuideId = firstId
+        tool = Tool.NONE; selectedGuideId = firstId; selectedWholeGuideId = null; guideDeleteCandidateId = firstId
         if (square) Toast.makeText(context, "Square", Toast.LENGTH_SHORT).show()
     }
     fun handleTap(point: Pt, hitRadius: Double) {
@@ -1940,6 +1940,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 } else {
                     deleteCandidateId = null
                     val guide = closestGuide(point, guides, hitRadius * 1.7)
+                    // A new tap replaces the whole selection (Properties and Material then act on this one).
+                    selectedWholeGuideId = null
                     selectedGuideId = guide?.id
                     guideDeleteCandidateId = guide?.id
                 }
@@ -2319,7 +2321,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val oldIds = (shape + chain).map { it.id }.toSet()
                 val existingGroups = (shape + chain).mapNotNull { it.groupId }.toSet()
                 val allIds = guides.filter { it.id in oldIds || it.groupId != null && it.groupId in existingGroups }.map { it.id }.toSet()
-                val groupId = existingGroups.firstOrNull() ?: ((guides.mapNotNull { it.groupId }.maxOrNull() ?: 0) + 1)
+                val groupId = existingGroups.firstOrNull() ?: ((guides.mapNotNull { it.groupId }.filter { it > 0 }.maxOrNull() ?: 0) + 1)
                 var nextId = nextGuideId(guides)
                 val splitShape = shape.flatMap { segment ->
                     val cuts = listOf(a, b).filter { it.borderId == segment.id }.map { it.parameter }.filter { it > 0.0001f && it < 0.9999f }.sorted().fold(mutableListOf<Float>()) { acc, t -> if (acc.isEmpty() || t - acc.last() > 0.0001f) acc.add(t); acc }
@@ -5458,7 +5460,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 val selectedGuide = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }
                 // Filled shapes (a fill, a sheet material or depth) get a thin single border; the thick double line is for
                 // plain lines and unfilled outlines.
-                val filledIds = drawableGuideShapes(guides).filter { shape ->
+                // Closed outlines count even when seen edge-on from another view (then they have no area here).
+                val filledIds = (drawableGuideShapes(guides) + closedGuideShapes(guides)).filter { shape ->
                     val t = shape.first().fillTransparency ?: if (extrusions.any { e -> (e.depthMm ?: 0.0) > 0.0 && shape.all { g -> extrusionGuides(e, guides).any { it.id == g.id } } }) 90 else null
                     t != null && t < 100
                 }.flatten().map { it.id }.toSet()
@@ -5544,7 +5547,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 // Joints inside a smooth curved outline (a circle's pieces) get no dot.
                 fun smoothJoint(p: Pt, g: GuideLine) = g.curveMid != null && g.pathId != null && guides.count { o -> o.pathId == g.pathId && o.curveMid != null && (distance(o.start, p) < 0.6 || distance(o.end, p) < 0.6) } >= 2
                 guides.sortedBy { if (selectedGuide != null && sameGuideObject(it, selectedGuide)) 0 else 1 }
-                    .flatMap { guide -> listOf(guide.start to guide, guide.end to guide) }.filterNot { (p, g) -> smoothJoint(p, g) }
+                    .flatMap { guide -> listOf(guide.start to guide, guide.end to guide) }.filterNot { (p, g) -> smoothJoint(p, g) || g.id in filledIds && !(selectedGuide != null && sameGuideObject(g, selectedGuide)) }
                     .fold(emptyList<Pair<Pt, GuideLine>>()) { vertices, vertex -> if (vertices.any { distance(it.first, vertex.first) < 0.6 }) vertices else vertices + vertex }
                     .forEach { (point, guide) ->
                         val center = viewAt(point)
@@ -6398,8 +6401,33 @@ private fun snapToFeature(bitmap: Bitmap, touch: Pt, requestedRadius: Float): Fe
     return if (strongest >= 80) FeatureSnap(Pt(bestX.toFloat(), bestY.toFloat()), true) else FeatureSnap(touch, false)
 }
 
-private fun nextGuideId(guides: List<GuideLine>) = (guides.maxOfOrNull { it.id } ?: 0) + 1
-private fun nextGuidePathId(guides: List<GuideLine>) = (guides.mapNotNull { it.pathId }.maxOrNull() ?: 0) + 1
+// New ids count only this view's own lines (positive); lines shown from other views carry negative stand-in ids.
+private fun nextGuideId(guides: List<GuideLine>) = (guides.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0) + 1
+private fun nextGuidePathId(guides: List<GuideLine>) = (guides.mapNotNull { it.pathId }.filter { it > 0 }.maxOrNull() ?: 0) + 1
+
+/**
+ * Repairs projects saved while new lines could get negative ids (when a view showed only other views' lines): such
+ * ids, path and group numbers get fresh positive ones in their view, and objects and groups follow.
+ */
+private fun SavedProject.withPositiveIds(): SavedProject {
+    if (guides.none { it.id <= 0 || (it.pathId ?: 1) <= 0 || (it.groupId ?: 1) <= 0 }) return this
+    val idMap = HashMap<Pair<ModelPlane, Int>, Int>()
+    val fixed = guides.groupBy { it.plane }.flatMap { (plane, list) ->
+        var nextId = (list.filter { it.id > 0 }.maxOfOrNull { it.id } ?: 0) + 1
+        var nextPath = (list.mapNotNull { it.pathId }.filter { it > 0 }.maxOrNull() ?: 0) + 1
+        var nextGroup = (list.mapNotNull { it.groupId }.filter { it > 0 }.maxOrNull() ?: 0) + 1
+        val paths = list.mapNotNull { it.pathId }.filter { it <= 0 }.distinct().associateWith { nextPath++ }
+        val groups = list.mapNotNull { it.groupId }.filter { it <= 0 }.distinct().associateWith { nextGroup++ }
+        list.map { g ->
+            val id = if (g.id > 0) g.id else nextId++
+            idMap[plane to g.id] = id
+            g.copy(id = id, pathId = g.pathId?.let { paths[it] ?: it }, groupId = g.groupId?.let { groups[it] ?: it })
+        }
+    }
+    return copy(guides = fixed,
+        extrusions = extrusions.map { e -> e.copy(guideIds = e.guideIds.map { idMap[e.plane to it] ?: it }) },
+        itemGroups = itemGroups.map { group -> group.map { (p, id) -> p to (idMap[p to id] ?: id) } })
+}
 
 private data class ExtrusionFace(val points: List<Pt>, val guide: GuideLine, val opacity: Float, val light: Float)
 
@@ -7524,9 +7552,20 @@ private fun exportAnnotated(context: Context, original: Bitmap, lines: List<Meas
         }
     }
     canvas.restore()
+    // As on screen: filled shapes get a thin single border; plain lines and unfilled outlines the double line.
+    val filledIds = (shapes + closedGuideShapes(guides)).filter { shape ->
+        val t = shape.first().fillTransparency ?: if (extrusions.any { e -> (e.depthMm ?: 0.0) > 0.0 && shape.all { g -> extrusionGuides(e, guides).any { it.id == g.id } } }) 90 else null
+        t != null && t < 100
+    }.flatten().map { it.id }.toSet()
     if (showGuides) guides.forEach { guide ->
         val mid = guide.curveMid
         val separator = guide.id in separators
+        if (guide.id in filledIds) {
+            val thin = linePaint(guideColor(guide.colorIndex).toArgb(), 1.5f)
+            if (mid != null) canvas.drawPath(android.graphics.Path().apply { moveTo(guide.start.x, guide.start.y); quadTo(2f * mid.x - (guide.start.x + guide.end.x) / 2f, 2f * mid.y - (guide.start.y + guide.end.y) / 2f, guide.end.x, guide.end.y) }, thin)
+            else canvas.drawLine(guide.start.x, guide.start.y, guide.end.x, guide.end.y, thin)
+            return@forEach
+        }
         val color = guideColor(guide.colorIndex).copy(alpha = if (separator) 0.45f else 1f).toArgb()
         val width = if (separator) (guide.strokeWidth * 0.35f).coerceAtLeast(1f) else guide.strokeWidth
         if (mid != null) {
