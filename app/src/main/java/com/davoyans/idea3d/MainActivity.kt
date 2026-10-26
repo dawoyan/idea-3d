@@ -1362,6 +1362,15 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, allLines(), allGuides(), guidesDetected, projectCapturedAt, levelRotation, pictureOptions, allExtrusions(), blankScene, planeFrames, solidOps, itemGroups, importedModels)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, front.guides, front.lines) }; library = ProjectStore.list(context) }
     }
     /** Zooms and centers the canvas on everything in this plane, including shapes from the other planes. */
+    /** How far out the view may zoom: until everything drawn fits on screen (a bit of margin), no further. */
+    fun minZoomForContent(): Float {
+        val canvas = planeCanvas ?: return 0.1f
+        val viewW = editorViewSize.width; val viewH = editorViewSize.height
+        if (viewW < 10f || viewH < 10f) return 0.1f
+        val b = contentBounds() ?: return 0.1f
+        val baseFit = min(viewW / canvas.width, viewH / canvas.height)
+        return (min(viewW * 0.72f / ((b[2] - b[0]).coerceAtLeast(1f) * baseFit), viewH * 0.72f / ((b[3] - b[1]).coerceAtLeast(1f) * baseFit)) * 0.8f).coerceIn(0.005f, 1f)
+    }
     fun fitView(focus: FloatArray? = null) {
         val canvas = planeCanvas ?: return
         val viewW = editorViewSize.width; val viewH = editorViewSize.height
@@ -1373,7 +1382,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val minX = bounds[0]; val minY = bounds[1]; val maxX = bounds[2]; val maxY = bounds[3]
         val baseFit = min(viewW / canvas.width, viewH / canvas.height)
         // Leave room around the content for handles.
-        val nextZoom = min(viewW * 0.72f / ((maxX - minX).coerceAtLeast(1f) * baseFit), viewH * 0.72f / ((maxY - minY).coerceAtLeast(1f) * baseFit)).coerceIn(0.1f, 8f)
+        val nextZoom = min(viewW * 0.72f / ((maxX - minX).coerceAtLeast(1f) * baseFit), viewH * 0.72f / ((maxY - minY).coerceAtLeast(1f) * baseFit)).coerceIn(0.005f, 400f)
         val fit = baseFit * nextZoom
         zoom = nextZoom
         pan = Offset(viewW / 2f - (minX + maxX) / 2f * fit - (viewW - canvas.width * fit) / 2f, viewH / 2f - (minY + maxY) / 2f * fit - (viewH - canvas.height * fit) / 2f)
@@ -3237,15 +3246,27 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     /** Cut: the second picked item is cut out of the first. */
     fun cutPicked() {
-        if (pickedItems.size != 2) { logToast(context, "Pick two items: first the one to cut, then the cutter", Toast.LENGTH_LONG).show(); return }
-        val (target, cutter) = pickedItems
-        val targetSolid = extrusionOf(target); val cutterSolid = extrusionOf(cutter)
-        if (targetSolid != null && cutterSolid != null) { pendingCut = SolidOp(target.first to targetSolid.id, cutter.first to cutterSolid.id, join = false); pickedItems = emptyList(); return }
+        // The first pick is cut; the cutter is the last pick outside the first one's group (a ring's hole comes with it).
+        val target = pickedItems.firstOrNull()
+        val cutter = target?.let { t -> val group = withGroup(t); pickedItems.lastOrNull { p -> group.none { sameItem(it, p) } } }
+        if (target == null || cutter == null) { logToast(context, "Pick two items: first the one to cut, then the cutter", Toast.LENGTH_LONG).show(); return }
+        // Two shapes drawn in the same view are cut right in the drawing (3D follows, depth and material kept): a
+        // cutter wholly inside becomes a hole, otherwise its bite is taken out and the cutter is used up.
         if (target.first == cutter.first && isClosedShape(target)) {
             if (editPlane != target.first) switchPlane(target.first)
-            applyShapeOperation(JunctionAction(if (isClosedShape(cutter)) JunctionKind.SHAPE_OVERLAP else JunctionKind.CUT_SHAPE_LINE, target.second, cutter.second, Pt(0f, 0f)), if (isClosedShape(cutter)) "cut-second" else "line")
+            val closed = isClosedShape(cutter)
+            val targetIds = itemGuides(target).map { it.id }.toSet(); val cutterIds = itemGuides(cutter).map { it.id }.toSet()
+            applyShapeOperation(JunctionAction(if (closed) JunctionKind.SHAPE_OVERLAP else JunctionKind.CUT_SHAPE_LINE, target.second, cutter.second, Pt(0f, 0f)), if (closed) "cut-second" else "line")
+            val cut = guides.none { it.id in targetIds }
+            if (closed && cut) {
+                guides = guides.filterNot { it.id in cutterIds && !it.hole }
+                extrusions = extrusions.filter { e -> e.guideIds.none { it in cutterIds } || guides.any { g -> g.id in e.guideIds } }
+                logToast(context, "Cut: the bite is taken out and the cutter is used up (Undo brings it back)", Toast.LENGTH_SHORT).show()
+            }
             pickedItems = emptyList(); return
         }
+        val targetSolid = extrusionOf(target); val cutterSolid = extrusionOf(cutter)
+        if (targetSolid != null && cutterSolid != null) { pendingCut = SolidOp(target.first to targetSolid.id, cutter.first to cutterSolid.id, join = false); pickedItems = emptyList(); return }
         logToast(context, "Cut needs a shape and a shape or straight line in the same view, or two 3D objects", Toast.LENGTH_LONG).show()
     }
     /** Arrange: line up the picked items' centers on this view's horizontal or vertical, or space them evenly. */
@@ -3502,7 +3523,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -3677,7 +3698,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon("Space V", R.drawable.ic_even_v, enabled = total >= 3) { arrangePicked(horizontal = false, distribute = true) }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
-                        ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n == 2, onClick = ::cutPicked)
+                        ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
                         ActionIcon("Copy lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
                         ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
@@ -3755,7 +3776,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -5113,7 +5134,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -5127,6 +5148,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
         val junctionRadiusOnScreen = with(LocalDensity.current) { 32.dp.toPx() }
         val baseFit = min(viewW / bitmap.width, viewH / bitmap.height)
         val fit = baseFit * zoom
+        // Line widths and marks grow with zoom only up to a point, so zooming far in never makes them huge.
+        val strokeZoom = zoom.coerceAtMost(2.5f)
         val imageW = bitmap.width * fit; val imageH = bitmap.height * fit
         val left = (viewW - imageW) / 2f + pan.x; val top = (viewH - imageH) / 2f + pan.y
         val pivot = Offset(viewW / 2f, viewH / 2f)
@@ -5150,6 +5173,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
         /** (x, y) pairs mirrored like [mirrored]. */
         fun mirroredPairs(values: FloatArray): FloatArray = if (!mirrorX && !mirrorY) values else FloatArray(values.size) { i -> if (i % 2 == 0) (if (mirrorX) bitmap.width - values[i] else values[i]) else (if (mirrorY) bitmap.height - values[i] else values[i]) }
         val latestZoom = rememberUpdatedState(zoom)
+        val latestMinZoom = rememberUpdatedState(minZoom)
         val latestPan = rememberUpdatedState(pan)
         val latestDragStart = rememberUpdatedState(onDragStart)
         val latestDragToDraw = rememberUpdatedState(dragToDraw)
@@ -5312,7 +5336,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val centroid = Offset(pressed.map { it.position.x }.average().toFloat(), pressed.map { it.position.y }.average().toFloat())
                         val distance = pressed.map { hypot((it.position.x - centroid.x).toDouble(), (it.position.y - centroid.y).toDouble()).toFloat() }.average().toFloat()
                         if (lastDistance > 0f) {
-                            val nextZoom = (localZoom * (distance / lastDistance)).coerceIn(0.1f, 8f)
+                            // In as far as you like; out only until everything fits.
+                            val nextZoom = (localZoom * (distance / lastDistance)).coerceIn(latestMinZoom.value, 400f)
                             val focus = sourceAt(lastCentroid, localZoom, localPan).let { Pt(if (mirrorX) bitmap.width - it.x else it.x, if (mirrorY) bitmap.height - it.y else it.y) }
                             val nextFit = baseFit * nextZoom
                             val unrotatedCentroid = rotateView(centroid, -rotation)
@@ -5599,8 +5624,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val chosen = !separator && tool != Tool.LINES && selectedGuide != null && sameGuideObject(guide, selectedGuide)
                         if (border) drawPath(path, if (chosen) Color(0xFFCF2020) else lineColor, style = Stroke((if (chosen) 2.5 else 1.2).dp.toPx()))
                         else {
-                            drawPath(path, if (chosen) Color(0xFFCF2020) else lineColor, style = Stroke(width * zoom))
-                            if (!separator) drawPath(path, Color.White, style = Stroke((guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * zoom))
+                            drawPath(path, if (chosen) Color(0xFFCF2020) else lineColor, style = Stroke(width * strokeZoom))
+                            if (!separator) drawPath(path, Color.White, style = Stroke((guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * strokeZoom))
                         }
                         // A single curve shows its end dots and its bend handle; a circle's pieces don't.
                         val circlePiece = guide.pathId != null && guides.count { it.pathId == guide.pathId && it.plane == guide.plane } >= 6 && guides.filter { it.pathId == guide.pathId && it.plane == guide.plane }.all { it.curveMid != null }
@@ -5613,11 +5638,11 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val chosen = !separator && selectedGuide != null && sameGuideObject(guide, selectedGuide)
                         drawLine(if (chosen) Color(0xFFCF2020) else lineColor, start, end, (if (chosen) 2.5 else 1.2).dp.toPx())
                     } else if (!separator && selectedGuide != null && sameGuideObject(guide, selectedGuide)) {
-                        drawLine(Color(0xFFCF2020), start, end, (guide.strokeWidth + 2f) * zoom)
-                        drawLine(Color.White, start, end, (guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * zoom)
+                        drawLine(Color(0xFFCF2020), start, end, (guide.strokeWidth + 2f) * strokeZoom)
+                        drawLine(Color.White, start, end, (guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * strokeZoom)
                     } else {
-                        drawLine(lineColor, start, end, width * zoom)
-                        if (!separator) drawLine(Color.White, start, end, (guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * zoom)
+                        drawLine(lineColor, start, end, width * strokeZoom)
+                        if (!separator) drawLine(Color.White, start, end, (guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * strokeZoom)
                     }
                     // The label shows the line's true 3D length (the same in every view) and its material.
                     // One label per object for its material; a circle gets a single "Ø diameter" label instead of one per piece.
@@ -5655,7 +5680,10 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val endOn = (b0 - a0).getDistance() < 4f
                         val center = if (endOn) Offset(mid.x, mid.y - 36.dp.toPx()) else if (steep) Offset(mid.x + 10.dp.toPx(), mid.y) else Offset(mid.x, mid.y - 10.dp.toPx())
                         // When part of the line goes into depth, say how long it looks here too.
-                        val text = "${formatMeasure(mm / unitFactorMm(unit), unit)} $unit" + (if (!endOn && mm - seen > 0.01 * mm) " (${formatMeasure(seen / unitFactorMm(unit), unit)} seen here)" else "") + (materialName?.let { " · $it" } ?: "")
+                        // On a closed shape the material is named alone (one edge's length would mislead), unless that edge has a set length.
+                        val inShape = guide.pathId != null && objectGuides.size > 1 && guide.lengthMm == null
+                        val text = if (inShape && materialName != null) materialName
+                            else "${formatMeasure(mm / unitFactorMm(unit), unit)} $unit" + (if (!endOn && mm - seen > 0.01 * mm) " (${formatMeasure(seen / unitFactorMm(unit), unit)} seen here)" else "") + (materialName?.let { " · $it" } ?: "")
                         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = if (steep) Paint.Align.LEFT else Paint.Align.CENTER; textSize = 14.sp.toPx(); isFakeBoldText = true; style = Paint.Style.STROKE; strokeWidth = 4.dp.toPx(); color = AndroidColor.WHITE }
                         drawContext.canvas.nativeCanvas.drawText(text, center.x, center.y, paint)
                         paint.style = Paint.Style.FILL; paint.color = AndroidColor.BLACK
@@ -5682,16 +5710,16 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 val pointNames = measurementPointNames(lines)
                 val drawnNames = mutableSetOf<String>()
                 if (unknownBlinkOn) lines.filter { !it.isReference && it.value <= 0.0 }.forEach { line ->
-                    drawLine(Color.White, viewAt(line.start), viewAt(line.end), 14f * zoom)
+                    drawLine(Color.White, viewAt(line.start), viewAt(line.end), 14f * strokeZoom)
                 }
                 lines.forEach { line ->
                     drawAnnotation(viewAt(line.start), viewAt(line.end), line.value, line.label, line.isReference, line.isScaleReference, line.colorIndex, line.labelOffset * fit, unit, unitVisibility, zoom, line.id, isHorizontalCalibration(line), screenLines, occupiedLabels, line.pathId != null && !line.isScaleReference, !line.isReference && line.value <= 0.0, line.hasDepth())
                     pointNames[line.id]?.let { names ->
                         fun vertexLabel(point: Offset, text: String) {
                             if (!drawnNames.add(text)) return
-                            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 15f * zoom.coerceIn(1f, 3f); isFakeBoldText = true }
-                            val x = point.x + 12f * zoom; val y = point.y - 12f * zoom
-                            drawContext.canvas.nativeCanvas.drawText(text, x, y, Paint(paint).apply { style = Paint.Style.STROKE; strokeWidth = 4f * zoom; color = AndroidColor.WHITE })
+                            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 15f * strokeZoom.coerceIn(1f, 3f); isFakeBoldText = true }
+                            val x = point.x + 12f * strokeZoom; val y = point.y - 12f * strokeZoom
+                            drawContext.canvas.nativeCanvas.drawText(text, x, y, Paint(paint).apply { style = Paint.Style.STROKE; strokeWidth = 4f * strokeZoom; color = AndroidColor.WHITE })
                             drawContext.canvas.nativeCanvas.drawText(text, x, y, paint.apply { color = AndroidColor.BLACK })
                         }
                         vertexLabel(viewAt(line.start), names.first)
@@ -5700,45 +5728,45 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 }
             if (heldLineBlink) heldLineId?.let { id -> lines.firstOrNull { it.id == id } }?.let { line ->
                 val a = viewAt(line.start); val b = viewAt(line.end)
-                drawLine(Color.White, a, b, 14f * zoom)
-                drawLine(Color(0xFF0066BE), a, b, 8f * zoom)
+                drawLine(Color.White, a, b, 14f * strokeZoom)
+                drawLine(Color(0xFF0066BE), a, b, 8f * strokeZoom)
             }
             if (heldLineBlink) heldGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
-                drawLine(Color.White, viewAt(guide.start), viewAt(guide.end), (guide.strokeWidth + 9f) * zoom)
-                drawLine(Color(0xFF0066BE), viewAt(guide.start), viewAt(guide.end), (guide.strokeWidth + 4f) * zoom)
+                drawLine(Color.White, viewAt(guide.start), viewAt(guide.end), (guide.strokeWidth + 9f) * strokeZoom)
+                drawLine(Color(0xFF0066BE), viewAt(guide.start), viewAt(guide.end), (guide.strokeWidth + 4f) * strokeZoom)
             }
             if (deleteBlinkOn) deleteCandidateId?.let { id -> lines.firstOrNull { it.id == id } }?.let { line ->
                 val a = viewAt(line.start); val b = viewAt(line.end)
-                drawLine(Color.Black, a, b, 11f * zoom)
-                drawLine(Color(0xFFCF2020), a, b, 6f * zoom)
-                drawCircle(Color(0xFFCF2020), 14f * zoom, a)
-                drawCircle(Color(0xFFCF2020), 14f * zoom, b)
+                drawLine(Color.Black, a, b, 11f * strokeZoom)
+                drawLine(Color(0xFFCF2020), a, b, 6f * strokeZoom)
+                drawCircle(Color(0xFFCF2020), 14f * strokeZoom, a)
+                drawCircle(Color(0xFFCF2020), 14f * strokeZoom, b)
             }
             if (alignmentBlinkOn) lines.filter { it.id in alignmentLineIds }.forEach { line ->
                 val a = viewAt(line.start); val b = viewAt(line.end)
-                drawLine(Color.Black, a, b, 11f * zoom)
-                drawLine(Color(0xFF0066CC), a, b, 6f * zoom)
-                drawCircle(Color(0xFF0066CC), 14f * zoom, a)
-                drawCircle(Color(0xFF0066CC), 14f * zoom, b)
+                drawLine(Color.Black, a, b, 11f * strokeZoom)
+                drawLine(Color(0xFF0066CC), a, b, 6f * strokeZoom)
+                drawCircle(Color(0xFF0066CC), 14f * strokeZoom, a)
+                drawCircle(Color(0xFF0066CC), 14f * strokeZoom, b)
             }
             if (edgeBlinkOn) edgeSnapPoint?.let { point ->
                 val center = viewAt(point)
-                drawCircle(Color.White, 18f * zoom, center, style = Stroke(6f * zoom))
-                drawCircle(Color(0xFF19B45A), 18f * zoom, center, style = Stroke(3f * zoom))
+                drawCircle(Color.White, 18f * strokeZoom, center, style = Stroke(6f * strokeZoom))
+                drawCircle(Color(0xFF19B45A), 18f * strokeZoom, center, style = Stroke(3f * strokeZoom))
             }
             if (adjustmentBlinkOn) {
                 adjustmentLineId?.let { id -> lines.firstOrNull { it.id == id } }?.let { line ->
-                    drawLine(Color.Black, viewAt(line.start), viewAt(line.end), 11f * zoom)
-                    drawLine(Color(0xFF0066BE), viewAt(line.start), viewAt(line.end), 6f * zoom)
+                    drawLine(Color.Black, viewAt(line.start), viewAt(line.end), 11f * strokeZoom)
+                    drawLine(Color(0xFF0066BE), viewAt(line.start), viewAt(line.end), 6f * strokeZoom)
                 }
                 adjustmentGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
-                    drawLine(Color.Black, viewAt(guide.start), viewAt(guide.end), 9f * zoom)
-                    drawLine(Color(0xFF0066BE), viewAt(guide.start), viewAt(guide.end), 4f * zoom)
+                    drawLine(Color.Black, viewAt(guide.start), viewAt(guide.end), 9f * strokeZoom)
+                    drawLine(Color(0xFF0066BE), viewAt(guide.start), viewAt(guide.end), 4f * strokeZoom)
                 }
                 adjustmentIndicatorPoint?.let { point ->
                     val center = viewAt(point)
-                    drawCircle(Color.White, 20f * zoom, center, style = Stroke(7f * zoom))
-                    drawCircle(Color(0xFF0066BE), 20f * zoom, center, style = Stroke(3f * zoom))
+                    drawCircle(Color.White, 20f * strokeZoom, center, style = Stroke(7f * strokeZoom))
+                    drawCircle(Color(0xFF0066BE), 20f * strokeZoom, center, style = Stroke(3f * strokeZoom))
                 }
             }
             draftStart?.let { start -> drawPoint(viewAt(start), if (tool == Tool.LINES) guideColor(guideColorIndex) else Color(0xFFFFD400)) }
@@ -5754,24 +5782,24 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
             }
             if (tool == Tool.ADJUST && selectionBlinkOn) selectedEndpoint?.let { endpoint ->
                 lines.firstOrNull { it.id == endpoint.lineId }?.let { line ->
-                    drawLine(Color.Black, viewAt(line.start), viewAt(line.end), 10f * zoom)
-                    drawLine(Color(0xFF0066BE), viewAt(line.start), viewAt(line.end), 5f * zoom)
+                    drawLine(Color.Black, viewAt(line.start), viewAt(line.end), 10f * strokeZoom)
+                    drawLine(Color(0xFF0066BE), viewAt(line.start), viewAt(line.end), 5f * strokeZoom)
                     val point = viewAt(if (endpoint.isStart) line.start else line.end)
-                    drawCircle(Color.White, 20f * zoom, point, style = Stroke(6f * zoom))
-                    drawCircle(Color(0xFF0066BE), 20f * zoom, point, style = Stroke(3f * zoom))
+                    drawCircle(Color.White, 20f * strokeZoom, point, style = Stroke(6f * strokeZoom))
+                    drawCircle(Color(0xFF0066BE), 20f * strokeZoom, point, style = Stroke(3f * strokeZoom))
                 }
             }
             if (tool == Tool.ADJUST && selectionBlinkOn) selectedGuideEndpoint?.let { endpoint ->
                 guides.firstOrNull { it.id == endpoint.guideId }?.let { guide ->
                     val point = viewAt(if (endpoint.isStart) guide.start else guide.end)
-                    drawCircle(Color.Black, 18f * zoom, point, style = Stroke(6f * zoom))
-                    drawCircle(Color(0xFF0066BE), 18f * zoom, point, style = Stroke(3f * zoom))
+                    drawCircle(Color.Black, 18f * strokeZoom, point, style = Stroke(6f * strokeZoom))
+                    drawCircle(Color(0xFF0066BE), 18f * strokeZoom, point, style = Stroke(3f * strokeZoom))
                 }
             }
             if (tool == Tool.ADJUST && selectionBlinkOn) selectedWholeLineId?.let { id ->
                 val pathId = lines.firstOrNull { it.id == id }?.pathId
                 lines.filter { it.id == id || pathId != null && it.pathId == pathId }.forEach { line ->
-                    drawLine(Color(0xFF0066BE), viewAt(line.start), viewAt(line.end), 7f * zoom)
+                    drawLine(Color(0xFF0066BE), viewAt(line.start), viewAt(line.end), 7f * strokeZoom)
                 }
             }
             if (tool == Tool.ADJUST && selectionBlinkOn) selectedWholeGuideId?.let { id ->
@@ -5897,7 +5925,7 @@ private fun DrawScope.drawAnnotation(a: Offset, b: Offset, value: Double, label:
     native.restore()
 }
 private fun DrawScope.drawPoint(p: Offset, color: Color, zoom: Float = 1f) {
-    drawCircle(Color.Black, 12f * zoom, p); drawCircle(color, 8f * zoom, p); drawCircle(Color(0xFF18201E), 3f * zoom, p)
+    drawCircle(Color.Black, 12f * zoom.coerceAtMost(2.5f), p); drawCircle(color, 8f * zoom.coerceAtMost(2.5f), p); drawCircle(Color(0xFF18201E), 3f * zoom.coerceAtMost(2.5f), p)
 }
 
 private fun segmentIntersectsRect(a: Offset, b: Offset, rect: androidx.compose.ui.geometry.Rect): Boolean {
@@ -6689,7 +6717,7 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
                 val thickness = (edge.startThicknessMm ?: model.depth) * (1 - t) + (edge.endThicknessMm ?: model.depth) * t
                 OutlinePoint(mapping.right(p), mapping.up(p), model.face + pointZ, thickness)
             }
-            specs += SolidSpec(name, outline, model.color, plane)
+            specs += SolidSpec(name, simplifiedOutline(outline), model.color, plane)
             objectsOut?.add(model.extrusion.copy(plane = plane))
         }
     }
@@ -6997,6 +7025,37 @@ private fun projectToGuide(point: Pt, guide: GuideLine): Pt {
 
 private fun closestGuide(point: Pt, guides: List<GuideLine>, radius: Double): GuideLine? =
     guides.minByOrNull { distance(point, projectToGuide(point, it)) }?.takeIf { distance(point, projectToGuide(point, it)) <= radius }
+
+/**
+ * A shape's outline with points that add nothing removed (Douglas–Peucker, about 0.2% of its size): curves keep
+ * their look in a few dozen points, so 3D cuts and joins stay quick. Corners always stay.
+ */
+private fun simplifiedOutline(outline: List<OutlinePoint>): List<OutlinePoint> {
+    if (outline.size <= 24) return outline
+    val size = max(outline.maxOf { it.x } - outline.minOf { it.x }, outline.maxOf { it.y } - outline.minOf { it.y })
+    val tolerance = max(0.2, size * 0.002)
+    fun distance(p: OutlinePoint, a: OutlinePoint, b: OutlinePoint): Double {
+        val dx = b.x - a.x; val dy = b.y - a.y; val l2 = dx * dx + dy * dy
+        if (l2 < 1e-12) return hypot(p.x - a.x, p.y - a.y)
+        val t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).coerceIn(0.0, 1.0)
+        return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+    }
+    val keep = BooleanArray(outline.size)
+    fun simplify(from: Int, to: Int) {
+        if (to <= from + 1) return
+        var worst = -1; var most = 0.0
+        for (i in from + 1 until to) { val d = distance(outline[i], outline[from], outline[to % outline.size]); if (d > most) { most = d; worst = i } }
+        // Depth or thickness changing along the outline also counts as a corner.
+        val varies = (from + 1 until to).any { i -> abs(outline[i].z - outline[from].z) > 0.01 || abs(outline[i].thicknessMm - outline[from].thicknessMm) > 0.01 }
+        if (most > tolerance || varies) { if (worst < 0) worst = (from + to) / 2; keep[worst] = true; simplify(from, worst); simplify(worst, to) }
+    }
+    // Split the closed loop at its first point and the point farthest from it.
+    val far = outline.indices.maxBy { hypot(outline[it].x - outline[0].x, outline[it].y - outline[0].y) }
+    keep[0] = true; keep[far] = true
+    simplify(0, far); simplify(far, outline.size)
+    val result = outline.filterIndexed { i, _ -> keep[i] }
+    return if (result.size >= 3) result else outline
+}
 
 /** A circle or oval: one closed path of six or more curved pieces (drawn with the Circle tool). */
 private fun isCircleShape(pieces: List<GuideLine>) = pieces.size >= 6 && pieces.all { it.curveMid != null && it.pathId != null && it.pathId == pieces.first().pathId }
