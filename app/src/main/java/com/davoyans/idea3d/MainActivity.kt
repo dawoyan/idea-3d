@@ -1383,13 +1383,16 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         // Every line of the other views, flattened into this one, so plain lines can be found and lined up with too.
         // Lines of other views are shown here as normal lines; only 3D objects' outlines remain in their view.
         val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }
+        val faces = ModelPlane.entries.filter { it != editPlane }.flatMap { p -> planeStash[p]?.let { g -> g.extrusions.flatMap { e -> extrusionGuides(e, g.guides).map { (p to it.id) to facePositionMm(e) } } }.orEmpty() }.toMap()
         ghostLines = withContext(Dispatchers.Default) { runCatching {
             val here = memberSetup.mapping(memberPlane) ?: return@runCatching emptyList()
             otherGuides.mapNotNull { g ->
                 val own = memberSetup.mapping(g.plane) ?: return@mapNotNull null
                 val pts = if (g.curveMid == null) listOf(g.start, g.end) else (0..16).map { guidePointAt(g, it / 16f) }
                 val out = FloatArray(pts.size * 2)
-                pts.forEachIndexed { i, p -> val t = if (pts.size > 1) i.toDouble() / (pts.size - 1) else 0.0; val q = here.pixel(own.model(p, g.startZMm + (g.endZMm - g.startZMm) * t)); out[i * 2] = q.x; out[i * 2 + 1] = q.y }
+                // Lines of a 3D object sit on its face, where the object is drawn.
+                val f = faces[g.plane to g.id] ?: 0.0
+                pts.forEachIndexed { i, p -> val t = if (pts.size > 1) i.toDouble() / (pts.size - 1) else 0.0; val q = here.pixel(own.model(p, f + g.startZMm + (g.endZMm - g.startZMm) * t)); out[i * 2] = q.x; out[i * 2 + 1] = q.y }
                 (g.plane to g.id) to out
             }
         }.getOrDefault(emptyList()) }
@@ -1698,10 +1701,19 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
 
     /** Where an end point of a line from another view shows in this view. */
+    /**
+     * Where a line's 3D object puts its drawing along the view's depth (0 for lines of no object). Points, outlines
+     * and turns add it, so they sit exactly on the object as it is shown, not a depth-length away.
+     */
+    fun faceOffset(plane: ModelPlane, guideId: Int): Double {
+        val g = planeGeometry(plane)
+        return g.extrusions.firstOrNull { e -> extrusionGuides(e, g.guides).any { it.id == guideId } }?.let(::facePositionMm) ?: 0.0
+    }
     fun ghostPointHere(sel: Triple<ModelPlane, Int, Boolean>): Pt? {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return null; val own = setup.mapping(sel.first) ?: return null
         val g = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
-        return here.pixel(own.model(if (sel.third) g.start else g.end, if (sel.third) g.startZMm else g.endZMm))
+        val f = faceOffset(sel.first, sel.second)
+        return here.pixel(own.model(if (sel.third) g.start else g.end, (if (sel.third) g.startZMm else g.endZMm) + f))
     }
     /** The end point of another view's line nearest [point], within [radius]. */
     fun ghostPointAt(point: Pt, radius: Double): Triple<ModelPlane, Int, Boolean>? =
@@ -1754,7 +1766,15 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     /** An item's outline as polylines in this view's canvas pixels. */
     fun itemOutlineHere(key: Pair<ModelPlane, Int>): List<List<Pt>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList(); val own = setup.mapping(key.first) ?: return emptyList()
-        return itemGuides(key).map { g -> val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1); pts.mapIndexed { i, p -> here.pixel(own.model(p, g.startZMm + (g.endZMm - g.startZMm) * i / n)) } }
+        val f = itemGuides(key).firstOrNull()?.let { faceOffset(key.first, it.id) } ?: 0.0
+        fun loop(at: Double) = itemGuides(key).map { g -> val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1); pts.mapIndexed { i, p -> here.pixel(own.model(p, at + g.startZMm + (g.endZMm - g.startZMm) * i / n)) } }
+        val front = loop(f)
+        // A 3D object: its front and back outlines joined at the corners, so the whole object is framed in any view.
+        val depth = itemGuides(key).firstOrNull()?.let { g0 -> planeGeometry(key.first).let { geo -> geo.extrusions.firstOrNull { e -> extrusionGuides(e, geo.guides).any { it.id == g0.id } } } }?.depthMm ?: 0.0
+        if (depth <= 0.0) return front
+        val back = loop(f - depth)
+        val sides = itemGuides(key).map { g -> listOf(here.pixel(own.model(g.start, f + g.startZMm)), here.pixel(own.model(g.start, f - depth + g.startZMm))) }
+        return front + back + sides
     }
     /** The item under [point]: one drawn here, or one from another view as it shows here. */
     /** The item key of a line shown here: its own view and its id there. */
@@ -3038,11 +3058,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         fun pointModel(sel: Triple<ModelPlane, Int, Boolean>): Vec3? {
             val g = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
             val own = setup.mapping(sel.first) ?: return null
-            return if (sel.third) own.model(g.start, g.startZMm) else own.model(g.end, g.endZMm)
+            val f = faceOffset(sel.first, sel.second)
+            return if (sel.third) own.model(g.start, g.startZMm + f) else own.model(g.end, g.endZMm + f)
         }
         val items = keys.distinctBy { k -> itemGuides(k).minOfOrNull { it.id }?.let { k.first to it } ?: k }
         val loose = points.filterNot { p -> items.any { it.first == p.first && itemGuides(it).any { g -> g.id == p.second } } }
-        val all = items.flatMap { key -> val own = setup.mapping(key.first) ?: return@flatMap emptyList(); itemGuides(key).flatMap { g -> listOf(own.model(g.start, g.startZMm), own.model(g.end, g.endZMm)) } } + loose.mapNotNull(::pointModel)
+        fun itemFace(key: Pair<ModelPlane, Int>) = itemGuides(key).firstOrNull()?.let { faceOffset(key.first, it.id) } ?: 0.0
+        val all = items.flatMap { key -> val own = setup.mapping(key.first) ?: return@flatMap emptyList(); val f = itemFace(key); itemGuides(key).flatMap { g -> listOf(own.model(g.start, g.startZMm + f), own.model(g.end, g.endZMm + f)) } } + loose.mapNotNull(::pointModel)
         if (all.isEmpty()) return
         val center = Vec3((all.minOf { it.x } + all.maxOf { it.x }) / 2, (all.minOf { it.y } + all.maxOf { it.y }) / 2, (all.minOf { it.z } + all.maxOf { it.z }) / 2)
         fun turned(v: Vec3) = center + ModelImport.turn(v - center, axis, deg)
@@ -3053,10 +3075,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val geometry = planeGeometry(plane)
             val ids = itemGuides(key).map { it.id }.toSet()
             if (ids.isEmpty()) return@forEach
+            val face = itemFace(key)
             // Every point of the item, turned, with its model position.
             val moved = geometry.guides.filter { it.id in ids }.associate { g ->
-                val mid = g.curveMid?.let { turned(own.model(it, (g.startZMm + g.endZMm) / 2)) }
-                g.id to Triple(turned(own.model(g.start, g.startZMm)), turned(own.model(g.end, g.endZMm)), mid)
+                val mid = g.curveMid?.let { turned(own.model(it, (g.startZMm + g.endZMm) / 2 + face)) }
+                g.id to Triple(turned(own.model(g.start, g.startZMm + face)), turned(own.model(g.end, g.endZMm + face)), mid)
             }
             val modelPoints = moved.values.flatMap { listOfNotNull(it.first, it.second, it.third) }
             fun flatIn(p: ModelPlane) = modelPoints.map { it dot p.toward }.let { it.max() - it.min() < 0.5 }
@@ -3065,7 +3088,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val there = target?.let { setup.mapping(it) }
             if (target == null || there == null) {
                 // Stays in its view: its lines move there, deeper or shallower where the turn tilts them.
-                val nextGuides = geometry.guides.map { g -> moved[g.id]?.let { (a, b, m) -> g.copy(start = own.pixel(a), end = own.pixel(b), curveMid = m?.let { own.pixel(it) }, startZMm = a dot plane.toward, endZMm = b dot plane.toward) } ?: g }
+                val nextGuides = geometry.guides.map { g -> moved[g.id]?.let { (a, b, m) -> g.copy(start = own.pixel(a), end = own.pixel(b), curveMid = m?.let { own.pixel(it) }, startZMm = (a dot plane.toward) - face, endZMm = (b dot plane.toward) - face) } ?: g }
                 val nextExtrusions = geometry.extrusions.map { e -> if (e !in itemExtrusions) e else e.copy(origin = own.pixel(turned(own.model(e.origin, e.positionZMm))), handle = own.pixel(turned(own.model(e.handle, e.positionZMm)))) }
                 setPlaneShapes(plane, nextGuides, nextExtrusions)
                 return@forEach
@@ -3079,8 +3102,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val groupBase = dest.guides.mapNotNull { it.groupId }.maxOrNull() ?: 0
             val pathIds = geometry.guides.filter { it.id in ids }.mapNotNull { it.pathId }.distinct().withIndex().associate { (i, p) -> p to pathBase + i + 1 }
             val groupIds = geometry.guides.filter { it.id in ids }.mapNotNull { it.groupId }.distinct().withIndex().associate { (i, g) -> g to groupBase + i + 1 }
+            // In its new view the object's drawing sits at its face: Front faces at the drawing, Top and Profile a depth away.
+            val newFace = if (target == ModelPlane.FRONT) 0.0 else itemExtrusions.firstOrNull()?.depthMm ?: 0.0
             val newGuides = geometry.guides.filter { it.id in ids }.map { g -> val (a, b, m) = moved.getValue(g.id)
-                g.copy(id = newIds.getValue(g.id), start = there.pixel(a), end = there.pixel(b), curveMid = m?.let { there.pixel(it) }, startZMm = a dot target.toward, endZMm = b dot target.toward,
+                g.copy(id = newIds.getValue(g.id), start = there.pixel(a), end = there.pixel(b), curveMid = m?.let { there.pixel(it) }, startZMm = (a dot target.toward) - newFace, endZMm = (b dot target.toward) - newFace,
                     pathId = g.pathId?.let(pathIds::get), groupId = g.groupId?.let(groupIds::get), plane = target, midDepthMm = null) }
             var nextExtrusion = (dest.extrusions.maxOfOrNull { it.id } ?: 0) + 1
             val pts = newGuides.flatMap { listOf(it.start, it.end) }
@@ -5479,7 +5504,9 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     val materialName = guide.materialId?.let(materialNames::get)?.takeIf { firstOfObject }
                     val circle = guide.pathId != null && objectGuides.size >= 6 && objectGuides.all { it.curveMid != null }
                     val circleKey = if (circle) objectGuides.map { it.start }.let { p -> listOf(p.minOf { it.x }, p.minOf { it.y }, p.maxOf { it.x }, p.maxOf { it.y }).map { it.roundToInt() } } else null
-                    if (circle && firstOfObject && showSizes && labeledCircles.add(circleKey!!)) drawingScale?.takeIf { it > 0 }?.let { pxPerUnit ->
+                    // Seen edge-on (from another view) a circle is a line: no label there.
+                    val edgeOn = circleKey != null && (circleKey[2] - circleKey[0] < 2 || circleKey[3] - circleKey[1] < 2)
+                    if (circle && firstOfObject && showSizes && !edgeOn && labeledCircles.add(circleKey!!)) drawingScale?.takeIf { it > 0 }?.let { pxPerUnit ->
                         val pts = objectGuides.map { it.start }
                         val diameterPx = pts.maxOf { a -> pts.maxOf { b -> distance(a, b) } }
                         val center = viewAt(Pt(pts.map { it.x }.average().toFloat(), pts.minOf { it.y }))
