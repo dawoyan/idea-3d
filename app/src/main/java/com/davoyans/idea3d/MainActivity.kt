@@ -1037,7 +1037,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     fun allGuides() = ModelPlane.entries.flatMap { planeGeometry(it).guides }
     fun allExtrusions() = ModelPlane.entries.flatMap { planeGeometry(it).extrusions }
     /** Lines of [full] that outline one of its 3D objects (these stay in their view, edited through the object). */
-    fun objectLines(full: PlaneGeometry): Set<Int> = full.extrusions.flatMap { e -> extrusionGuides(e, full.guides).map { it.id } }.toSet()
+    fun objectLines(full: PlaneGeometry): Set<Int> = full.extrusions.flatMap { e -> val outline = extrusionGuides(e, full.guides); (outline + holesInside(outline, full.guides)).map { it.id } }.toSet()
     /** Shows [next]: its own geometry plus every other view's lines projected into it. [full] is every view's complete geometry. */
     fun showView(next: ModelPlane, full: Map<ModelPlane, PlaneGeometry>) {
         // Every view's calibration has to be in place before converting, or lines change size on each switch.
@@ -1393,7 +1393,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val memberGuides = allGuides().filter { it.materialId != null }; val memberSetup = modelSetup(); val memberPlane = editPlane; val materialMap = materials.associateBy { it.id }
         // Every line of the other views, flattened into this one, so plain lines can be found and lined up with too.
         // Lines of other views are shown here as normal lines; only 3D objects' outlines remain in their view.
-        val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }
+        // A hole is part of its object; it is never drawn as a line of its own in other views.
+        val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }.filterNot { it.hole }
         // An object's lines, and its holes' lines, sit on its face.
         val faces = ModelPlane.entries.filter { it != editPlane }.flatMap { p -> planeStash[p]?.let { g -> g.extrusions.flatMap { e -> val outline = extrusionGuides(e, g.guides); (outline + holesInside(outline, g.guides)).map { (p to it.id) to facePositionMm(e) } } }.orEmpty() }.toMap()
         ghostLines = withContext(Dispatchers.Default) { runCatching {
@@ -2534,8 +2535,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if ((operation == "cut-first" || operation == "cut-second") && target != null && razor != null && shapePoints(razor).all { pointInsidePolygon(it, shapePoints(target)) }) {
             pushUndo()
             val holeIds = razor.map { it.id }.toSet()
-            guides = guides.map { if (it.id in holeIds) it.copy(hole = true, fillTransparency = null, materialId = null) else it }
+            val z = target.map { (it.startZMm + it.endZMm) / 2 }.average()
+            guides = guides.map { if (it.id in holeIds) it.copy(hole = true, fillTransparency = null, materialId = null, startZMm = z, endZMm = z) else it }
+            val gone = extrusions.filter { e -> e.guideIds.any { it in holeIds } }.map { editPlane to it.id }.toSet()
             extrusions = extrusions.filterNot { e -> e.guideIds.any { it in holeIds } }
+            solidOps = solidOps.filterNot { it.target in gone || it.tool in gone }
             logToast(context, "Cut a hole: the inner shape is now a hole that goes through in 3D", Toast.LENGTH_SHORT).show()
             return
         }
@@ -6576,23 +6580,45 @@ private fun nextGuidePathId(guides: List<GuideLine>) = (guides.mapNotNull { it.p
 private fun SavedProject.withPositiveIds(): SavedProject = withPositiveIdsOnly().withHolesAttached()
 
 /**
- * Holes sit exactly at their shape's depth (older versions could leave them apart), and a hole no longer inside any
- * shape becomes an ordinary shape again.
+ * Makes every cut-out a real hole of one object, whatever older versions left behind:
+ * - an old 3D-only cut whose cutter lies inside the shape (same view) becomes a hole in that shape;
+ * - a hole never has a 3D body of its own, nor takes part in 3D cuts or joins;
+ * - a hole sits at its shape's depth; the same hole twice is kept once;
+ * - a hole no longer inside any shape becomes an ordinary shape again.
  */
 private fun SavedProject.withHolesAttached(): SavedProject {
-    if (guides.none { it.hole }) return this
-    val fixed = guides.groupBy { it.plane }.flatMap { (_, list) ->
-        val holes = list.filter { it.hole }
-        if (holes.isEmpty()) return@flatMap list
-        val byId = holes.associate { h ->
-            val container = holeContainer(h, list)
-            h.id to (container?.let { c -> list.filter { sameGuideObject(it, c) } })
-        }
-        list.map { g ->
-            if (!g.hole) g else byId[g.id]?.let { outer -> val z = outer.map { (it.startZMm + it.endZMm) / 2 }.average(); g.copy(startZMm = z, endZMm = z) } ?: g.copy(hole = false)
+    var lines = guides
+    var objects = extrusions
+    var ops = solidOps
+    fun outline(e: Extrusion): List<GuideLine>? = lines.filter { it.plane == e.plane }.let { planeLines -> val edges = extrusionGuides(e, planeLines); closedGuideShapes(planeLines).firstOrNull { p -> p.any { g -> edges.any { it.id == g.id } } } }
+    // 1. Old 3D cuts with the cutter inside the shape become holes.
+    ops.filter { !it.join && it.target.first == it.tool.first }.forEach { op ->
+        val target = objects.firstOrNull { it.plane == op.target.first && it.id == op.target.second } ?: return@forEach
+        val tool = objects.firstOrNull { it.plane == op.tool.first && it.id == op.tool.second } ?: return@forEach
+        val outer = outline(target) ?: return@forEach; val inner = outline(tool) ?: return@forEach
+        val outerPts = shapePoints(outer)
+        if (!shapePoints(inner).all { pointInsidePolygon(it, outerPts) }) return@forEach
+        val ids = inner.map { it.id }.toSet()
+        lines = lines.map { if (it.plane == tool.plane && it.id in ids) it.copy(hole = true, materialId = null, fillTransparency = null) else it }
+        objects = objects.filterNot { it === tool }
+        ops = ops.filterNot { it === op }
+    }
+    // 2. Holes have no body of their own.
+    val holeBodies = objects.filter { e -> val edges = extrusionGuides(e, lines.filter { it.plane == e.plane }); edges.isNotEmpty() && edges.all { it.hole } }
+    objects = objects.filterNot { it in holeBodies }
+    val keys = objects.map { it.plane to it.id }.toSet()
+    ops = ops.filter { it.target in keys && it.tool in keys }
+    // 3. Holes at their shape's depth, duplicates once, orphans plain shapes again.
+    lines = lines.groupBy { it.plane }.flatMap { (_, list) ->
+        val holePaths = closedGuideShapes(list).filter { p -> p.all { it.hole } }
+        val seen = mutableSetOf<List<Int>>(); val dropped = mutableSetOf<Int>()
+        holePaths.forEach { p -> val pts = shapePoints(p); val key = listOf(pts.minOf { it.x }, pts.minOf { it.y }, pts.maxOf { it.x }, pts.maxOf { it.y }).map { it.roundToInt() }
+            if (!seen.add(key)) dropped += p.map { it.id } }
+        list.filterNot { it.id in dropped }.map { g ->
+            if (!g.hole) g else holeContainer(g, list)?.let { c -> val outer = list.filter { sameGuideObject(it, c) }; val z = outer.map { (it.startZMm + it.endZMm) / 2 }.average(); g.copy(startZMm = z, endZMm = z) } ?: g.copy(hole = false)
         }
     }
-    return copy(guides = fixed)
+    return copy(guides = lines, extrusions = objects, solidOps = ops)
 }
 
 private fun SavedProject.withPositiveIdsOnly(): SavedProject {
