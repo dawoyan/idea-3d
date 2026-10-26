@@ -5339,9 +5339,13 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     if (guide.curveMid != null) {
                         val mid = viewAt(guide.curveMid)
                         val path = androidx.compose.ui.graphics.Path().apply { moveTo(start.x, start.y); quadraticTo(2f * mid.x - (start.x + end.x) / 2f, 2f * mid.y - (start.y + end.y) / 2f, end.x, end.y) }
-                        drawPath(path, if (!separator && guide.id == selectedGuideId && tool != Tool.LINES) Color(0xFFCF2020) else lineColor, style = Stroke(width * zoom))
+                        // A selected curved shape (a circle, say) turns red as a whole.
+                        val chosen = !separator && tool != Tool.LINES && selectedGuide != null && sameGuideObject(guide, selectedGuide)
+                        drawPath(path, if (chosen) Color(0xFFCF2020) else lineColor, style = Stroke(width * zoom))
                         if (!separator) drawPath(path, Color.White, style = Stroke((guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * zoom))
-                        if (guide.id == selectedGuideId && (tool == Tool.LINES || tool == Tool.ADJUST)) {
+                        // A single curve shows its end dots and its bend handle; a circle's pieces don't.
+                        val circlePiece = guide.pathId != null && guides.count { it.pathId == guide.pathId && it.plane == guide.plane } >= 6 && guides.filter { it.pathId == guide.pathId && it.plane == guide.plane }.all { it.curveMid != null }
+                        if (!circlePiece && guide.id == selectedGuideId && (tool == Tool.LINES || tool == Tool.ADJUST)) {
                             listOf(start, end).forEach { drawCircle(guideColor(guide.colorIndex), 6.dp.toPx(), it); drawCircle(Color.White, 3.dp.toPx(), it) }
                             drawCircle(Color.White, 10.dp.toPx(), mid)
                             drawCircle(if (curveBlink) Color(0xFF0066BE) else Color.White, 8.dp.toPx(), mid)
@@ -5394,13 +5398,14 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 // Joints inside a smooth curved outline (a circle's pieces) get no dot.
                 fun smoothJoint(p: Pt, g: GuideLine) = g.curveMid != null && g.pathId != null && guides.count { o -> o.pathId == g.pathId && o.curveMid != null && (distance(o.start, p) < 0.6 || distance(o.end, p) < 0.6) } >= 2
                 guides.sortedBy { if (selectedGuide != null && sameGuideObject(it, selectedGuide)) 0 else 1 }
-                    .flatMap { guide -> listOf(guide.start to guide, guide.end to guide) }.filterNot { (p, g) -> smoothJoint(p, g) && !(selectedGuide != null && sameGuideObject(g, selectedGuide)) }
+                    .flatMap { guide -> listOf(guide.start to guide, guide.end to guide) }.filterNot { (p, g) -> smoothJoint(p, g) }
                     .fold(emptyList<Pair<Pt, GuideLine>>()) { vertices, vertex -> if (vertices.any { distance(it.first, vertex.first) < 0.6 }) vertices else vertices + vertex }
                     .forEach { (point, guide) ->
                         val center = viewAt(point)
                         val active = selectedGuide != null && sameGuideObject(guide, selectedGuide)
-                        drawCircle(guideColor(guide.colorIndex), if (active) (guide.strokeWidth + 5f) * zoom else 3.dp.toPx(), center)
-                        if (active) drawCircle(Color.White, (guide.strokeWidth * 0.55f).coerceAtLeast(3f) * zoom, center)
+                        // The same size on screen at any zoom, so dots never swallow the drawing.
+                        drawCircle(guideColor(guide.colorIndex), if (active) 6.dp.toPx() else 3.dp.toPx(), center)
+                        if (active) drawCircle(Color.White, 2.5.dp.toPx(), center)
                         // A line pointing straight into the screen shows as a ring.
                         if ((viewAt(guide.start) - viewAt(guide.end)).getDistance() < 4f) drawCircle(guideColor(guide.colorIndex), 7.dp.toPx(), center, style = Stroke(2.dp.toPx()))
                     }
