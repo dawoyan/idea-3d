@@ -953,6 +953,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var selectedModelId by remember { mutableStateOf<Int?>(null) }
     var modelDialogId by remember { mutableStateOf<Int?>(null) }
     var modelDragLast by remember { mutableStateOf<Pt?>(null) }
+    // Views shown from the other side (Back, Bottom, Left): the same plane, mirrored.
+    var mirroredViews by remember { mutableStateOf(emptySet<ModelPlane>()) }
     // How far one tap on a turn button turns: 15°, 90° or 5°.
     var turnStep by remember { mutableStateOf(15.0) }
     /** The front canvas is the picture; Top and Profile canvases start at the picture's size and can be cropped or grown. */
@@ -1342,7 +1344,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val canvas = planeCanvas ?: return
         val viewW = editorViewSize.width; val viewH = editorViewSize.height
         if (viewW < 10f || viewH < 10f) return
-        val bounds = focus ?: contentBounds() ?: run { zoom = 1f; pan = Offset.Zero; return }
+        val raw = focus ?: contentBounds() ?: run { zoom = 1f; pan = Offset.Zero; return }
+        // A mirrored view (Back, Bottom, Left) shows the content mirrored on the canvas.
+        val flipX = editPlane in mirroredViews && editPlane != ModelPlane.TOP; val flipY = editPlane == ModelPlane.TOP && editPlane in mirroredViews
+        val bounds = floatArrayOf(if (flipX) canvas.width - raw[2] else raw[0], if (flipY) canvas.height - raw[3] else raw[1], if (flipX) canvas.width - raw[0] else raw[2], if (flipY) canvas.height - raw[1] else raw[3])
         val minX = bounds[0]; val minY = bounds[1]; val maxX = bounds[2]; val maxY = bounds[3]
         val baseFit = min(viewW / canvas.width, viewH / canvas.height)
         // Leave room around the content for handles.
@@ -3166,7 +3171,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -3265,7 +3270,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 tool == Tool.NONE && foreign.isNotEmpty() -> "Choose a tool. Use Adjust to move or resize shapes, including the grey ones"
                 else -> null
             }
-            val axesHint = if (show3d) "" else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
+            val axesHint = if (show3d) "" else if (editPlane in mirroredViews) when (editPlane) { ModelPlane.FRONT -> "X ←  Y ↑  from behind"; ModelPlane.TOP -> "X →  Z ↑ front  from below"; ModelPlane.PROFILE -> "Z → front  Y ↑  from the left" }
+                else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
             StatusStrip(tool, drawingEnd = draftStart != null, hint = editHint) {
                 val red = Color(0xFFB3261E)
                 // Always first, in the same place: fit everything in view, and show or hide sizes.
@@ -3365,7 +3371,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     }
                 }
             }
-            PlaneSwitcher(editPlane, show3d, axesHint, onPlane = { leave3d(); switchPlane(it) })
+            PlaneSwitcher(editPlane, show3d, axesHint, mirroredViews, onPlane = { plane, flip ->
+                mirroredViews = if (flip) mirroredViews + plane else mirroredViews - plane
+                leave3d(); if (plane != editPlane) switchPlane(plane) else fitView()
+            })
             val model = viewerModel
             if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, initialSun = ((extrusions.firstOrNull()?.sun?.x ?: ((bitmap?.width ?: 1) * 0.15f)) / (bitmap?.width ?: 1)).coerceIn(0f, 1f), onSunChange = { position ->
                 val width = bitmap?.width ?: 1
@@ -3376,7 +3385,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -4325,10 +4334,29 @@ private fun imageDisplayName(context: Context, uri: Uri): String {
 }
 
 /** Picks the drawing plane. Every plane has the same tools; shapes drawn in Top extrude along Y, in Profile along X. */
-@Composable private fun PlaneSwitcher(plane: ModelPlane, showing3d: Boolean, axes: String, onPlane: (ModelPlane) -> Unit) {
-    Row(Modifier.fillMaxWidth().background(Color(0xFFF2F5F4)).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+/** The view from the other side of each plane: Back, Bottom, Left. */
+private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -> "Back"; ModelPlane.TOP -> "Bottom"; ModelPlane.PROFILE -> "Left" }
+
+/**
+ * Front, Top and Profile. A tap shows a view from the side last chosen for it; a long press offers both sides
+ * (Front or Back, Top or Bottom, Profile (right) or Left).
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable private fun PlaneSwitcher(plane: ModelPlane, showing3d: Boolean, axes: String, mirrored: Set<ModelPlane>, onPlane: (ModelPlane, Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().background(Color(0xFFF2F5F4)).padding(horizontal = 8.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         ModelPlane.entries.forEach { candidate ->
-            FilterChip(selected = !showing3d && plane == candidate, onClick = { onPlane(candidate) }, label = { Text(candidate.label, fontSize = 13.sp) })
+            var menu by remember { mutableStateOf(false) }
+            val selected = !showing3d && plane == candidate
+            val flipped = candidate in mirrored
+            Box {
+                Text((if (flipped) oppositeLabel(candidate) else candidate.label) + " ▾", fontSize = 13.sp, color = Color(0xFF1B2B28), maxLines = 1,
+                    modifier = Modifier.background(if (selected) Color(0xFFE8DEF8) else Color.Transparent, RoundedCornerShape(8.dp)).border(1.dp, if (selected) Color.Transparent else Color(0xFF79747E), RoundedCornerShape(8.dp))
+                        .combinedClickable(onClick = { onPlane(candidate, flipped) }, onLongClick = { menu = true }).padding(horizontal = 12.dp, vertical = 6.dp))
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text(if (candidate == ModelPlane.PROFILE) "Profile (from the right)" else candidate.label) }, onClick = { menu = false; onPlane(candidate, false) })
+                    DropdownMenuItem(text = { Text("${oppositeLabel(candidate)} (mirrored ${candidate.label.lowercase()})") }, onClick = { menu = false; onPlane(candidate, true) })
+                }
+            }
         }
         Spacer(Modifier.weight(1f))
         Text(axes, fontSize = 11.sp, color = Color(0xFF4D5A57), maxLines = 1)
@@ -4660,7 +4688,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -4687,10 +4715,15 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
             val useFit = baseFit * useZoom
             val useLeft = (viewW - bitmap.width * useFit) / 2f + usePan.x
             val useTop = (viewH - bitmap.height * useFit) / 2f + usePan.y
-            val x = (unrotatedView.x - useLeft) / useFit; val y = (unrotatedView.y - useTop) / useFit
+            val shown = Pt((unrotatedView.x - useLeft) / useFit, (unrotatedView.y - useTop) / useFit)
+            val x = if (mirrorX) bitmap.width - shown.x else shown.x; val y = if (mirrorY) bitmap.height - shown.y else shown.y
             return if (blankCanvas) Pt(x, y) else Pt(x.coerceIn(0f, bitmap.width.toFloat()), y.coerceIn(0f, bitmap.height.toFloat()))
         }
-        fun viewAt(p: Pt) = Offset(left + p.x * fit, top + p.y * fit)
+        // Back, Bottom and Left views show their plane mirrored: an image point and its mirror swap places on screen.
+        fun mirrored(p: Pt) = Pt(if (mirrorX) bitmap.width - p.x else p.x, if (mirrorY) bitmap.height - p.y else p.y)
+        fun viewAt(p: Pt): Offset = mirrored(p).let { Offset(left + it.x * fit, top + it.y * fit) }
+        /** (x, y) pairs mirrored like [mirrored]. */
+        fun mirroredPairs(values: FloatArray): FloatArray = if (!mirrorX && !mirrorY) values else FloatArray(values.size) { i -> if (i % 2 == 0) (if (mirrorX) bitmap.width - values[i] else values[i]) else (if (mirrorY) bitmap.height - values[i] else values[i]) }
         val latestZoom = rememberUpdatedState(zoom)
         val latestPan = rememberUpdatedState(pan)
         val latestDragStart = rememberUpdatedState(onDragStart)
@@ -4830,7 +4863,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val distance = pressed.map { hypot((it.position.x - centroid.x).toDouble(), (it.position.y - centroid.y).toDouble()).toFloat() }.average().toFloat()
                         if (lastDistance > 0f) {
                             val nextZoom = (localZoom * (distance / lastDistance)).coerceIn(0.1f, 8f)
-                            val focus = sourceAt(lastCentroid, localZoom, localPan)
+                            val focus = sourceAt(lastCentroid, localZoom, localPan).let { Pt(if (mirrorX) bitmap.width - it.x else it.x, if (mirrorY) bitmap.height - it.y else it.y) }
                             val nextFit = baseFit * nextZoom
                             val unrotatedCentroid = rotateView(centroid, -rotation)
                             localPan = Offset(unrotatedCentroid.x - focus.x * nextFit - (viewW - bitmap.width * nextFit) / 2f, unrotatedCentroid.y - focus.y * nextFit - (viewH - bitmap.height * nextFit) / 2f)
@@ -4927,11 +4960,14 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
         Canvas(Modifier.fillMaxSize().clipToBounds().then(touch)) {
             withTransform({ rotate(rotation, pivot) }) {
                 drawRect(Color.White, topLeft = Offset(left, top), size = Size(imageW, imageH))
-                drawImage(bitmap.asImageBitmap(), dstOffset = androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()), dstSize = androidx.compose.ui.unit.IntSize(imageW.toInt(), imageH.toInt()), alpha = 1f - pictureOptions.transparency / 100f)
+                // A mirrored view shows the picture mirrored too.
+                withTransform({ scale(if (mirrorX) -1f else 1f, if (mirrorY) -1f else 1f, Offset(left + imageW / 2f, top + imageH / 2f)) }) {
+                    drawImage(bitmap.asImageBitmap(), dstOffset = androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()), dstSize = androidx.compose.ui.unit.IntSize(imageW.toInt(), imageH.toInt()), alpha = 1f - pictureOptions.transparency / 100f)
+                }
                 if (ghosts.isNotEmpty()) drawIntoCanvas { canvas ->
                     // Drawn opaque into a translucent layer so overlapping faces don't darken.
                     canvas.saveLayer(androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height), androidx.compose.ui.graphics.Paint().apply { alpha = 0.3f })
-                    ghosts.forEach { (argb, triangles) -> drawPath(trianglePath(triangles, left, top, fit), Color(argb).copy(alpha = 1f)) }
+                    ghosts.forEach { (argb, triangles) -> drawPath(trianglePath(mirroredPairs(triangles), left, top, fit), Color(argb).copy(alpha = 1f)) }
                     canvas.restore()
                 }
                 // Top and Profile canvases put the front drawing plane (Z = 0) across their middle.
@@ -4945,32 +4981,32 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 ghostLines.forEach { (key, pts) ->
                     val chosen = key == highlightGhost
                     var i = 0
-                    while (i + 3 < pts.size) { drawLine(if (chosen) Color(0xFF1565C0) else Color(0xFF37474F), Offset(left + pts[i] * fit, top + pts[i + 1] * fit), Offset(left + pts[i + 2] * fit, top + pts[i + 3] * fit), strokeWidth = if (chosen) 10f else 5f, cap = androidx.compose.ui.graphics.StrokeCap.Round); i += 2 }
+                    while (i + 3 < pts.size) { drawLine(if (chosen) Color(0xFF1565C0) else Color(0xFF37474F), viewAt(Pt(pts[i], pts[i + 1])), viewAt(Pt(pts[i + 2], pts[i + 3])), strokeWidth = if (chosen) 10f else 5f, cap = androidx.compose.ui.graphics.StrokeCap.Round); i += 2 }
                     // End dots show which points can be grabbed here.
-                    drawCircle(Color(0xFF455A64), 9f, Offset(left + pts[0] * fit, top + pts[1] * fit)); drawCircle(Color(0xFF455A64), 9f, Offset(left + pts[pts.size - 2] * fit, top + pts[pts.size - 1] * fit))
+                    drawCircle(Color(0xFF455A64), 9f, viewAt(Pt(pts[0], pts[1]))); drawCircle(Color(0xFF455A64), 9f, viewAt(Pt(pts[pts.size - 2], pts[pts.size - 1])))
                     // A line seen end-on is a single point here: mark it so it can't vanish.
-                    if (chosen || pts.size >= 4 && hypot((pts[pts.size - 2] - pts[0]).toDouble(), (pts[pts.size - 1] - pts[1]).toDouble()) * fit < 6) drawCircle(if (chosen) Color(0xFF1565C0) else Color(0xFF6E7A76), if (chosen) 12f else 8f, Offset(left + pts[0] * fit, top + pts[1] * fit))
+                    if (chosen || pts.size >= 4 && hypot((pts[pts.size - 2] - pts[0]).toDouble(), (pts[pts.size - 1] - pts[1]).toDouble()) * fit < 6) drawCircle(if (chosen) Color(0xFF1565C0) else Color(0xFF6E7A76), if (chosen) 12f else 8f, viewAt(Pt(pts[0], pts[1])))
                 }
                 // Picked items: a wide orange band for a whole object (shape, broken line, 3D object), a thin one for a single line.
                 pickedOutlines.forEach { (pts, whole) -> pts.zipWithNext().forEach { (a, b) ->
-                    val from = Offset(left + a.x * fit, top + a.y * fit); val to = Offset(left + b.x * fit, top + b.y * fit)
+                    val from = viewAt(Pt(a.x, a.y)); val to = viewAt(Pt(b.x, b.y))
                     if (whole) { drawLine(Color(0x88FF8F00), from, to, strokeWidth = 11.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round); drawLine(Color(0xFFE65100), from, to, strokeWidth = 1.5.dp.toPx()) }
                     else drawLine(Color(0xCCFF8F00), from, to, strokeWidth = 6.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
                 } }
                 itemRect?.let { (a, b) ->
-                    val tl = Offset(left + min(a.x, b.x) * fit, top + min(a.y, b.y) * fit)
+                    val tl = viewAt(a).let { p -> viewAt(b).let { q -> Offset(min(p.x, q.x), min(p.y, q.y)) } }
                     drawRect(Color(0x33FF8F00), tl, Size(abs(a.x - b.x) * fit, abs(a.y - b.y) * fit)); drawRect(Color(0xFFFF8F00), tl, Size(abs(a.x - b.x) * fit, abs(a.y - b.y) * fit), style = Stroke(3f))
                 }
                 // Picked points: a ring around each.
-                ghostPointMarks.forEach { p -> val c = Offset(left + p.x * fit, top + p.y * fit); drawCircle(Color.White, 11.dp.toPx(), c, style = Stroke(4.dp.toPx())); drawCircle(Color(0xFFE65100), 11.dp.toPx(), c, style = Stroke(2.5.dp.toPx())) }
-                ghostPointMark?.let { p -> val c = Offset(left + p.x * fit, top + p.y * fit); drawCircle(Color.White, 22f, c); drawCircle(Color(0xFFE65100), 22f, c, style = Stroke(7f)); drawCircle(Color(0xFFE65100), 8f, c) }
+                ghostPointMarks.forEach { p -> val c = viewAt(Pt(p.x, p.y)); drawCircle(Color.White, 11.dp.toPx(), c, style = Stroke(4.dp.toPx())); drawCircle(Color(0xFFE65100), 11.dp.toPx(), c, style = Stroke(2.5.dp.toPx())) }
+                ghostPointMark?.let { p -> val c = viewAt(Pt(p.x, p.y)); drawCircle(Color.White, 22f, c); drawCircle(Color(0xFFE65100), 22f, c, style = Stroke(7f)); drawCircle(Color(0xFFE65100), 8f, c) }
                 foreignOverlay?.let { overlay ->
                     // The selected object from another plane, its handles and its outline points.
                     val accent = Color(0xFF1565C0)
-                    fun screen(p: Pt) = Offset(left + p.x * fit, top + p.y * fit)
+                    fun screen(p: Pt) = viewAt(Pt(p.x, p.y))
                     drawIntoCanvas { canvas ->
                         canvas.saveLayer(androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height), androidx.compose.ui.graphics.Paint().apply { alpha = 0.45f })
-                        val path = trianglePath(overlay.triangles, left, top, fit)
+                        val path = trianglePath(mirroredPairs(overlay.triangles), left, top, fit)
                         drawPath(path, accent)
                         canvas.restore()
                     }
@@ -4989,7 +5025,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
             }
             joinPick?.let { pick ->
                 // The parts of the crossing lines: blinking ones can be chosen, green ones are kept, red blinking ones will be deleted.
-                fun screen(p: Pt) = Offset(left + p.x * fit, top + p.y * fit)
+                fun screen(p: Pt) = viewAt(Pt(p.x, p.y))
                 val center = screen(pick.action.point)
                 pick.arms.forEachIndexed { index, arm ->
                     val end = screen(arm.endpoint)
@@ -5285,7 +5321,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     Text(if (zMm == null) "Δ${DepthWords.axis} —" else "Δ${DepthWords.axis} ${formatMeasure(zMm / unitFactorMm(unit), unit)} $unit", color = Color.White, fontSize = 12.sp)
                 }
             }
-            FineAdjustPad(onNudge)
+            FineAdjustPad { dx, dy -> onNudge(if (mirrorX) -dx else dx, if (mirrorY) -dy else dy) }
         }
     }
 }
