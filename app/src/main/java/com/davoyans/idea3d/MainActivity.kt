@@ -1388,13 +1388,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         pan = Offset(viewW / 2f - (minX + maxX) / 2f * fit - (viewW - canvas.width * fit) / 2f, viewH / 2f - (minY + maxY) / 2f * fit - (viewH - canvas.height * fit) / 2f)
     }
     // Objects from the other planes, flattened into this plane's canvas so they can be lined up with, selected and reshaped here.
-    LaunchedEffect(projectId, editPlane, planeStash, planeFrames, scale, unit, bitmap, guides, materials) {
+    LaunchedEffect(projectId, editPlane, planeStash, planeFrames, scale, unit, bitmap, guides, materials, solidOps) {
         if (bitmap == null) return@LaunchedEffect
         val memberGuides = allGuides().filter { it.materialId != null }; val memberSetup = modelSetup(); val memberPlane = editPlane; val materialMap = materials.associateBy { it.id }
         // Every line of the other views, flattened into this one, so plain lines can be found and lined up with too.
         // Lines of other views are shown here as normal lines; only 3D objects' outlines remain in their view.
         val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }
-        val faces = ModelPlane.entries.filter { it != editPlane }.flatMap { p -> planeStash[p]?.let { g -> g.extrusions.flatMap { e -> extrusionGuides(e, g.guides).map { (p to it.id) to facePositionMm(e) } } }.orEmpty() }.toMap()
+        // An object's lines, and its holes' lines, sit on its face.
+        val faces = ModelPlane.entries.filter { it != editPlane }.flatMap { p -> planeStash[p]?.let { g -> g.extrusions.flatMap { e -> val outline = extrusionGuides(e, g.guides); (outline + holesInside(outline, g.guides)).map { (p to it.id) to facePositionMm(e) } } }.orEmpty() }.toMap()
         ghostLines = withContext(Dispatchers.Default) { runCatching {
             val here = memberSetup.mapping(memberPlane) ?: return@runCatching emptyList()
             otherGuides.mapNotNull { g ->
@@ -1416,13 +1417,16 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }.getOrDefault(emptyList()) }
         val others = ModelPlane.entries.filter { it != editPlane }.map { planeGeometry(it) }
-        val plane = editPlane; val setup = modelSetup()
+        val plane = editPlane; val setup = modelSetup(); val solidOpsNow = solidOps
         foreign = withContext(Dispatchers.Default) { runCatching {
             val here = setup.mapping(plane) ?: return@runCatching emptyList()
             val objects = mutableListOf<Extrusion>()
             val specs = buildSolidSpecs(others.flatMap { it.guides }, others.flatMap { it.extrusions }, setup, objects, strict = false)
             val axes = listOf(Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0))
+            // A 3D cut's or join's tool that was used up is gone from the model, so it isn't shown here either.
+            val usedUp = solidOpsNow.filter { it.join || !it.keepTool }.map { it.tool }.toSet()
             specs.zip(objects).mapNotNull { (spec, extrusion) ->
+                if ((extrusion.plane to extrusion.id) in usedUp) return@mapNotNull null
                 val mesh = runCatching { MeshBuilder.extrude(spec) }.getOrNull() ?: return@mapNotNull null
                 val own = setup.mapping(extrusion.plane) ?: return@mapNotNull null
                 val half = mesh.vertices.size / 2
@@ -6569,7 +6573,29 @@ private fun nextGuidePathId(guides: List<GuideLine>) = (guides.mapNotNull { it.p
  * Repairs projects saved while new lines could get negative ids (when a view showed only other views' lines): such
  * ids, path and group numbers get fresh positive ones in their view, and objects and groups follow.
  */
-private fun SavedProject.withPositiveIds(): SavedProject {
+private fun SavedProject.withPositiveIds(): SavedProject = withPositiveIdsOnly().withHolesAttached()
+
+/**
+ * Holes sit exactly at their shape's depth (older versions could leave them apart), and a hole no longer inside any
+ * shape becomes an ordinary shape again.
+ */
+private fun SavedProject.withHolesAttached(): SavedProject {
+    if (guides.none { it.hole }) return this
+    val fixed = guides.groupBy { it.plane }.flatMap { (_, list) ->
+        val holes = list.filter { it.hole }
+        if (holes.isEmpty()) return@flatMap list
+        val byId = holes.associate { h ->
+            val container = holeContainer(h, list)
+            h.id to (container?.let { c -> list.filter { sameGuideObject(it, c) } })
+        }
+        list.map { g ->
+            if (!g.hole) g else byId[g.id]?.let { outer -> val z = outer.map { (it.startZMm + it.endZMm) / 2 }.average(); g.copy(startZMm = z, endZMm = z) } ?: g.copy(hole = false)
+        }
+    }
+    return copy(guides = fixed)
+}
+
+private fun SavedProject.withPositiveIdsOnly(): SavedProject {
     if (guides.none { it.id <= 0 || (it.pathId ?: 1) <= 0 || (it.groupId ?: 1) <= 0 }) return this
     val idMap = HashMap<Pair<ModelPlane, Int>, Int>()
     val fixed = guides.groupBy { it.plane }.flatMap { (plane, list) ->
