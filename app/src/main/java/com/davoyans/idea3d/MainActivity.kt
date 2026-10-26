@@ -1426,7 +1426,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val planeGuides = others.flatMap { it.guides }.filter { it.plane == extrusion.plane }
                 val endpoints = mutableListOf<Triple<Pt, Double, Double>>()
                 val depthMm = extrusion.depthMm ?: 0.0
-                extrusionGuides(extrusion, planeGuides).forEach { edge ->
+                // A circle's joints aren't points to move; it is resized as a whole.
+                extrusionGuides(extrusion, planeGuides).takeUnless(::isCircleShape).orEmpty().forEach { edge ->
                     listOf(Triple(edge.start, edge.startZMm, edge.startThicknessMm ?: depthMm), Triple(edge.end, edge.endZMm, edge.endThicknessMm ?: depthMm)).forEach { e -> if (endpoints.none { distance(it.first, e.first) < 0.5 }) endpoints += e }
                 }
                 val face = facePositionMm(extrusion)
@@ -1704,7 +1705,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     /** The end point of another view's line nearest [point], within [radius]. */
     fun ghostPointAt(point: Pt, radius: Double): Triple<ModelPlane, Int, Boolean>? =
-        ModelPlane.entries.filter { it != editPlane }.flatMap { plane -> planeGeometry(plane).guides.flatMap { g -> listOf(Triple(plane, g.id, true), Triple(plane, g.id, false)) } }
+        ModelPlane.entries.filter { it != editPlane }.flatMap { plane -> pointGuides(planeGeometry(plane).guides).flatMap { g -> listOf(Triple(plane, g.id, true), Triple(plane, g.id, false)) } }
             .mapNotNull { sel -> ghostPointHere(sel)?.let { sel to distance(it, point) } }.filter { it.second <= radius }.minByOrNull { it.second }?.first
     /** Moves an end point of another view's line by a model-space [delta]: along its own drawing and in its depth (Z for Front). */
     fun moveGhostPoint(sel: Triple<ModelPlane, Int, Boolean>, delta: Vec3) {
@@ -1727,7 +1728,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     /** Every line end in every view (one per spot of each line object), as it shows here. */
     fun allPointsHere(): List<Pair<Triple<ModelPlane, Int, Boolean>, Pt>> {
         val out = mutableListOf<Pair<Triple<ModelPlane, Int, Boolean>, Pt>>()
-        ModelPlane.entries.forEach { plane -> planeGeometry(plane).guides.forEach { g ->
+        ModelPlane.entries.forEach { plane -> pointGuides(planeGeometry(plane).guides).forEach { g ->
             listOf(Triple(plane, g.id, true), Triple(plane, g.id, false)).forEach { sel ->
                 val at = ghostPointHere(sel) ?: return@forEach
                 // Shared corners are one point.
@@ -1811,7 +1812,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     /** End points of other views' lines inside a box, for multi-point selection. */
     fun ghostPointsInRect(a: Pt, b: Pt): List<Triple<ModelPlane, Int, Boolean>> {
         val x1 = min(a.x, b.x); val x2 = max(a.x, b.x); val y1 = min(a.y, b.y); val y2 = max(a.y, b.y)
-        return ModelPlane.entries.filter { it != editPlane }.flatMap { plane -> planeGeometry(plane).guides.flatMap { g -> listOf(Triple(plane, g.id, true), Triple(plane, g.id, false)) } }
+        return ModelPlane.entries.filter { it != editPlane }.flatMap { plane -> pointGuides(planeGeometry(plane).guides).flatMap { g -> listOf(Triple(plane, g.id, true), Triple(plane, g.id, false)) } }
             .filter { sel -> ghostPointHere(sel)?.let { it.x in x1..x2 && it.y in y1..y2 } == true }
     }
 
@@ -2145,6 +2146,24 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         extrusions = extrusions.map { if (guide.id in it.guideIds) it.copy(guideIds = it.guideIds + newId) else it }
         selectedGuideId = guide.id; selectedCurveId = null; selectedGuideEndpoint = GuideEndpoint(guide.id, false); selectedWholeGuideId = null; selectedEndpoint = null
     }
+    /**
+     * A selected circle in Modify gets four handles on its rim: left and right set its width, top and bottom its
+     * height (the center stays). Different width and height make an oval.
+     */
+    fun ovalPieces(): List<GuideLine>? {
+        if (tool != Tool.ADJUST || selectMode) return null
+        val guide = (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } } ?: return null
+        return circleOf(guide, guides)
+    }
+    fun ovalHandles(): List<Pair<Pt, Boolean>> {
+        val pieces = ovalPieces() ?: return emptyList()
+        val pts = pieces.map { it.start }
+        val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }; val minY = pts.minOf { it.y }; val maxY = pts.maxOf { it.y }
+        val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
+        return listOf(Pt(maxX, cy) to true, Pt(minX, cy) to true, Pt(cx, minY) to false, Pt(cx, maxY) to false)
+    }
+    // While a rim handle is dragged: the pieces as they were, the center, the half size then, and which way it stretches.
+    var ovalDrag by remember { mutableStateOf<Triple<List<GuideLine>, Pt, Pair<Float, Boolean>>?>(null) }
     // Growing a shape by its arrows; the functions are set further down, where everything they use is defined.
     var growDrag by remember { mutableStateOf<GrowDrag?>(null) }
     // Picking something else or leaving Modify turns Grow off.
@@ -2160,6 +2179,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             return
         }
         if (tool == Tool.ADJUST && !selectMode && growStart?.invoke(sourcePoint, hitRadius) == true) return
+        if (tool == Tool.ADJUST && !selectMode) ovalPieces()?.let { pieces ->
+            ovalHandles().firstOrNull { distance(it.first, sourcePoint) <= hitRadius * 1.3 }?.let { (at, horizontal) ->
+                val pts = pieces.map { it.start }
+                val center = Pt((pts.minOf { it.x } + pts.maxOf { it.x }) / 2f, (pts.minOf { it.y } + pts.maxOf { it.y }) / 2f)
+                val half = if (horizontal) abs(at.x - center.x) else abs(at.y - center.y)
+                if (half > 0.5f) { pushUndo(); ovalDrag = Triple(pieces, center, half to horizontal); return }
+            }
+        }
         // Rectangle and Circle can be dragged out: from a corner (or the center) to where the finger lifts.
         if (tool == Tool.LINES && draftStart == null && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE) && closestGuideEndpoint(sourcePoint, pointGuides(guides), hitRadius * 1.5) == null) {
             shapeDragging = true; draftStart = if (lineDrawing == LineDrawing.CIRCLE) sourcePoint else snapToLines(sourcePoint, hitRadius); pendingEnd = draftStart; return
@@ -2629,6 +2656,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (refs.size > 1) pendingAlignment = horizontal else alignSelectedVertices(horizontal, refs.firstOrNull())
     }
     fun handleDrag(point: Pt, snappedToFeature: Boolean) {
+        ovalDrag?.let { (pieces, c, h) ->
+            val (half, horizontal) = h
+            val k = ((if (horizontal) abs(point.x - c.x) else abs(point.y - c.y)) / half).coerceAtLeast(0.02f)
+            fun stretch(p: Pt) = if (horizontal) Pt(c.x + (p.x - c.x) * k, p.y) else Pt(p.x, c.y + (p.y - c.y) * k)
+            val byId = pieces.associateBy { it.id }
+            guides = guides.map { g -> byId[g.id]?.let { o -> g.copy(start = stretch(o.start), end = stretch(o.end), curveMid = o.curveMid?.let(::stretch), shapeWidthMm = null, shapeHeightMm = null) } ?: g }
+            return
+        }
         if (growDrag != null) { growMove?.invoke(point); return }
         if (shapeDragging) { pendingEnd = draftStart?.let { s -> if (lineDrawing == LineDrawing.RECTANGLE) squareEnd(s, point).first else point } ?: point; return }
         modelDragLast?.let { last ->
@@ -2754,6 +2789,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
     }
     fun handleDragEnd() {
+        if (ovalDrag != null) { ovalDrag = null; return }
         if (growDrag != null) { growDrag = null; return }
         if (shapeDragging) {
             shapeDragging = false
@@ -3360,7 +3396,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, growArrows = growHandles().map { it.anchor to it.dir }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -3453,6 +3489,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val editHint = when {
                 selectMode -> if (pickedItems.isEmpty() && pickedPoints.isEmpty()) "Drag a box to pick ${if (boxPicksItems) "whole items" else "whole items and loose points"} inside it, or tap points, lines, shapes or objects. Then Align or Space them from the top row" else "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · drag one to move all, arrows step"
                 growDrag != null -> growDrag!!.let { g -> planeGeometry(g.handle.key.first).extrusions.firstOrNull { it.id == g.extrusionId }?.depthMm?.let { "Depth ${formatMeasure(it / unitFactorMm(unit), unit)} $unit · drag along the arrow" } ?: "Drag along the arrow" }
+                ovalDrag != null -> "Let go when the size is right"
+                !show3d && tool == Tool.ADJUST && !selectMode && !growMode && ovalPieces() != null -> "Drag a square handle to resize the circle (side ones: width, top/bottom: height, for an oval), or set sizes in Properties"
                 tool == Tool.ADJUST && !selectMode && (growHandles().isNotEmpty() || growMode && selectedForeign != null) -> "Drag a blinking orange arrow to grow it. Tap Grow again to finish"
                 tool == Tool.LINES && lineDrawing == LineDrawing.CIRCLE -> if (draftStart == null) "Circle: drag from its center, or tap the center" else "Tap a point on the circle (sets the radius)"
                 tool == Tool.LINES && lineDrawing == LineDrawing.RECTANGLE -> if (draftStart != null && pendingEnd != null && squareEnd(draftStart!!, pendingEnd!!).second) "Square" else if (draftStart == null) "Rectangle: drag corner to corner, or tap two corners. It blinks when square" else "Tap the opposite corner"
@@ -3597,7 +3635,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, growArrows = growHandles().map { it.anchor to it.dir }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -3705,7 +3743,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val targetHeight = heightValue?.let { value -> scale?.let { value * it } }
             val sx = (targetWidth?.div(width) ?: 1.0).toFloat()
             val sy = (targetHeight?.div(height) ?: if (scale == null && widthValue != null && heightValue != null) width * heightValue / (widthValue * height) else 1.0).toFloat()
-            fun resize(point: Pt) = Pt(left + (point.x - left) * sx, top + (point.y - top) * sy)
+            // A circle or oval keeps its center; other shapes keep their top-left corner.
+            val round = isCircleShape(path)
+            val ax = if (round) left + width / 2f else left; val ay = if (round) top + height / 2f else top
+            fun resize(point: Pt) = Pt(ax + (point.x - ax) * sx, ay + (point.y - ay) * sy)
             val ids = guides.filter { sameGuideObject(it, path.first()) }.map { it.id }.toSet()
             val changed = abs(sx - 1f) > 0.0001f || abs(sy - 1f) > 0.0001f
             guides = guides.map { guide -> if (guide.id in ids) guide.copy(start = resize(guide.start), end = resize(guide.end), curveMid = guide.curveMid?.let(::resize), colorIndex = color, fillTransparency = if (guide.pathId == path.first().pathId) (if (transparency == 100 && made.materialId != null && !made.frame) null else transparency) else guide.fillTransparency, lengthMm = if (changed) null else guide.lengthMm, shapeWidthMm = if (guide.id == path.first().id) widthValue?.times(unitFactorMm(unit)) else guide.shapeWidthMm, shapeHeightMm = if (guide.id == path.first().id) heightValue?.times(unitFactorMm(unit)) else guide.shapeHeightMm) else guide }
@@ -4914,7 +4955,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, growArrows: List<Pair<Pt, Pt>> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -5252,6 +5293,9 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 ghostPointMarks.forEach { p -> val c = viewAt(Pt(p.x, p.y)); drawCircle(Color.White, 11.dp.toPx(), c, style = Stroke(4.dp.toPx())); drawCircle(Color(0xFFE65100), 11.dp.toPx(), c, style = Stroke(2.5.dp.toPx())) }
                 ghostPointMark?.let { p -> val c = viewAt(Pt(p.x, p.y)); drawCircle(Color.White, 22f, c); drawCircle(Color(0xFFE65100), 22f, c, style = Stroke(7f)); drawCircle(Color(0xFFE65100), 8f, c) }
                 growArrows.forEach { (anchor, dir) -> growArrow(viewAt(anchor), screenDir(dir)) }
+                // A selected circle's size handles: small squares on its rim.
+                rimHandles.forEach { p -> val c = viewAt(p); val s = 7.dp.toPx()
+                    drawRect(Color.White, Offset(c.x - s, c.y - s), Size(2 * s, 2 * s)); drawRect(Color(0xFFCF2020), Offset(c.x - s, c.y - s), Size(2 * s, 2 * s), style = Stroke(2.dp.toPx())) }
                 foreignOverlay?.let { overlay ->
                     // The selected object from another plane, its handles and its outline points.
                     val accent = Color(0xFF1565C0)
@@ -5404,7 +5448,10 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val pts = objectGuides.map { it.start }
                         val diameterPx = pts.maxOf { a -> pts.maxOf { b -> distance(a, b) } }
                         val center = viewAt(Pt(pts.map { it.x }.average().toFloat(), pts.minOf { it.y }))
-                        val text = "Ø ${formatMeasure(diameterPx / pxPerUnit, unit)} $unit" + (materialName?.let { " · $it" } ?: "")
+                        val w = pts.maxOf { it.x } - pts.minOf { it.x }; val h = pts.maxOf { it.y } - pts.minOf { it.y }
+                        val size = if (abs(w - h) <= 0.01f * max(w, h)) "Ø ${formatMeasure(diameterPx / pxPerUnit, unit)} $unit"
+                            else "${formatMeasure(w / pxPerUnit, unit)} × ${formatMeasure(h / pxPerUnit, unit)} $unit oval"
+                        val text = size + (materialName?.let { " · $it" } ?: "")
                         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; textSize = 14.sp.toPx(); isFakeBoldText = true; style = Paint.Style.STROKE; strokeWidth = 4.dp.toPx(); color = AndroidColor.WHITE }
                         drawContext.canvas.nativeCanvas.drawText(text, center.x, center.y - 10.dp.toPx(), paint)
                         paint.style = Paint.Style.FILL; paint.color = AndroidColor.BLACK
@@ -5545,8 +5592,10 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
             }
             if (tool == Tool.ADJUST && selectionBlinkOn) selectedWholeGuideId?.let { id ->
                 val pathId = guides.firstOrNull { it.id == id }?.pathId
+                // The selection blinks along the real lines, curves included.
                 guides.filter { it.id == id || pathId != null && it.pathId == pathId }.forEach { guide ->
-                    drawLine(Color(0xFF0066BE), viewAt(guide.start), viewAt(guide.end), 7f * zoom)
+                    val pts = guidePoints(guide).map(::viewAt)
+                    pts.zipWithNext().forEach { (a, b) -> drawLine(Color(0xFF0066BE), a, b, 4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round) }
                 }
             }
             if (tool == Tool.ADJUST) {
@@ -6730,6 +6779,11 @@ private fun projectToGuide(point: Pt, guide: GuideLine): Pt {
 
 private fun closestGuide(point: Pt, guides: List<GuideLine>, radius: Double): GuideLine? =
     guides.minByOrNull { distance(point, projectToGuide(point, it)) }?.takeIf { distance(point, projectToGuide(point, it)) <= radius }
+
+/** A circle or oval: one closed path of six or more curved pieces (drawn with the Circle tool). */
+private fun isCircleShape(pieces: List<GuideLine>) = pieces.size >= 6 && pieces.all { it.curveMid != null && it.pathId != null && it.pathId == pieces.first().pathId }
+/** The circle or oval [guide] belongs to, in its own view's canvas, or null. */
+private fun circleOf(guide: GuideLine, guides: List<GuideLine>): List<GuideLine>? = guide.pathId?.let { p -> guides.filter { it.pathId == p && it.plane == guide.plane } }?.takeIf(::isCircleShape)
 
 /** Lines whose end points can be picked: all but a circle's pieces, whose joints are hidden (the circle is one thing). */
 private fun pointGuides(guides: List<GuideLine>): List<GuideLine> {
