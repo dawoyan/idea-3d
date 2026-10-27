@@ -3262,6 +3262,17 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         itemGroups = itemGroups.filterNot { it in inGroup } + listOf(merged)
         logToast(context, "Grouped ${pickedItems.size} items: they are picked and moved together", Toast.LENGTH_SHORT).show()
     }
+    /** Removes the explicit Select-mode group containing [key], without changing any lines. */
+    fun ungroupItem(key: Pair<ModelPlane, Int>) {
+        val group = itemGroups.firstOrNull { members -> members.any { sameItem(it, key) } }
+        if (group == null) {
+            logToast(context, "This item is not in a group", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pushUndo()
+        itemGroups = itemGroups.filterNot { it === group }
+        logToast(context, "Ungrouped: the items can move separately again", Toast.LENGTH_SHORT).show()
+    }
     fun pickedIsGroup() = pickedItems.size >= 2 && itemGroups.any { group -> pickedItems.all { p -> group.any { sameItem(p, it) } } }
     /** Merge: two 3D objects become one solid; two shapes in the same view become one outline. */
     /**
@@ -3890,6 +3901,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
                             val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
                             ActionIcon("Material", R.drawable.ic_save_material) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
+                            val itemKey = homeKey(guide)
+                            if (itemGroups.any { members -> members.any { sameItem(it, itemKey) } }) ActionIcon("Ungroup", R.drawable.ic_group) { ungroupItem(itemKey) }
                             if (guide.groupId != null) ActionIcon("Unweld", R.drawable.ic_close) { unweldGuide(guide.id) }
                             // Grow: shows arrows to pull the shape into a 3D object (or change its depth).
                             if (tool == Tool.ADJUST && inShape) ActionIcon("Grow", R.drawable.ic_cube, on = growMode) { growMode = !growMode }
