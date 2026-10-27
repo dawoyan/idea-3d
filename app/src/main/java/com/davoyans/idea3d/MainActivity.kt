@@ -944,6 +944,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
     val snackbarHost = remember { SnackbarHostState() }
     var viewerObjects by remember { mutableStateOf<List<Pair<ModelPlane, Int>>>(emptyList()) }
+    // Null = full scene from the main view; a key = temporary item-only preview.
+    var viewerScope by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
     var show3d by remember { mutableStateOf(false) }
     val viewerCamera = remember { ViewerCamera() }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
@@ -976,8 +978,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var selectedGhostPoints by remember { mutableStateOf(emptyList<Triple<ModelPlane, Int, Boolean>>()) }
     // Points picked in Select mode, from any view (including this one): (view, line id, start?).
     var pickedPoints by remember { mutableStateOf(emptyList<Triple<ModelPlane, Int, Boolean>>()) }
-    // What a box picks in Select mode: the points inside it (default) or the whole items inside it.
-    var boxPicksItems by remember { mutableStateOf(false) }
     // Size labels on lines and shapes can be hidden to see the drawing clearly.
     var showSizes by remember { mutableStateOf(preferences.getBoolean("show_sizes", true)) }
     // Grow arrows (front and back of a shape or object) show only after the Grow button is tapped.
@@ -1775,6 +1775,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val id = selectedWholeGuideId ?: return null
         return extrusions.firstOrNull { e -> extrusionGuides(e, guides).any { it.id == id } }?.let { editPlane to it.id }
     }
+    /** An item preview is offered only when it is already a material-backed 3D object. */
+    fun canPreviewObject(key: Pair<ModelPlane, Int>): Boolean {
+        val geometry = planeGeometry(key.first)
+        val extrusion = geometry.extrusions.firstOrNull { it.id == key.second } ?: return false
+        return extrusionGuides(extrusion, geometry.guides).any { it.materialId != null }
+    }
     fun objectName(key: Pair<ModelPlane, Int>): String = objectNames[key] ?: "Shape"
     /** Starts a 3D boolean; the next object tapped, in the canvas or the 3D view, is the other one. */
     var pendingSolidMode by remember { mutableStateOf(SolidMode.CUT) }
@@ -1931,7 +1937,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         } }
         // Anything fully inside the box is picked whole, so Align and Even move it without changing its size.
         seen.forEach { key -> if (pickedItems.none { sameItem(key, it) }) togglePicked(key) }
-        if (boxPicksItems) return
         // Only points of items that stick out of the box are picked one by one.
         allPointsHere().filter { (sel, at) -> at.x in x1..x2 && at.y in y1..y2 && pickedItems.none { it.first == sel.first && itemGuides(it).any { g -> g.id == sel.second } } }
             .forEach { (sel, _) -> if (pickedPoints.none { samePoint(it, sel) }) pickedPoints = pickedPoints + sel }
@@ -3221,8 +3226,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         undoHistory = undoHistory.dropLast(1)
     }
 
-    /** Builds the 3D model from every plane and shows it in place of the canvas. The camera and frame stay put across rebuilds. */
-    fun open3dView() {
+    /** Builds either the entire scene or one selected 3D object. The camera and frame stay put across rebuilds. */
+    fun open3dView(scopeObject: Pair<ModelPlane, Int>? = null) {
+        viewerScope = scopeObject
         val placedSnapshot = placedModels()
         val guideSnapshot = allGuides(); val extrusionSnapshot = allExtrusions(); val opsSnapshot = solidOps; val materialSnapshot = materials.associateBy { it.id }; val setup = modelSetup(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
         val frame = viewerModel?.frame
@@ -3234,20 +3240,23 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
                 val model = ModelBuild(built.meshes + placedSnapshot.map { it.second }, built.objects, built.warnings, built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish })
-                val meshes = model.meshes
+                val shown = scopeObject?.let { key -> model.objects.indices.filter { model.objects[it] == key } } ?: model.meshes.indices.toList()
+                if (shown.isEmpty()) throw IllegalArgumentException("That item has no 3D material or depth yet")
+                val meshes = shown.map { model.meshes[it] }
+                val shownObjects = if (scopeObject == null) model.objects else shown.map { model.objects[it] }
                 val warnings = model.warnings.map { it.toString() }
                 meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
-                val finishes = meshes.flatMapIndexed { i, mesh -> List(mesh.triangles.size) { model.finishes.getOrNull(i) ?: Finish.PLAIN } }
+                val finishes = meshes.flatMapIndexed { i, mesh -> List(mesh.triangles.size) { model.finishes.getOrNull(shown[i]) ?: Finish.PLAIN } }
                 val stl = ModelExport.stl(meshes)
                 // Imported models can't be tapped for exact values in 3D (index -1); their dialog is in the 2D views.
-                val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { if (index < built.meshes.size) index else -1 } }.toIntArray()
-                val measurements = measurementSnapshot.mapNotNull { line ->
+                val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { if (shown[index] < model.objects.size) index else -1 } }.toIntArray()
+                val measurements = if (scopeObject != null) emptyList() else measurementSnapshot.mapNotNull { line ->
                     val mapping = setup.mapping(line.plane) ?: return@mapNotNull null
                     val value = if (line.lengthSource == LengthSource.UNKNOWN) "?" else "${formatMeasure(line.value, modelUnit)}${if (line.hasDepth()) "*" else ""} $modelUnit"
                     val a = mapping.model(line.start, line.startZMm); val b = mapping.model(line.end, line.endZMm)
                     ViewerMeasurement(a.x.toFloat(), a.y.toFloat(), b.x.toFloat(), b.y.toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), a.z.toFloat(), b.z.toFloat())
                 }
-                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes) to model.objects
+                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes) to shownObjects
             } }
             if (projectId != openedProject) return@launch
             result.onSuccess { (mesh, ids) -> viewerModel = mesh; viewerObjects = ids; show3d = true }
@@ -3255,8 +3264,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
-    LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, solidOps, materials, unit, importedModels) { if (show3d) open3dView() }
-    fun leave3d() { show3d = false; viewerModel = null; viewerEditObject = null }
+    LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, solidOps, materials, unit, importedModels) { if (show3d) open3dView(viewerScope) }
+    fun leave3d() { show3d = false; viewerModel = null; viewerEditObject = null; viewerScope = null }
     /** Switches to the view a foreign object was drawn in and selects it there, where all drawing tools apply. */
     fun openInOwnView(key: Pair<ModelPlane, Int>) {
         leave3d(); switchPlane(key.first); tool = Tool.ADJUST
@@ -3968,7 +3977,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         })
         else Column(Modifier.padding(padding).fillMaxSize()) {
             val editHint = when {
-                selectMode -> if (pickedItems.isEmpty() && pickedPoints.isEmpty()) "Drag a box to pick ${if (boxPicksItems) "whole items" else "whole items and loose points"} inside it, or tap points, lines, shapes or objects. Then Align or Space them from the top row" else "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · drag one to move all, arrows step"
+                selectMode -> if (pickedItems.isEmpty() && pickedPoints.isEmpty()) "Drag a box to pick whole items and loose points inside it, or tap points, lines, shapes or objects. Then Align or Space them from the top row" else "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · drag one to move all, arrows step"
                 growDrag != null -> growDrag!!.let { g -> planeGeometry(g.handle.key.first).extrusions.firstOrNull { it.id == g.extrusionId }?.depthMm?.let { "Depth ${formatMeasure(it / unitFactorMm(unit), unit)} $unit · drag along the arrow" } ?: "Drag along the arrow" }
                 ovalDrag != null -> "Let go when the size is right"
                 !show3d && tool == Tool.ADJUST && !selectMode && !growMode && ovalPieces() != null -> "Drag a square handle to resize the circle (side ones: width, top/bottom: height, for an oval), or set sizes in Properties"
@@ -4050,7 +4059,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
                         ActionIcon("Copy lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
                         ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
-                        ActionIcon("Box: ${if (boxPicksItems) "items" else "points"}", R.drawable.ic_select_area, on = boxPicksItems) { boxPicksItems = !boxPicksItems }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total > 0) { pickedItems = emptyList(); pickedPoints = emptyList() }
                         ViewIcons()
                     }
@@ -4096,12 +4104,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         if (tool == Tool.ADJUST) selectedForeignObject()?.let { target ->
                             if (selectedForeignPoint != null) ActionIcon("Move by", R.drawable.ic_move_point) { movePointDialog = true }
                             ActionIcon("Position", R.drawable.ic_cube) { foreignDialog = target.key }
+                            if (canPreviewObject(target.key)) ActionIcon("View 3D", R.drawable.ic_cube) { open3dView(target.key) }
                             ActionIcon("Cut by", R.drawable.ic_scissors) { startSolidOp(SolidMode.CUT, target.key) }
                             ActionIcon("Common", R.drawable.ic_join) { startSolidOp(SolidMode.COMMON, target.key) }
                             ActionIcon("Join 3D", R.drawable.ic_join) { startSolidOp(SolidMode.JOIN, target.key) }
                             ActionIcon("Its view", R.drawable.ic_open_plane) { openInOwnView(target.key) }
                         }
                         if (tool == Tool.ADJUST && selectedForeign == null && selectedGuideEndpoint == null && selectedCurveId == null) ownSelectedObject()?.let { key ->
+                            if (canPreviewObject(key)) ActionIcon("View 3D", R.drawable.ic_cube) { open3dView(key) }
                             ActionIcon("Cut by", R.drawable.ic_scissors) { startSolidOp(SolidMode.CUT, key) }
                             ActionIcon("Common", R.drawable.ic_join) { startSolidOp(SolidMode.COMMON, key) }
                             ActionIcon("Join 3D", R.drawable.ic_join) { startSolidOp(SolidMode.JOIN, key) }
@@ -4120,7 +4130,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         if (!isBlankCanvas() && selectedVertices.isEmpty() && (tool != Tool.ADJUST || selectedGuideId == null)) ActionIcon("Crop", R.drawable.ic_crop) { startCrop() }
                     }
                 }
-                if (modifying) ViewIcons()
+                // A selected item's View 3D button above previews only that item.
+                // The regular main-view button remains the whole-scene 3D view.
             }
             PlaneSwitcher(editPlane, show3d, axesHint, mirroredViews, onPlane = { plane, flip ->
                 mirroredViews = if (flip) mirroredViews + plane else mirroredViews - plane
