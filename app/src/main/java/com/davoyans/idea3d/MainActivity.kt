@@ -3327,6 +3327,84 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (weldItems(pickedItems, anchored = false)) { pickedItems = emptyList(); return }
         logToast(context, "Merge needs lines that touch (an end on the other line), two overlapping shapes in the same view, or 3D objects", Toast.LENGTH_LONG).show()
     }
+    /**
+     * Makes a new, closed face from selected vertices.  It deliberately does not reuse the
+     * selected guides: one corner can belong to several faces (the top of a pyramid, for
+     * example), while each face still needs its own closed path and material.
+     *
+     * The points are copied through model space, rather than from the pixels presently on
+     * screen.  Thus a point picked from another view keeps its real depth when the new face
+     * is made in this view.
+     */
+    fun combinePickedPoints() {
+        if (pickedPoints.size < 3) {
+            logToast(context, "Pick at least three points to make a face", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val setup = modelSetup()
+        val here = setup.mapping(editPlane)
+        if (here == null) {
+            logToast(context, "Add a calibration length before combining points from different views", Toast.LENGTH_LONG).show()
+            return
+        }
+        fun modelPoint(sel: Triple<ModelPlane, Int, Boolean>): Vec3? {
+            val guide = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
+            val own = setup.mapping(sel.first) ?: return null
+            val depth = if (sel.third) guide.startZMm else guide.endZMm
+            return own.model(if (sel.third) guide.start else guide.end, depth + faceOffset(sel.first, sel.second))
+        }
+        // A shared corner can have several selectable line ends.  It must occur only once
+        // in the resulting contour.
+        val points = pickedPoints.mapNotNull(::modelPoint).fold(mutableListOf<Vec3>()) { result, point ->
+            if (result.none { (it - point).length < 0.01 }) result.add(point)
+            result
+        }
+        if (points.size < 3) {
+            logToast(context, "Pick three different points to make a face", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val projected = points.map { it to here.pixel(it) }
+        val center = Pt(projected.map { it.second.x }.average().toFloat(), projected.map { it.second.y }.average().toFloat())
+        // Selection order should not matter.  Ordering around the visible center gives a
+        // non-crossing perimeter for ordinary triangles, quads, and polygonal panels.
+        val ordered = projected.sortedBy { (_, point) -> atan2((point.y - center.y).toDouble(), (point.x - center.x).toDouble()) }
+        val area2 = ordered.indices.sumOf { i ->
+            val a = ordered[i].second; val b = ordered[(i + 1) % ordered.size].second
+            (a.x * b.y - b.x * a.y).toDouble()
+        }
+        if (abs(area2) < 0.01) {
+            logToast(context, "Those points are edge-on in this view; combine them from another view", Toast.LENGTH_LONG).show()
+            return
+        }
+        pushUndo()
+        val firstId = nextGuideId(guides)
+        val pathId = nextGuidePathId(guides)
+        val face = ordered.indices.map { i ->
+            val start = ordered[i]; val end = ordered[(i + 1) % ordered.size]
+            GuideLine(
+                id = firstId + i,
+                start = start.second,
+                end = end.second,
+                manual = true,
+                pathId = pathId,
+                colorIndex = guideColorIndex,
+                strokeWidth = guideStrokeWidth,
+                // A subtle fill makes a newly combined panel immediately readable; its
+                // material or transparency can be changed in the editor that opens next.
+                fillTransparency = if (i == 0) 50 else null,
+                startZMm = start.first dot editPlane.toward,
+                endZMm = end.first dot editPlane.toward,
+                plane = editPlane
+            )
+        }
+        guides = guides + face
+        pickedItems = emptyList()
+        pickedPoints = emptyList()
+        selectedGuideId = firstId
+        selectedWholeGuideId = firstId
+        shapeEditId = firstId
+        logToast(context, "Face combined: choose its material and thickness", Toast.LENGTH_SHORT).show()
+    }
     /** Cut: the second picked item is cut out of the first. */
     fun cutPicked() {
         // The first pick is cut; the cutter is the last pick outside the first one's group (a ring's hole comes with it).
@@ -3779,6 +3857,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon("Align V", R.drawable.ic_align_vertical, enabled = total >= 2) { arrangePicked(horizontal = false, distribute = false) }
                         ActionIcon("Space H", R.drawable.ic_even_h, enabled = total >= 3) { arrangePicked(horizontal = true, distribute = true) }
                         ActionIcon("Space V", R.drawable.ic_even_v, enabled = total >= 3) { arrangePicked(horizontal = false, distribute = true) }
+                        ActionIcon("Combine face", R.drawable.ic_join, enabled = pickedPoints.size >= 3) { combinePickedPoints() }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
