@@ -3311,6 +3311,18 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (any) logToast(context, "Welded: they share the touching points and move together", Toast.LENGTH_SHORT).show()
         return any
     }
+    /** Separates lines previously connected by Weld without changing their endpoints or dimensions. */
+    fun unweldGuide(id: Int) {
+        val guide = guides.firstOrNull { it.id == id } ?: return
+        val group = guide.groupId
+        if (group == null) {
+            logToast(context, "This line is not welded to another line", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pushUndo()
+        guides = guides.map { if (it.groupId == group) it.copy(groupId = null) else it }
+        logToast(context, "Unwelded: the lines can move independently again", Toast.LENGTH_SHORT).show()
+    }
     fun mergePicked() {
         if (pickedItems.size < 2) { logToast(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         val first = pickedItems.first(); val rest = pickedItems.drop(1)
@@ -3878,6 +3890,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
                             val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
                             ActionIcon("Material", R.drawable.ic_save_material) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
+                            if (guide.groupId != null) ActionIcon("Unweld", R.drawable.ic_close) { unweldGuide(guide.id) }
                             // Grow: shows arrows to pull the shape into a 3D object (or change its depth).
                             if (tool == Tool.ADJUST && inShape) ActionIcon("Grow", R.drawable.ic_cube, on = growMode) { growMode = !growMode }
                             if (inShape) ActionIcon("Outline", R.drawable.ic_outline) { outlineOf(listOf(homeKey(guide))) }
