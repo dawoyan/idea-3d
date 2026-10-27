@@ -170,6 +170,7 @@ import com.davoyans.idea3d.core.SolidOperation
 import com.davoyans.idea3d.core.Vec3
 
 private enum class Tool { NONE, CALIBRATE, MEASURE, LINES, ADJUST, CROP }
+private enum class SelectionMode(val label: String) { POINTS("Points"), LINES("Lines"), SHAPES("Shapes"), ALL("All"), VISIBLE("Visible surface") }
 /**
  * An arrow for growing a shape into a 3D object (or changing its depth): [anchor] and [dir] in this view's canvas.
  * [ownView] is the single arrow in the shape's own view (drag up = deeper); otherwise [front] says which side it pulls.
@@ -959,6 +960,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var itemGroups by remember { mutableStateOf(emptyList<List<Pair<ModelPlane, Int>>>()) }
     // Select mode: several items from any view, for group, merge, cut, arrange, move and delete.
     var selectMode by remember { mutableStateOf(false) }
+    var selectionMode by remember { mutableStateOf(SelectionMode.VISIBLE) }
     var pickedItems by remember { mutableStateOf(emptyList<Pair<ModelPlane, Int>>()) }
     var itemDragLast by remember { mutableStateOf<Pt?>(null) }
     var itemRectStart by remember { mutableStateOf<Pt?>(null) }
@@ -2008,9 +2010,27 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     fun handleTap(point: Pt, hitRadius: Double) {
         if (selectMode) {
-            // A point under the finger wins over the line it belongs to.
-            allPointsHere().filter { distance(it.second, point) <= hitRadius }.minByOrNull { distance(it.second, point) }?.let { togglePoint(it.first); return }
-            itemAt(point, hitRadius)?.let(::togglePicked); return
+            // Visible surface considers only the current view, preventing selection of a
+            // projected element hidden behind the one under the finger.
+            val localPoints = pointGuides(guides.filter { it.plane == editPlane }).flatMap { g -> listOf(Triple(editPlane, g.id, true) to g.start, Triple(editPlane, g.id, false) to g.end) }
+            val pointPick = when (selectionMode) {
+                SelectionMode.POINTS, SelectionMode.ALL -> allPointsHere()
+                SelectionMode.VISIBLE -> localPoints
+                else -> emptyList()
+            }.filter { distance(it.second, point) <= hitRadius }.minByOrNull { distance(it.second, point) }
+            if (pointPick != null) { togglePoint(pointPick.first); return }
+            val item = if (selectionMode == SelectionMode.VISIBLE) closestGuide(point, guides.filter { it.plane == editPlane }, hitRadius * 1.7)?.let(::homeKey) else itemAt(point, hitRadius)
+            fun closedItem(key: Pair<ModelPlane, Int>): Boolean {
+                val geometry = planeGeometry(key.first); val ids = itemGuides(key).map { it.id }.toSet()
+                return closedGuideShapes(geometry.guides).any { path -> path.any { it.id == key.second || it.id in ids } }
+            }
+            when (selectionMode) {
+                SelectionMode.POINTS -> Unit
+                SelectionMode.LINES -> item?.takeIf { !closedItem(it) }?.let(::togglePicked)
+                SelectionMode.SHAPES -> item?.takeIf(::closedItem)?.let(::togglePicked)
+                SelectionMode.ALL, SelectionMode.VISIBLE -> item?.let(::togglePicked)
+            }
+            return
         }
         joinPick?.let { pickJoinArm(it, point, hitRadius); return }
         solidPick?.let { finishSolidOp(objectAt(point)); return }
@@ -3804,7 +3824,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, onSelect = { setSelectMode(!selectMode) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
+        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectionMode = selectionMode, onSelect = { setSelectMode(!selectMode) }, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
             // Select first, then Modify: the selected line or shape stays selected, as a whole.
             if (it == Tool.ADJUST && selectedGuideId != null && selectedWholeGuideId == null) selectedWholeGuideId = selectedGuideId
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
@@ -5236,9 +5256,10 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
     }
 }
 
-@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, selectActive: Boolean, onSelect: () -> Unit, onFind: () -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
+@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, selectActive: Boolean, selectionMode: SelectionMode, onSelect: () -> Unit, onSelectionMode: (SelectionMode) -> Unit, onFind: () -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
     var lineMenuOpen by remember { mutableStateOf(false) }
     var measureMenuOpen by remember { mutableStateOf(false) }
+    var selectMenuOpen by remember { mutableStateOf(false) }
     Surface(shadowElevation = 8.dp) { Row(
         Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 6.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -5282,7 +5303,13 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
             }
             if (tool == Tool.LINES) ToolIconButton("Broken", R.drawable.ic_broken_line, lineDrawing == LineDrawing.BROKEN, { val selected = lineDrawing == LineDrawing.BROKEN; onLineDrawing(LineDrawing.BROKEN); onTool(if (selected) Tool.NONE else Tool.LINES) }, Modifier.weight(1f), description = "Broken guide line", onLongPress = { lineMenuOpen = true })
             // Picking several things, and finding anything, sit with the tools so they never move.
-            ToolIconButton(if (selectActive) "Done" else "Select", R.drawable.ic_select, selectActive, onSelect, Modifier.weight(1f))
+            Box(Modifier.weight(1f)) {
+                ToolIconButton(if (selectActive) "Done" else "Select", R.drawable.ic_select, selectActive, onSelect, Modifier.fillMaxWidth(), description = "Select: ${selectionMode.label}", onLongPress = { selectMenuOpen = true })
+                DropdownMenu(expanded = selectMenuOpen, onDismissRequest = { selectMenuOpen = false }) {
+                    Text("Select", Modifier.padding(horizontal = 16.dp, vertical = 10.dp), fontWeight = FontWeight.Bold)
+                    SelectionMode.entries.forEach { mode -> DropdownMenuItem(text = { Text(if (mode == selectionMode) "${mode.label}  ✓" else mode.label) }, onClick = { selectMenuOpen = false; onSelectionMode(mode) }) }
+                }
+            }
             ToolIconButton("Find", R.drawable.ic_finder, false, onFind, Modifier.weight(1f))
             if (drawingBroken) ToolButton("Finish", true, onFinishBroken, Modifier.weight(1f))
             else ModifyButton(tool == Tool.ADJUST, { onTool(if (tool == Tool.ADJUST) Tool.NONE else Tool.ADJUST) }, Modifier.weight(1f))
