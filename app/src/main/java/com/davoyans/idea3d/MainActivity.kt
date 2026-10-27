@@ -3837,7 +3837,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 }
                 val modifying = !show3d && !selectMode && pick == null && tool == Tool.ADJUST &&
                     (selectedWholeGuideId != null || selectedGuideId != null || selectedForeign != null || selectedVertices.isNotEmpty() || selectedGuideEndpoint != null || selectedEndpoint != null || selectedModelId != null)
-                if (!modifying) ViewIcons()
+                // In Select mode, lead with the point-to-face action.  The row scrolls on
+                // small screens, and burying this new command after the view controls made
+                // it too easy to miss.
+                if (!modifying && !selectMode) ViewIcons()
                 when {
                     show3d -> {}
                     pick != null -> {
@@ -3847,6 +3850,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     }
                     selectMode -> {
                         val n = pickedItems.size; val total = n + pickedPoints.size
+                        ActionIcon("Combine face", R.drawable.ic_join, enabled = pickedPoints.size >= 3) { combinePickedPoints() }
                         // One picked line or shape: choose what it is made of.
                         val pickedGuide = pickedItems.singleOrNull()?.takeIf { pickedPoints.isEmpty() }?.let { (plane, id) -> guides.firstOrNull { it.id == if (plane == editPlane) id else encodedId(plane, id) } }
                         ActionIcon("Material", R.drawable.ic_save_material, enabled = pickedGuide != null) {
@@ -3857,7 +3861,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon("Align V", R.drawable.ic_align_vertical, enabled = total >= 2) { arrangePicked(horizontal = false, distribute = false) }
                         ActionIcon("Space H", R.drawable.ic_even_h, enabled = total >= 3) { arrangePicked(horizontal = true, distribute = true) }
                         ActionIcon("Space V", R.drawable.ic_even_v, enabled = total >= 3) { arrangePicked(horizontal = false, distribute = true) }
-                        ActionIcon("Combine face", R.drawable.ic_join, enabled = pickedPoints.size >= 3) { combinePickedPoints() }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
@@ -3866,6 +3869,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
                         ActionIcon("Box: ${if (boxPicksItems) "items" else "points"}", R.drawable.ic_select_area, on = boxPicksItems) { boxPicksItems = !boxPicksItems }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total > 0) { pickedItems = emptyList(); pickedPoints = emptyList() }
+                        ViewIcons()
                     }
                     else -> {
                         // Most used first: Material, Grow, Outline, Turn, Clone, Weld (Properties and Delete are in the title bar).
