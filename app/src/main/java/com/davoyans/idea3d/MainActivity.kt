@@ -3879,7 +3879,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             StatusStrip(tool, drawingEnd = draftStart != null, hint = editHint, primaryAction = if (selectMode) ({
                 // Keep this out of the scrolling command row: a face starts with points,
                 // not whole items, and must be discoverable before anything is selected.
-                ActionIcon("Combine ${pickedPoints.size}/3", R.drawable.ic_join) { combinePickedPoints() }
+                ActionIcon("Combine ${pickedPoints.size}/3", R.drawable.ic_join, enabled = pickedPoints.size >= 3) { combinePickedPoints() }
             }) else null) {
                 val red = Color(0xFFB3261E)
                 // Always first, in the same place: fit everything in view, and show or hide sizes.
