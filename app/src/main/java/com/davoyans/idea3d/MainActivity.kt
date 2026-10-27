@@ -3812,7 +3812,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
             val axesHint = if (show3d) "" else if (editPlane in mirroredViews) when (editPlane) { ModelPlane.FRONT -> "X ←  Y ↑  from behind"; ModelPlane.TOP -> "X →  Z ↑ front  from below"; ModelPlane.PROFILE -> "Z → front  Y ↑  from the left" }
                 else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
-            StatusStrip(tool, drawingEnd = draftStart != null, hint = editHint) {
+            StatusStrip(tool, drawingEnd = draftStart != null, hint = editHint, primaryAction = if (selectMode) ({
+                // Keep this out of the scrolling command row: a face starts with points,
+                // not whole items, and must be discoverable before anything is selected.
+                ActionIcon("Combine ${pickedPoints.size}/3", R.drawable.ic_join) { combinePickedPoints() }
+            }) else null) {
                 val red = Color(0xFFB3261E)
                 // Always first, in the same place: fit everything in view, and show or hide sizes.
                 val pick = joinPick
@@ -3850,7 +3854,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     }
                     selectMode -> {
                         val n = pickedItems.size; val total = n + pickedPoints.size
-                        ActionIcon("Combine face", R.drawable.ic_join, enabled = pickedPoints.size >= 3) { combinePickedPoints() }
                         // One picked line or shape: choose what it is made of.
                         val pickedGuide = pickedItems.singleOrNull()?.takeIf { pickedPoints.isEmpty() }?.let { (plane, id) -> guides.firstOrNull { it.id == if (plane == editPlane) id else encodedId(plane, id) } }
                         ActionIcon("Material", R.drawable.ic_save_material, enabled = pickedGuide != null) {
@@ -4980,13 +4983,16 @@ private sealed class ModelReport {
     }, dismissButton = { TextButton(onClick = onDismiss) { Text(if (report is ModelReport.Ready) "Cancel" else "Close") } })
 }
 
-@Composable private fun StatusStrip(tool: Tool, drawingEnd: Boolean = false, hint: String? = null, actions: @Composable RowScope.() -> Unit) {
+@Composable private fun StatusStrip(tool: Tool, drawingEnd: Boolean = false, hint: String? = null, primaryAction: (@Composable () -> Unit)? = null, actions: @Composable RowScope.() -> Unit) {
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 8.dp, vertical = 4.dp)) {
         val status = when { drawingEnd -> "Tap the end point"; tool == Tool.NONE -> "Choose a tool"; tool == Tool.CROP -> "Adjust crop, then confirm"; tool == Tool.LINES -> "Tap points to draw a guide"; tool == Tool.ADJUST -> "Select a point, line or label"; tool == Tool.CALIBRATE -> "Tap two points to calibrate"; else -> "Tap two points to measure" }
         // Always two lines tall, so a changing hint never resizes (and re-fits) the canvas below.
         Text(hint ?: status, fontWeight = FontWeight.Bold, fontSize = 13.sp, lineHeight = 16.sp, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 6.dp))
-        // Every action sits in this one row, in every view and mode, so controls never jump between top and bottom.
-        Row(Modifier.fillMaxWidth().height(46.dp).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, content = actions)
+        // The primary Select action stays visible; all secondary actions may scroll.
+        Row(Modifier.fillMaxWidth().height(46.dp), verticalAlignment = Alignment.CenterVertically) {
+            primaryAction?.invoke()
+            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, content = actions)
+        }
     }
 }
 
