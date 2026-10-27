@@ -3334,6 +3334,22 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         guides = guides.map { if (it.groupId == group) it.copy(groupId = null) else it }
         logToast(context, "Unwelded: the lines can move independently again", Toast.LENGTH_SHORT).show()
     }
+    /** Turns one closed outline into independent lines, retaining the material on each edge. */
+    fun separateShape(id: Int) {
+        val guide = guides.firstOrNull { it.id == id } ?: return
+        val path = guide.pathId
+        if (path == null) {
+            logToast(context, "This is already an independent line", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ids = guides.filter { it.pathId == path }.map { it.id }.toSet()
+        pushUndo()
+        guides = guides.map { if (it.pathId == path) it.copy(pathId = null, fillTransparency = 100) else it }
+        // A single extrusion needs a continuous outline.  Individual bars/pipes remain
+        // usable through their material, but an old sheet/depth object cannot remain.
+        extrusions = extrusions.filterNot { extrusion -> extrusion.guideIds.any { it in ids } }
+        logToast(context, "Separated shape into independent lines", Toast.LENGTH_SHORT).show()
+    }
     fun mergePicked() {
         if (pickedItems.size < 2) { logToast(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         val first = pickedItems.first(); val rest = pickedItems.drop(1)
@@ -3901,6 +3917,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
                             val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
                             ActionIcon("Material", R.drawable.ic_save_material) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
+                            if (inShape) ActionIcon("Separate", R.drawable.ic_broken_line) { separateShape(guide.id) }
                             val itemKey = homeKey(guide)
                             if (itemGroups.any { members -> members.any { sameItem(it, itemKey) } }) ActionIcon("Ungroup", R.drawable.ic_group) { ungroupItem(itemKey) }
                             if (guide.groupId != null) ActionIcon("Unweld", R.drawable.ic_close) { unweldGuide(guide.id) }
