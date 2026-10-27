@@ -5824,11 +5824,12 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         drawLine(lineColor, start, end, width * strokeZoom)
                         if (!separator) drawLine(Color.White, start, end, (guide.strokeWidth * 0.45f).coerceAtLeast(1.5f) * strokeZoom)
                     }
-                    // The label shows the line's true 3D length (the same in every view) and its material.
-                    // One label per object for its material; a circle gets a single "Ø diameter" label instead of one per piece.
+                    // Canvas labels are measurements only.  Material is intentionally kept in
+                    // Properties/Material, rather than painted across the user's drawing.
+                    // A circle gets a single "Ø diameter" label instead of one per piece.
                     val objectGuides = guides.filter { sameGuideObject(it, guide) }
                     val firstOfObject = objectGuides.minOf { it.id } == guide.id
-                    val materialName = guide.materialId?.let(materialNames::get)?.takeIf { firstOfObject }
+                    val materialName: String? = null
                     val circle = guide.pathId != null && objectGuides.size >= 6 && objectGuides.all { it.curveMid != null }
                     val circleKey = if (circle) objectGuides.map { it.start }.let { p -> listOf(p.minOf { it.x }, p.minOf { it.y }, p.maxOf { it.x }, p.maxOf { it.y }).map { it.roundToInt() } } else null
                     // Seen edge-on (from another view) a circle is a line: no label there.
