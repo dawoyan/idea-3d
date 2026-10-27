@@ -3154,7 +3154,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val pts = itemOutlineHere(key).flatten(); if (pts.isEmpty()) return null
         return floatArrayOf(pts.minOf { it.x }, pts.minOf { it.y }, pts.maxOf { it.x }, pts.maxOf { it.y })
     }
-    fun extrusionOf(key: Pair<ModelPlane, Int>): Extrusion? { val ids = itemGuides(key).map { it.id }.toSet(); return planeGeometry(key.first).extrusions.firstOrNull { e -> e.guideIds.any { it in ids } } }
+    /** A stale extrusion must never turn disconnected lines into a Shape. */
+    fun extrusionOf(key: Pair<ModelPlane, Int>): Extrusion? {
+        val geometry = planeGeometry(key.first)
+        val ids = itemGuides(key).map { it.id }.toSet()
+        val closed = closedGuideShapes(geometry.guides).any { path -> path.any { it.id == key.second } || path.any { it.id in ids } }
+        return if (closed) geometry.extrusions.firstOrNull { e -> e.guideIds.any { it in ids } } else null
+    }
     fun isClosedShape(key: Pair<ModelPlane, Int>) = closedGuideShapes(planeGeometry(key.first).guides).any { path -> path.any { g -> g.id == key.second } || itemGuides(key).any { g -> path.any { it.id == g.id } } }
     /**
      * Turns items and loose points [deg] degrees around this view's line of sight, about their common center
