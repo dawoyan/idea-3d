@@ -862,6 +862,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var activeCurveId by remember { mutableStateOf<Int?>(null) }
     var selectedCurveId by remember { mutableStateOf<Int?>(null) }
     var pointKind by remember { mutableStateOf(PointKind.BREAKPOINT) }
+    // Node editing is deliberately armed by its toolbar button.  A normal tap on a
+    // selected line still selects/moves it; an armed point tool makes the next tap
+    // on that line an immediate Corel-style node edit.
+    var pointEditArmed by remember { mutableStateOf(false) }
+    // Assigned after the local editor function is declared; handleTap is declared
+    // earlier in this composable and invokes it once the composition is complete.
+    var addGuidePointAction: ((Pt, Double) -> Boolean)? = null
     var guideLengthEditId by remember { mutableStateOf<Int?>(null) }
     // The line whose material is being chosen (a short dialog of its own).
     var lineMaterialId by remember { mutableStateOf<Int?>(null) }
@@ -2059,6 +2066,16 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
             Tool.ADJUST -> {
                 panOnEmptyDrag = false
+                // Corel-style direct node editing: select a line, arm either point
+                // button, then tap the line once.  It must not be a delayed
+                // double-tap, and it must never affect an unselected line.
+                if (pointEditArmed) {
+                    val selected = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }
+                    val target = selected?.let { current ->
+                        closestGuide(point, guides.filter { candidate -> sameGuideObject(candidate, current) }, hitRadius * 2.2)
+                    }
+                    if (target != null && distance(point, target.start) > hitRadius && distance(point, target.end) > hitRadius && addGuidePointAction?.invoke(point, hitRadius * 2.2) == true) return
+                }
                 // End points of lines from other views can be selected here too.
                 selectedGhostPoint = null
                 if (!ownGeometryNear(point, hitRadius)) ghostPointAt(point, hitRadius * 1.5)?.let { sel -> clearOwnSelection(); selectedForeign = null; selectedGhostPoint = sel; return }
@@ -2255,30 +2272,57 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         selectedExtrusionId = selected.id; selectedCurveId = null
         selectedEndpoint = null; selectedGuideEndpoint = null; selectedWholeLineId = null; selectedWholeGuideId = null; selectedLabelId = null
     }
-    fun addGuidePoint(point: Pt, hitRadius: Double) {
-        if (tool != Tool.ADJUST) return
+    /**
+     * Adds a real node to the selected guide, or places the quadratic curve handle
+     * exactly under the finger.  Curve handles are stored as the point that the
+     * curve passes through at t=.5 (rather than as an abstract Bézier control), so
+     * the visible handle always means what the user sees.
+     */
+    fun addGuidePoint(point: Pt, hitRadius: Double): Boolean {
+        if (tool != Tool.ADJUST) return false
         val selected = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }
         val guide = selected?.let { closestGuide(point, guides.filter { candidate -> sameGuideObject(candidate, it) }, hitRadius) }
-            ?: closestGuide(point, guides, hitRadius) ?: return
-        if (distance(point, guide.start) <= hitRadius || distance(point, guide.end) <= hitRadius) return
+            ?: closestGuide(point, guides, hitRadius) ?: return false
+        if (distance(point, guide.start) <= hitRadius || distance(point, guide.end) <= hitRadius) return false
         if (pointKind == PointKind.CURVE) {
-            if (guide.curveMid == null) { pushUndo(); guides = guides.map { if (it.id == guide.id) it.copy(curveMid = Pt((it.start.x + it.end.x) / 2f, (it.start.y + it.end.y) / 2f)) else it } }
+            // Previously this silently put the handle at the geometric midpoint.
+            // That made "Curve point" look like a broken-point tool and gave no
+            // control over where the bend began.  Put the visible curve point at
+            // the tap itself, also allowing a curve's existing handle to be moved
+            // by selecting Curve point and tapping again.
+            pushUndo()
+            guides = guides.map { if (it.id == guide.id) it.copy(curveMid = point) else it }
             selectedGuideId = guide.id; selectedCurveId = guide.id; selectedWholeGuideId = null; selectedGuideEndpoint = null; selectedEndpoint = null
-            return
+            return true
         }
         val t = guideNearestParameter(guide, point)
-        if (t <= 0.001f || t >= 0.999f) return
+        if (t <= 0.001f || t >= 0.999f) return false
         val vertex = guidePointAt(guide, t)
         val newId = nextGuideId(guides); val path = guide.pathId ?: nextGuidePathId(guides)
         val splitZ = guide.startZMm * (1 - t) + guide.endZMm * t
         val defaultDepth = extrusions.firstOrNull { ex -> extrusionGuides(ex, guides).any { it.id == guide.id } }?.depthMm
         val splitThickness = if (guide.startThicknessMm == null && guide.endThicknessMm == null || defaultDepth == null) null else (guide.startThicknessMm ?: defaultDepth) * (1 - t) + (guide.endThicknessMm ?: defaultDepth) * t
-        val first = guide.copy(end = vertex, pathId = path, curveMid = guide.curveMid?.let { guidePointAt(guide, t / 2f) }, lengthMm = null, endZMm = splitZ, endThicknessMm = splitThickness)
-        val second = guide.copy(id = newId, start = vertex, pathId = path, curveMid = guide.curveMid?.let { guidePointAt(guide, (t + 1f) / 2f) }, lengthMm = null, startZMm = splitZ, startThicknessMm = splitThickness)
+        // De Casteljau split: a break node must leave a curved line looking exactly
+        // the same, merely with a new independently editable point on it.
+        fun lerp(a: Pt, b: Pt, amount: Float) = Pt(a.x + (b.x - a.x) * amount, a.y + (b.y - a.y) * amount)
+        fun quadraticAt(a: Pt, control: Pt, b: Pt, amount: Float): Pt {
+            val rest = 1f - amount
+            return Pt(rest * rest * a.x + 2f * rest * amount * control.x + amount * amount * b.x, rest * rest * a.y + 2f * rest * amount * control.y + amount * amount * b.y)
+        }
+        val splitCurve = guide.curveMid?.let { mid ->
+            val control = Pt(2f * mid.x - (guide.start.x + guide.end.x) / 2f, 2f * mid.y - (guide.start.y + guide.end.y) / 2f)
+            val leftControl = lerp(guide.start, control, t)
+            val rightControl = lerp(control, guide.end, t)
+            quadraticAt(guide.start, leftControl, vertex, .5f) to quadraticAt(vertex, rightControl, guide.end, .5f)
+        }
+        val first = guide.copy(end = vertex, pathId = path, curveMid = splitCurve?.first, lengthMm = null, endZMm = splitZ, endThicknessMm = splitThickness)
+        val second = guide.copy(id = newId, start = vertex, pathId = path, curveMid = splitCurve?.second, lengthMm = null, startZMm = splitZ, startThicknessMm = splitThickness)
         pushUndo(); guides = guides.flatMap { if (it.id == guide.id) listOf(first, second) else listOf(it) }
         extrusions = extrusions.map { if (guide.id in it.guideIds) it.copy(guideIds = it.guideIds + newId) else it }
         selectedGuideId = guide.id; selectedCurveId = null; selectedGuideEndpoint = GuideEndpoint(guide.id, false); selectedWholeGuideId = null; selectedEndpoint = null
+        return true
     }
+    addGuidePointAction = ::addGuidePoint
     /**
      * A selected circle in Modify gets four handles on its rim: left and right set its width, top and bottom its
      * height (the center stays). Different width and height make an oval.
@@ -3988,8 +4032,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                             ActionIcon("Join 3D", R.drawable.ic_join) { startSolidOp(true, key) }
                         }
                         if (tool == Tool.ADJUST && selectedGuideId != null && selectedVertices.isEmpty()) {
-                            ActionIcon("Break pt", R.drawable.ic_point_break, on = pointKind == PointKind.BREAKPOINT) { pointKind = PointKind.BREAKPOINT }
-                            ActionIcon("Curve pt", R.drawable.ic_point_curve, on = pointKind == PointKind.CURVE) { pointKind = PointKind.CURVE }
+                            ActionIcon("Break pt", R.drawable.ic_point_break, on = pointEditArmed && pointKind == PointKind.BREAKPOINT) {
+                                if (pointEditArmed && pointKind == PointKind.BREAKPOINT) pointEditArmed = false else { pointKind = PointKind.BREAKPOINT; pointEditArmed = true }
+                            }
+                            ActionIcon("Curve pt", R.drawable.ic_point_curve, on = pointEditArmed && pointKind == PointKind.CURVE) {
+                                if (pointEditArmed && pointKind == PointKind.CURVE) pointEditArmed = false else { pointKind = PointKind.CURVE; pointEditArmed = true }
+                            }
                             if (selectedGuideEndpoint != null || selectedCurveId != null) ActionIcon("Del point", R.drawable.ic_delete_point, tint = red, onClick = ::deleteSelectedGuidePoint)
                         }
                         if (tool == Tool.ADJUST && panOnEmptyDrag) ActionIcon("Box", R.drawable.ic_select_area) { panOnEmptyDrag = false }
