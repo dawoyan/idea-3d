@@ -228,7 +228,8 @@ private class ModelSetup(val frames: Map<ModelPlane, PlaneFrame>, val scales: Ma
 private data class FinderItem(val plane: ModelPlane, val guideIds: List<Int>, val name: String, val kind: String, val outline: List<List<Pt>>, val bounds: FloatArray)
 
 /** A 3D cut or join between two objects, each named by its drawing plane and object id. A kept cut tool stays in the model. */
-private data class SolidOp(val target: Pair<ModelPlane, Int>, val tool: Pair<ModelPlane, Int>, val join: Boolean, val keepTool: Boolean = false)
+private enum class SolidMode { JOIN, CUT, COMMON }
+private data class SolidOp(val target: Pair<ModelPlane, Int>, val tool: Pair<ModelPlane, Int>, val join: Boolean, val keepTool: Boolean = false, val common: Boolean = false)
 
 /** Geometry of a drawing plane that is not the one being edited; items keep their [ModelPlane] tag. */
 private data class PlaneGeometry(val lines: List<MeasureLine> = emptyList(), val guides: List<GuideLine> = emptyList(), val extrusions: List<Extrusion> = emptyList())
@@ -708,7 +709,7 @@ private object ProjectStore {
         }) }
         val extrusions = JSONArray()
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
-        File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene); put("frames", JSONObject().apply { project.frames.forEach { (plane, f) -> put(plane.name, JSONObject().apply { put("u", f.originU); put("v", f.originV); put("w", f.width); put("h", f.height) }) } }); put("solidOps", JSONArray().apply { project.solidOps.forEach { op -> put(JSONObject().apply { put("targetPlane", op.target.first.name); put("target", op.target.second); put("toolPlane", op.tool.first.name); put("tool", op.tool.second); put("join", op.join); put("keepTool", op.keepTool) }) } }); put("groups", JSONArray().apply { project.itemGroups.forEach { group -> put(JSONArray().apply { group.forEach { (plane, id) -> put(JSONObject().apply { put("plane", plane.name); put("id", id) }) } }) } })
+        File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene); put("frames", JSONObject().apply { project.frames.forEach { (plane, f) -> put(plane.name, JSONObject().apply { put("u", f.originU); put("v", f.originV); put("w", f.width); put("h", f.height) }) } }); put("solidOps", JSONArray().apply { project.solidOps.forEach { op -> put(JSONObject().apply { put("targetPlane", op.target.first.name); put("target", op.target.second); put("toolPlane", op.tool.first.name); put("tool", op.tool.second); put("join", op.join); put("keepTool", op.keepTool); put("common", op.common) }) } }); put("groups", JSONArray().apply { project.itemGroups.forEach { group -> put(JSONArray().apply { group.forEach { (plane, id) -> put(JSONObject().apply { put("plane", plane.name); put("id", id) }) } }) } })
             put("models", JSONArray().apply { project.models.forEach { m -> put(JSONObject().apply { put("id", m.id); put("name", m.name); put("x", m.center.x); put("y", m.center.y); put("z", m.center.z); put("scale", m.scale); put("rx", m.rx); put("ry", m.ry); put("rz", m.rz); put("color", m.argb); put("finish", m.finish.name)
                 put("turns", JSONArray().apply { m.turns.forEach { (axis, deg) -> put(JSONArray().apply { put(axis); put(deg) }) } }) }) } }) }.toString())
     }
@@ -795,7 +796,7 @@ private object ProjectStore {
         return SavedProject(json.getString("id"), json.getString("name"), json.optString("unit", "mm"), lines, guides, json.optBoolean("guidesDetected", false), json.optLong("capturedAt", fallbackTime), json.optDouble("rotation", 0.0).toFloat(), PictureOptions(figure, json.optBoolean("sum"), json.optBoolean("legend"), json.optBoolean("guess"), transparency), extrusions, json.optBoolean("blankScene", false), json.optJSONObject("frames")?.let { frames ->
             ModelPlane.entries.mapNotNull { plane -> frames.optJSONObject(plane.name)?.let { f -> plane to PlaneFrame(f.getDouble("u"), f.getDouble("v"), f.getInt("w"), f.getInt("h")) } }.toMap()
         }.orEmpty(), json.optJSONArray("solidOps")?.let { ops -> (0 until ops.length()).map { i -> ops.getJSONObject(i).let { o ->
-            SolidOp(ModelPlane.of(o.optString("targetPlane")) to o.getInt("target"), ModelPlane.of(o.optString("toolPlane")) to o.getInt("tool"), o.optBoolean("join"), o.optBoolean("keepTool")) } } }.orEmpty(),
+            SolidOp(ModelPlane.of(o.optString("targetPlane")) to o.getInt("target"), ModelPlane.of(o.optString("toolPlane")) to o.getInt("tool"), o.optBoolean("join"), o.optBoolean("keepTool"), o.optBoolean("common")) } } }.orEmpty(),
             json.optJSONArray("groups")?.let { groups -> (0 until groups.length()).map { i -> groups.getJSONArray(i).let { g -> (0 until g.length()).map { k -> g.getJSONObject(k).let { ModelPlane.of(it.optString("plane")) to it.getInt("id") } } } } }.orEmpty(),
             json.optJSONArray("models")?.let { models -> (0 until models.length()).map { i -> models.getJSONObject(i).let { m ->
                 ImportedModel(m.getInt("id"), m.optString("name", "Model"), Vec3(m.optDouble("x", 0.0), m.optDouble("y", 0.0), m.optDouble("z", 0.0)), m.optDouble("scale", 1.0), m.optDouble("rx", 0.0), m.optDouble("ry", 0.0), m.optDouble("rz", 0.0), m.optInt("color", 0xFF9E9E9E.toInt()), Finish.of(m.optString("finish")),
@@ -1497,7 +1498,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val specs = buildSolidSpecs(others.flatMap { it.guides }, others.flatMap { it.extrusions }, setup, objects, strict = false)
             val axes = listOf(Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0))
             // A 3D cut's or join's tool that was used up is gone from the model, so it isn't shown here either.
-            val usedUp = solidOpsNow.filter { it.join || !it.keepTool }.map { it.tool }.toSet()
+            val usedUp = solidOpsNow.filter { it.join || it.common || !it.keepTool }.map { it.tool }.toSet()
             specs.zip(objects).mapNotNull { (spec, extrusion) ->
                 if ((extrusion.plane to extrusion.id) in usedUp) return@mapNotNull null
                 val mesh = runCatching { MeshBuilder.extrude(spec) }.getOrNull() ?: return@mapNotNull null
@@ -1775,20 +1776,26 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         return extrusions.firstOrNull { e -> extrusionGuides(e, guides).any { it.id == id } }?.let { editPlane to it.id }
     }
     fun objectName(key: Pair<ModelPlane, Int>): String = objectNames[key] ?: "Shape"
-    /** Starts a 3D cut (or join) of [target]; the next object tapped, in the canvas or the 3D view, is the other one. */
-    fun startSolidOp(join: Boolean, target: Pair<ModelPlane, Int>) { solidPick = join to target }
+    /** Starts a 3D boolean; the next object tapped, in the canvas or the 3D view, is the other one. */
+    var pendingSolidMode by remember { mutableStateOf(SolidMode.CUT) }
+    fun startSolidOp(mode: SolidMode, target: Pair<ModelPlane, Int>) {
+        pendingSolidMode = mode
+        solidPick = (mode == SolidMode.JOIN) to target
+        logToast(context, "${when (mode) { SolidMode.JOIN -> "Join"; SolidMode.CUT -> "Cut"; SolidMode.COMMON -> "Keep common area" }}: now tap the second 3D object", Toast.LENGTH_LONG).show()
+    }
     fun finishSolidOp(other: Pair<ModelPlane, Int>?) {
         val (join, target) = solidPick ?: return
+        val mode = pendingSolidMode
         solidPick = null
         if (other == null) return
         if (other == target) { logToast(context, "Pick a different object", Toast.LENGTH_SHORT).show(); return }
-        val op = SolidOp(target, other, join)
-        if (join) { pushUndo(); solidOps = solidOps + op } else pendingCut = op
+        val op = SolidOp(target, other, join = mode == SolidMode.JOIN, common = mode == SolidMode.COMMON)
+        if (mode == SolidMode.CUT) pendingCut = op else { pushUndo(); solidOps = solidOps + op; logToast(context, if (mode == SolidMode.COMMON) "Kept only the common 3D area" else "3D objects joined", Toast.LENGTH_SHORT).show() }
     }
     /** Lists the cuts and joins [key] takes part in, each with a way to undo it. */
     fun solidOpsOf(key: Pair<ModelPlane, Int>): List<Pair<String, () -> Unit>> = solidOps.filter { it.target == key || it.tool == key }.map { op ->
-        val text = if (op.target == key) { if (op.join) "Joined with ${objectName(op.tool)}" else "Cut by ${objectName(op.tool)}${if (op.keepTool) " (kept)" else ""}" }
-            else { if (op.join) "Joined into ${objectName(op.target)}" else "Cuts ${objectName(op.target)}${if (op.keepTool) "" else " (hidden in 3D)"}" }
+        val text = if (op.target == key) { when { op.common -> "Common area with ${objectName(op.tool)}"; op.join -> "Joined with ${objectName(op.tool)}"; else -> "Cut by ${objectName(op.tool)}${if (op.keepTool) " (kept)" else ""}" } }
+            else { when { op.common -> "Used for common area of ${objectName(op.target)}"; op.join -> "Joined into ${objectName(op.target)}"; else -> "Cuts ${objectName(op.target)}${if (op.keepTool) "" else " (hidden in 3D)"}" } }
         text to { pushUndo(); solidOps = solidOps - op }
     }
 
@@ -2014,6 +2021,48 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         guides = guides + pts.indices.map { i -> GuideLine(firstId + i, pts[i], pts[(i + 1) % 4], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth) }
         tool = Tool.NONE; selectedGuideId = firstId; selectedWholeGuideId = null; guideDeleteCandidateId = firstId
         if (square) logToast(context, "Square", Toast.LENGTH_SHORT).show()
+    }
+    /** True for a four-sided straight rectangle, regardless of its rotation on the canvas. */
+    fun rectangleShape(guideId: Int): List<GuideLine>? {
+        val shape = closedGuideShapes(guides).firstOrNull { it.any { g -> g.id == guideId } } ?: return null
+        if (shape.size != 4 || shape.any { it.curveMid != null }) return null
+        val vectors = shape.map { Pt(it.end.x - it.start.x, it.end.y - it.start.y) }
+        val lengths = vectors.map { hypot(it.x.toDouble(), it.y.toDouble()) }
+        if (lengths.any { it < 4.0 }) return null
+        return shape.takeIf { index -> index.indices.all { i ->
+            val a = vectors[i]; val b = vectors[(i + 1) % 4]
+            abs((a.x * b.x + a.y * b.y) / (lengths[i] * lengths[(i + 1) % 4]).toFloat()) < .025f
+        } }
+    }
+    /** Replaces a rectangle with straight sides and quadratic rounded corners. */
+    fun roundRectangle(guideId: Int) {
+        val shape = rectangleShape(guideId) ?: run { logToast(context, "Round works on a four-sided rectangle", Toast.LENGTH_SHORT).show(); return }
+        val vertices = shape.map { it.start }
+        val lengths = shape.map { distance(it.start, it.end).toFloat() }
+        val radius = min(36f, lengths.minOrNull()!! * .18f)
+        fun toward(from: Pt, to: Pt, amount: Float): Pt {
+            val length = distance(from, to).toFloat().coerceAtLeast(.001f)
+            return Pt(from.x + (to.x - from.x) * amount / length, from.y + (to.y - from.y) * amount / length)
+        }
+        val before = vertices.indices.map { i -> toward(vertices[i], vertices[(i + 3) % 4], radius) }
+        val after = vertices.indices.map { i -> toward(vertices[i], vertices[(i + 1) % 4], radius) }
+        fun quadraticAt(a: Pt, control: Pt, b: Pt): Pt = Pt((a.x + 2f * control.x + b.x) / 4f, (a.y + 2f * control.y + b.y) / 4f)
+        val oldIds = shape.map { it.id }.toSet()
+        var next = nextGuideId(guides)
+        val ids = listOf(shape.first().id) + List(7) { next++ }
+        val rounded = buildList {
+            for (i in 0 until 4) {
+                val nextCorner = (i + 1) % 4
+                add(shape[i].copy(id = ids[size], start = after[i], end = before[nextCorner], curveMid = null, lengthMm = null, shapeWidthMm = null, shapeHeightMm = null))
+                val cornerStyle = shape[nextCorner]
+                add(cornerStyle.copy(id = ids[size], start = before[nextCorner], end = after[nextCorner], curveMid = quadraticAt(before[nextCorner], vertices[nextCorner], after[nextCorner]), lengthMm = null, shapeWidthMm = null, shapeHeightMm = null))
+            }
+        }
+        pushUndo()
+        guides = guides.filterNot { it.id in oldIds } + rounded
+        extrusions = extrusions.map { e -> if (e.guideIds.any { it in oldIds }) e.copy(guideIds = (e.guideIds.filterNot { it in oldIds } + rounded.map { it.id }).distinct()) else e }
+        selectedGuideId = rounded.first().id; selectedWholeGuideId = rounded.first().id; selectedGuideEndpoint = null; selectedCurveId = null
+        logToast(context, "Rectangle corners rounded", Toast.LENGTH_SHORT).show()
     }
     fun handleTap(point: Pt, hitRadius: Double) {
         if (selectMode) {
@@ -2672,6 +2721,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         }
         val result = when (operation) {
             "merge" -> second?.let { shapeBoolean(first, it, android.graphics.Path.Op.UNION) }
+            "common" -> second?.let { shapeBoolean(first, it, android.graphics.Path.Op.INTERSECT) }
             "cut-first", "cut-second" -> if (target != null && razor != null) shapeBoolean(target, razor, android.graphics.Path.Op.DIFFERENCE) else null
             "line" -> if (cutter != null) cutShapeByLine(first, cutter, bitmap?.width ?: 1, bitmap?.height ?: 1) else null
             else -> null
@@ -2680,13 +2730,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             logToast(context, "Cannot create editable shapes from this cut.", Toast.LENGTH_LONG).show()
             return
         }
-        val removed = if (operation == "merge") first + second.orEmpty() else target ?: return
+        val removed = if (operation == "merge" || operation == "common") first + second.orEmpty() else target ?: return
         var id = nextGuideId(guides)
         var pathId = nextGuidePathId(guides)
-        val style = if (operation == "merge") first.first() else target!!.first()
+        val style = if (operation == "merge" || operation == "common") first.first() else target!!.first()
         val newShapes = result.map { contour ->
             val path = pathId++
-            val sources = if (operation == "merge") first + second.orEmpty() else target!!
+            val sources = if (operation == "merge" || operation == "common") first + second.orEmpty() else target!!
             val curves = sources.filter { it.curveMid != null }
             val edges = contour.indices.map { i ->
                 val a = contour[i]; val b = contour[(i + 1) % contour.size]
@@ -3539,6 +3589,22 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         if (targetSolid != null && cutterSolid != null) { pendingCut = SolidOp(target.first to targetSolid.id, cutter.first to cutterSolid.id, join = false); pickedItems = emptyList(); return }
         logToast(context, "Cut needs a shape and a shape or straight line in the same view, or two 3D objects", Toast.LENGTH_LONG).show()
     }
+    /** Keeps only the overlap of two selected shapes (or their shared 3D volume). */
+    fun commonPicked() {
+        val first = pickedItems.firstOrNull(); val second = first?.let { a -> pickedItems.firstOrNull { !sameItem(it, a) } }
+        if (first == null || second == null) { logToast(context, "Pick two shapes: first and second", Toast.LENGTH_SHORT).show(); return }
+        if (first.first == second.first && isClosedShape(first) && isClosedShape(second)) {
+            if (editPlane != first.first) switchPlane(first.first)
+            applyShapeOperation(JunctionAction(JunctionKind.SHAPE_OVERLAP, first.second, second.second, Pt(0f, 0f)), "common")
+            pickedItems = emptyList(); return
+        }
+        val a = extrusionOf(first); val b = extrusionOf(second)
+        if (a != null && b != null) {
+            pushUndo(); solidOps = solidOps + SolidOp(first.first to a.id, second.first to b.id, join = false, common = true); pickedItems = emptyList()
+            logToast(context, "Kept only the common 3D area", Toast.LENGTH_SHORT).show(); return
+        }
+        logToast(context, "Common needs two closed shapes or two 3D objects", Toast.LENGTH_LONG).show()
+    }
     /** Arrange: line up the picked items' centers on this view's horizontal or vertical, or space them evenly. */
     fun arrangePicked(horizontal: Boolean, distribute: Boolean) {
         val here = modelSetup().mapping(editPlane) ?: return
@@ -3933,9 +3999,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     !selectMode && tool == Tool.ADJUST && (selectedWholeGuideId != null || selectedGuideId != null || selectedForeign != null || selectedVertices.size >= 2))
                 @Composable fun TurnIcons() {
                     if (!canTurn) return
-                    ActionIcon("Turn ↺", R.drawable.ic_rotate_left) { turnSelection(turnStep) }
-                    ActionIcon("Turn ↻", R.drawable.ic_rotate_right) { turnSelection(-turnStep) }
-                    ActionIcon("${turnStep.toInt()}°", R.drawable.ic_sizes) { turnStep = if (turnStep == 15.0) 90.0 else if (turnStep == 90.0) 5.0 else 15.0 }
+                    // One compact control: the angle belongs between the two turns,
+                    // and its thin border keeps it from looking like three unrelated
+                    // actions in the scrolling command row.
+                    Row(Modifier.border(1.dp, Color(0xFFB8C1BE), RoundedCornerShape(8.dp)).clip(RoundedCornerShape(8.dp))) {
+                        ActionIcon("Turn ↺", R.drawable.ic_rotate_left) { turnSelection(turnStep) }
+                        ActionIcon("${turnStep.toInt()}°", R.drawable.ic_sizes) { turnStep = if (turnStep == 15.0) 90.0 else if (turnStep == 90.0) 5.0 else 15.0 }
+                        ActionIcon("Turn ↻", R.drawable.ic_rotate_right) { turnSelection(-turnStep) }
+                    }
                 }
                 // View 3D, Fit and Sizes: first normally; last while Modify has something selected, so its own buttons lead.
                 @Composable fun ViewIcons() {
@@ -3975,6 +4046,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
+                        ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
                         ActionIcon("Copy lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
                         ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
@@ -3994,6 +4066,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                             // Grow: shows arrows to pull the shape into a 3D object (or change its depth).
                             if (tool == Tool.ADJUST && inShape) ActionIcon("Grow", R.drawable.ic_cube, on = growMode) { growMode = !growMode }
                             if (inShape) ActionIcon("Outline", R.drawable.ic_outline) { outlineOf(listOf(homeKey(guide))) }
+                            if (tool == Tool.ADJUST && rectangleShape(guide.id) != null) ActionIcon("Round", R.drawable.ic_point_curve) { roundRectangle(guide.id) }
                         }
                         // A 3D object from another view: Grow shows its front and back arrows.
                         if (tool == Tool.ADJUST && selectedForeign != null) ActionIcon("Grow", R.drawable.ic_cube, on = growMode) { growMode = !growMode }
@@ -4023,13 +4096,15 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                         if (tool == Tool.ADJUST) selectedForeignObject()?.let { target ->
                             if (selectedForeignPoint != null) ActionIcon("Move by", R.drawable.ic_move_point) { movePointDialog = true }
                             ActionIcon("Position", R.drawable.ic_cube) { foreignDialog = target.key }
-                            ActionIcon("Cut 3D", R.drawable.ic_scissors) { startSolidOp(false, target.key) }
-                            ActionIcon("Join 3D", R.drawable.ic_join) { startSolidOp(true, target.key) }
+                            ActionIcon("Cut by", R.drawable.ic_scissors) { startSolidOp(SolidMode.CUT, target.key) }
+                            ActionIcon("Common", R.drawable.ic_join) { startSolidOp(SolidMode.COMMON, target.key) }
+                            ActionIcon("Join 3D", R.drawable.ic_join) { startSolidOp(SolidMode.JOIN, target.key) }
                             ActionIcon("Its view", R.drawable.ic_open_plane) { openInOwnView(target.key) }
                         }
                         if (tool == Tool.ADJUST && selectedForeign == null && selectedGuideEndpoint == null && selectedCurveId == null) ownSelectedObject()?.let { key ->
-                            ActionIcon("Cut 3D", R.drawable.ic_scissors) { startSolidOp(false, key) }
-                            ActionIcon("Join 3D", R.drawable.ic_join) { startSolidOp(true, key) }
+                            ActionIcon("Cut by", R.drawable.ic_scissors) { startSolidOp(SolidMode.CUT, key) }
+                            ActionIcon("Common", R.drawable.ic_join) { startSolidOp(SolidMode.COMMON, key) }
+                            ActionIcon("Join 3D", R.drawable.ic_join) { startSolidOp(SolidMode.JOIN, key) }
                         }
                         if (tool == Tool.ADJUST && selectedGuideId != null && selectedVertices.isEmpty()) {
                             ActionIcon("Break pt", R.drawable.ic_point_break, on = pointEditArmed && pointKind == PointKind.BREAKPOINT) {
@@ -4528,7 +4603,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val extrusion = geometry?.extrusions?.firstOrNull { it.id == target.second }
         val name = viewerModel?.objectNames?.getOrNull(index) ?: "Object"
         if (target == null || geometry == null || extrusion == null) viewerEditObject = null
-        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, solidOpsOf(target), onCut = { viewerEditObject = null; startSolidOp(false, target) }, onJoin = { viewerEditObject = null; startSolidOp(true, target) }, onDismiss = { viewerEditObject = null }, onRemove3d = {
+        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, solidOpsOf(target), onCut = { viewerEditObject = null; startSolidOp(SolidMode.CUT, target) }, onJoin = { viewerEditObject = null; startSolidOp(SolidMode.JOIN, target) }, onDismiss = { viewerEditObject = null }, onRemove3d = {
             pushUndo()
             setPlaneShapes(target.first, geometry.guides, geometry.extrusions.filterNot { it.id == extrusion.id })
             viewerEditObject = null
@@ -4753,7 +4828,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val extrusion = geometry.extrusions.firstOrNull { it.id == target.second }
         val name = foreign.firstOrNull { it.key == target }?.name ?: "Object"
         if (extrusion == null) foreignDialog = null
-        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, solidOpsOf(target), onCut = { foreignDialog = null; startSolidOp(false, target) }, onJoin = { foreignDialog = null; startSolidOp(true, target) }, onDismiss = { foreignDialog = null }, onRemove3d = {
+        else ObjectDepthDialog(name, target.first, facePositionMm(extrusion), extrusion.depthMm, unit, solidOpsOf(target), onCut = { foreignDialog = null; startSolidOp(SolidMode.CUT, target) }, onJoin = { foreignDialog = null; startSolidOp(SolidMode.JOIN, target) }, onDismiss = { foreignDialog = null }, onRemove3d = {
             pushUndo()
             setPlaneShapes(target.first, geometry.guides, geometry.extrusions.filterNot { it.id == extrusion.id })
             foreignDialog = null; selectedForeign = null
@@ -7088,7 +7163,7 @@ private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops
     }
     if (issues.any { it.blocking }) throw MeshException(issues)
     val keys = objects.map { it.plane to it.id }
-    val operations = ops.mapNotNull { op -> val target = keys.indexOf(op.target); val tool = keys.indexOf(op.tool); if (target < 0 || tool < 0 || target == tool) null else SolidOperation(target, tool, op.join, op.keepTool) }
+    val operations = ops.mapNotNull { op -> val target = keys.indexOf(op.target); val tool = keys.indexOf(op.tool); if (target < 0 || tool < 0 || target == tool) null else SolidOperation(target, tool, op.join, op.keepTool, op.common) }
     val combined = SolidCombiner.apply(raw.map { it!! }, operations)
     combined.forEach { mesh -> if (mesh != null) issues += MeshBuilder.validate(mesh) }
     if (issues.any { it.blocking }) throw MeshException(issues)

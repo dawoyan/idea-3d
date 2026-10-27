@@ -115,6 +115,13 @@ object Csg {
         return toMesh(a.name, na.allPolygons(), a.argb)
     }
 
+    /** Only the volume shared by [a] and [b]. */
+    fun intersect(a: Mesh, b: Mesh): Mesh {
+        val na = Node(polygons(a)); val nb = Node(polygons(b))
+        na.invert(); nb.clipTo(na); nb.invert(); na.clipTo(nb); nb.clipTo(na); na.build(nb.allPolygons()); na.invert()
+        return toMesh(a.name, na.allPolygons(), a.argb)
+    }
+
     /** Welds equal points, fans each polygon into triangles and splits edges that pass through other vertices. */
     private fun toMesh(name: String, polygons: List<Poly>, argb: Int): Mesh {
         val scale = max(1.0, polygons.flatMap { it.vertices }.maxOfOrNull { max(abs(it.x), max(abs(it.y), abs(it.z))) } ?: 1.0)
@@ -166,7 +173,7 @@ object Csg {
 }
 
 /** A cut or join between two solids, by their index in the list being combined. */
-data class SolidOperation(val target: Int, val tool: Int, val join: Boolean, val keepTool: Boolean = false)
+data class SolidOperation(val target: Int, val tool: Int, val join: Boolean, val keepTool: Boolean = false, val common: Boolean = false)
 
 object SolidCombiner {
     /**
@@ -178,8 +185,8 @@ object SolidCombiner {
         val removed = BooleanArray(meshes.size)
         operations.forEach { op ->
             if (op.target !in shapes.indices || op.tool !in shapes.indices || op.target == op.tool) return@forEach
-            shapes[op.target] = if (op.join) Csg.union(shapes[op.target], shapes[op.tool]) else Csg.subtract(shapes[op.target], shapes[op.tool])
-            if (op.join || !op.keepTool) removed[op.tool] = true
+            shapes[op.target] = when { op.common -> Csg.intersect(shapes[op.target], shapes[op.tool]); op.join -> Csg.union(shapes[op.target], shapes[op.tool]); else -> Csg.subtract(shapes[op.target], shapes[op.tool]) }
+            if (op.join || op.common || !op.keepTool) removed[op.tool] = true
         }
         return shapes.mapIndexed { i, mesh -> mesh.takeUnless { removed[i] } }
     }
