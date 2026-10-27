@@ -3723,7 +3723,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 logToast(context, "Debug log copied: paste it into your message", Toast.LENGTH_LONG).show()
             },
             onExportLog = { if (bitmap != null) { exportMeasurementLog(context, lines, scale, unit); logToast(context, "Measurement log saved", Toast.LENGTH_SHORT).show() } },
-            onExportBoschLog = { exportBoschDiagnosticLog(context); logToast(context, "Bosch diagnostic log saved", Toast.LENGTH_SHORT).show() },
             onBack = { showSettings = false }
         )
     } else Scaffold(
@@ -3985,11 +3984,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     if (showDistanceEntry && draftStart != null && pendingEnd != null) DistanceDialog(
         isReference = tool == Tool.CALIBRATE, referenceCount = referenceCount, unit = unit, unknownSize = unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() },
         onDismiss = { showDistanceEntry = false; pendingEnd = null; if (!pendingBrokenSegment) draftStart = null; pendingBrokenSegment = false },
-        onConfirm = { entered, label, enteredUnit, levelOnly, fromBosch, axis ->
+        onConfirm = { entered, label, enteredUnit, levelOnly, axis ->
             val ref = tool == Tool.CALIBRATE
             val storedValue = entered?.times(unitFactorMm(enteredUnit))?.div(unitFactorMm(unit)) ?: 0.0
             val pathId = if (!ref && pendingBrokenSegment) activeMeasurePathId else null
-            val line = MeasureLine(nextId(lines), draftStart!!, pendingEnd!!, storedValue, ref, label, colorIndex = if (!ref && fromBosch) BOSCH_COLOR_INDEX else defaultColor, isScaleReference = !levelOnly && entered != null, pathId = pathId, segmentIndex = if (pathId != null) lines.count { it.pathId == pathId } + 1 else 0, lengthSource = if (!ref && entered == null) LengthSource.UNKNOWN else if (fromBosch) LengthSource.MEASURED else LengthSource.MANUAL, axis = if (ref) axis.key else "")
+            val line = MeasureLine(nextId(lines), draftStart!!, pendingEnd!!, storedValue, ref, label, colorIndex = defaultColor, isScaleReference = !levelOnly && entered != null, pathId = pathId, segmentIndex = if (pathId != null) lines.count { it.pathId == pathId } + 1 else 0, lengthSource = if (!ref && entered == null) LengthSource.UNKNOWN else LengthSource.MANUAL, axis = if (ref) axis.key else "")
             pushUndo()
             val previousScale = scale
             val updated = recalculate(lines + line)
@@ -4321,7 +4320,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         )
     }
     selectedLineId?.let { id -> lines.firstOrNull { it.id == id } }?.let { line ->
-        if (showLineEdit) LineEditDialog(line, unit, measurementPointNames(lines)[line.id], onDismiss = { showLineEdit = false }, onSave = save@{ value, label, colorIndex, lengthEdited, fromBosch, startZ, endZ ->
+        if (showLineEdit) LineEditDialog(line, unit, measurementPointNames(lines)[line.id], onDismiss = { showLineEdit = false }, onSave = save@{ value, label, colorIndex, lengthEdited, startZ, endZ ->
             val startMm = startZ * unitFactorMm(unit); val endMm = endZ * unitFactorMm(unit)
             val depthChanged = startMm != line.startZMm || endMm != line.endZMm
             val fixed = value > 0 && (line.isScaleReference || lengthEdited)
@@ -4344,7 +4343,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             }
             pushUndo()
             lines = recalculate(lines.map { item ->
-                if (item.id == line.id) item.copy(start = start, end = end, startZMm = startMm, endZMm = endMm, value = value, label = label, colorIndex = colorIndex, isScaleReference = if (lengthEdited && value <= 0.0 && !item.isReference) false else item.isScaleReference || lengthEdited, lengthSource = if (!lengthEdited) item.lengthSource else if (value <= 0.0 && !item.isReference) LengthSource.UNKNOWN else if (fromBosch) LengthSource.MEASURED else LengthSource.MANUAL)
+                if (item.id == line.id) item.copy(start = start, end = end, startZMm = startMm, endZMm = endMm, value = value, label = label, colorIndex = colorIndex, isScaleReference = if (lengthEdited && value <= 0.0 && !item.isReference) false else item.isScaleReference || lengthEdited, lengthSource = if (!lengthEdited) item.lengthSource else if (value <= 0.0 && !item.isReference) LengthSource.UNKNOWN else LengthSource.MANUAL)
                 else if (line.pathId != null && item.pathId == line.pathId) item.copy(
                     start = if (distance(item.start, line.start) < 0.6) start else if (distance(item.start, line.end) < 0.6) end else item.start,
                     end = if (distance(item.end, line.start) < 0.6) start else if (distance(item.end, line.end) < 0.6) end else item.end,
@@ -4736,7 +4735,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     onExportGuides: (Boolean) -> Unit,
     onExportLog: () -> Unit,
     onCopyDebugLog: () -> Unit,
-    onExportBoschLog: () -> Unit,
     onBack: () -> Unit
 ) {
     Scaffold(
@@ -4813,10 +4811,6 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     }
                 }
             }
-            HorizontalDivider()
-            BoschConnectionSettings(currentUnit)
-            OutlinedButton(onClick = onExportBoschLog, shape = RoundedCornerShape(8.dp)) { Text("Export Bosch diagnostic log") }
-            HorizontalDivider()
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Current picture", fontWeight = FontWeight.Bold)
                 Text("Export a plain text record of the measurements on the open picture.", fontSize = 13.sp, color = Color(0xFF53615D))
@@ -6189,35 +6183,12 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     }
 }
 
-@Composable private fun DistanceDialog(isReference: Boolean, referenceCount: Int, unit: String, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, onDismiss: () -> Unit, onConfirm: (Double?, String, String, Boolean, Boolean, CalibrationAxis) -> Unit) {
-    val context = LocalContext.current
+@Composable private fun DistanceDialog(isReference: Boolean, referenceCount: Int, unit: String, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, onDismiss: () -> Unit, onConfirm: (Double?, String, String, Boolean, CalibrationAxis) -> Unit) {
     var value by remember { mutableStateOf("") }; var label by remember { mutableStateOf("") }
     var axis by remember { mutableStateOf(CalibrationAxis.UNIFORM) }
     var enteredUnit by remember { mutableStateOf(unit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
     var levelOnly by remember { mutableStateOf(false) }
-    var boschReadingUsed by remember { mutableStateOf(false) }
-    val openedReadingSequence = remember { BoschGlmConnection.lastReading?.sequence ?: 0L }
-    val boschReading = BoschGlmConnection.lastReading
-    val boschReady = BoschGlmConnection.ready
-    val boschStatus = BoschGlmConnection.status
-    val requiredPermissions = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-        else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-    }
-    fun connectBosch() = BoschGlmConnection.connect(context.applicationContext)
-    val bluetoothPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
-        if (requiredPermissions.all { granted[it] == true || context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) connectBosch()
-        else BoschGlmConnection.permissionDenied()
-    }
-    LaunchedEffect(boschReading?.sequence) {
-        val reading = boschReading
-        if (reading != null && reading.sequence > openedReadingSequence) {
-            val targetUnit = if (isReference) enteredUnit else unit
-            value = format(reading.meters * 1000.0 / unitFactorMm(targetUnit))
-            boschReadingUsed = true
-        }
-    }
     AlertDialog(onDismissRequest = onDismiss, title = { Text(if (isReference) if (referenceCount == 0) "Set scale" else "Add 90 degree reference" else "Enter measurement") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (isReference) {
@@ -6253,17 +6224,10 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 Text("Size unknown")
             }
             Text(if (isReference && levelOnly) "This reference is used for alignment only." else if (isReference) "Enter the known distance in $enteredUnit." else if (unknownSize) "Set the length later." else "Enter the known distance.")
-            if (!levelOnly && (isReference || !unknownSize)) OutlinedTextField(value, { if (decimalInputPattern.matches(it)) { value = it; boschReadingUsed = false } }, label = { Text("Distance (${if (isReference) enteredUnit else unit})") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-            if (!levelOnly && (isReference || !unknownSize) && !boschReady) OutlinedButton(onClick = {
-                if (requiredPermissions.all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) connectBosch()
-                else bluetoothPermission.launch(requiredPermissions)
-            }) { Text("Connect Bosch GLM") }
-            if (!levelOnly && (isReference || !unknownSize) && boschReady) Text("Bosch connected. The next laser measurement fills the distance field automatically.", fontSize = 12.sp, color = Color(0xFF1565C0))
-            if (!levelOnly && (isReference || !unknownSize) && boschStatus.isNotBlank()) Text(boschStatus, fontSize = 12.sp, color = Color(0xFF4D5A57))
-            if (boschReadingUsed) Text("Laser measurement received.", fontSize = 12.sp, color = Color(0xFF1565C0), fontWeight = FontWeight.Bold)
+            if (!levelOnly && (isReference || !unknownSize)) OutlinedTextField(value, { if (decimalInputPattern.matches(it)) value = it }, label = { Text("Distance (${if (isReference) enteredUnit else unit})") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             OutlinedTextField(label, { label = it }, label = { Text("Label (optional)") }, singleLine = true)
         }
-    }, confirmButton = { TextButton(onClick = { if (isReference && levelOnly) onConfirm(null, label, enteredUnit, true, false, CalibrationAxis.UNIFORM) else if (!isReference && unknownSize) onConfirm(null, label, unit, false, false, CalibrationAxis.UNIFORM) else value.toDoubleOrNull()?.takeIf { it > 0 }?.let { onConfirm(it, label, if (isReference) enteredUnit else unit, false, boschReadingUsed, axis) } }, enabled = (isReference && levelOnly) || (!isReference && unknownSize) || value.toDoubleOrNull()?.let { it > 0 } == true) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    }, confirmButton = { TextButton(onClick = { if (isReference && levelOnly) onConfirm(null, label, enteredUnit, true, CalibrationAxis.UNIFORM) else if (!isReference && unknownSize) onConfirm(null, label, unit, false, CalibrationAxis.UNIFORM) else value.toDoubleOrNull()?.takeIf { it > 0 }?.let { onConfirm(it, label, if (isReference) enteredUnit else unit, false, axis) } }, enabled = (isReference && levelOnly) || (!isReference && unknownSize) || value.toDoubleOrNull()?.let { it > 0 } == true) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable private fun ShapePairPreview(first: List<GuideLine>, second: List<GuideLine>) {
@@ -6606,54 +6570,23 @@ private data class MadeOf(val materialId: String?, val frame: Boolean)
     }, confirmButton = { TextButton(enabled = (shapeWidth.isBlank() || widthValue != null && widthValue > 0) && (shapeHeight.isBlank() || heightValue != null && heightValue > 0) && (depth.isBlank() || depthValue != null && depthValue >= 0) && (extrusion == null || positionValue != null && positionValue.isFinite()), onClick = { onSave(color, transparency, widthValue, heightValue, depthValue, depthEdited, if (extrusion != null) positionValue else null, made) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-@Composable private fun LineEditDialog(line: MeasureLine, unit: String, points: Pair<String, String>?, onDismiss: () -> Unit, onSave: (Double, String, Int, Boolean, Boolean, Double, Double) -> Unit, onDelete: () -> Unit) {
-    val context = LocalContext.current
+@Composable private fun LineEditDialog(line: MeasureLine, unit: String, points: Pair<String, String>?, onDismiss: () -> Unit, onSave: (Double, String, Int, Boolean, Double, Double) -> Unit, onDelete: () -> Unit) {
     var value by remember(line.id) { mutableStateOf(if (!line.isReference && line.value <= 0.0) "" else format(line.value)) }
     var label by remember(line.id) { mutableStateOf(line.label) }
     var colorIndex by remember(line.id) { mutableIntStateOf(line.colorIndex) }
-    var boschReadingUsed by remember(line.id) { mutableStateOf(false) }
     var lengthEdited by remember(line.id) { mutableStateOf(false) }
     var startZ by remember(line.id, unit) { mutableStateOf(java.math.BigDecimal.valueOf(abs(line.startZMm) / unitFactorMm(unit)).stripTrailingZeros().toPlainString()) }
     var endZ by remember(line.id, unit) { mutableStateOf(java.math.BigDecimal.valueOf(abs(line.endZMm) / unitFactorMm(unit)).stripTrailingZeros().toPlainString()) }
     var startBack by remember(line.id) { mutableStateOf(line.startZMm < 0) }
     var endBack by remember(line.id) { mutableStateOf(line.endZMm < 0) }
     fun zValue(text: String, back: Boolean): Double? = text.replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() }?.let { if (back) -it else it }
-    val openedReadingSequence = remember(line.id) { BoschGlmConnection.lastReading?.sequence ?: 0L }
-    val boschReading = BoschGlmConnection.lastReading
-    val boschStatus = BoschGlmConnection.status
-    val boschReady = BoschGlmConnection.ready
-    val requiredPermissions = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-        else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-    }
-    fun connectBosch() = BoschGlmConnection.connect(context.applicationContext)
-    val bluetoothPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
-        if (requiredPermissions.all { granted[it] == true || context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) connectBosch()
-        else Unit
-    }
-    LaunchedEffect(boschReading?.sequence) {
-        val reading = boschReading
-        if (reading != null && reading.sequence > openedReadingSequence) {
-            value = format(reading.meters * 1000.0 / unitFactorMm(unit))
-            colorIndex = BOSCH_COLOR_INDEX
-            boschReadingUsed = true
-            lengthEdited = true
-        }
-    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (line.isReference) "Edit reference" else points?.let { "Edit ${it.first} - ${it.second}" } ?: "Edit measurement") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("A manually entered size stays fixed. Calibration lines always determine the scale for calculated lines.")
-                OutlinedTextField(value = value, onValueChange = { if (decimalInputPattern.matches(it)) { value = it; lengthEdited = true; boschReadingUsed = false } }, label = { Text("Size ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                if (!boschReady) OutlinedButton(onClick = {
-                    if (requiredPermissions.all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) connectBosch()
-                    else bluetoothPermission.launch(requiredPermissions)
-                }) { Text("Connect Bosch GLM") }
-                else Text("Bosch connected. The next laser measurement fills this field automatically.", fontSize = 12.sp, color = Color(0xFF1565C0))
-                if (boschStatus.isNotBlank()) Text(boschStatus, fontSize = 12.sp, color = Color(0xFF4D5A57))
-                if (boschReadingUsed) Text("Laser measurement: this line will be blue.", fontSize = 12.sp, color = Color(0xFF1565C0), fontWeight = FontWeight.Bold)
+                OutlinedTextField(value = value, onValueChange = { if (decimalInputPattern.matches(it)) { value = it; lengthEdited = true } }, label = { Text("Size ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                 OutlinedTextField(value = label, onValueChange = { label = it }, label = { Text("Label") }, singleLine = true)
                 if (!line.isReference) {
                     Text("Point ${DepthWords.axis} offset", fontWeight = FontWeight.Medium)
@@ -6671,7 +6604,7 @@ private data class MadeOf(val materialId: String?, val frame: Boolean)
                     }
                     Text("Length source: ${when (line.lengthSource) { LengthSource.CALCULATED -> "calculated from calibration"; LengthSource.MANUAL -> "entered manually"; LengthSource.MEASURED -> "measured by laser"; LengthSource.UNKNOWN -> "unknown" }}", fontSize = 12.sp, color = Color(0xFF4D5A57))
                 }
-                if (!line.isReference) OutlinedButton(onClick = { val a = zValue(startZ, startBack); val b = zValue(endZ, endBack); if (a != null && b != null) onSave(0.0, label, colorIndex, true, false, a, b) }) { Text("Set unknown") }
+                if (!line.isReference) OutlinedButton(onClick = { val a = zValue(startZ, startBack); val b = zValue(endZ, endBack); if (a != null && b != null) onSave(0.0, label, colorIndex, true, a, b) }) { Text("Set unknown") }
                 if (!line.isReference) Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Color")
                     lineColors.indices.forEach { index ->
@@ -6680,7 +6613,7 @@ private data class MadeOf(val materialId: String?, val frame: Boolean)
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { val a = zValue(startZ, startBack); val b = zValue(endZ, endBack); value.toDoubleOrNull()?.takeIf { it > 0 }?.let { if (a != null && b != null) onSave(if (lengthEdited) it else line.value, label, colorIndex, lengthEdited, boschReadingUsed, a, b) } }, enabled = value.toDoubleOrNull()?.let { it > 0 } == true && zValue(startZ, startBack) != null && zValue(endZ, endBack) != null) { Text("Save") } },
+        confirmButton = { TextButton(onClick = { val a = zValue(startZ, startBack); val b = zValue(endZ, endBack); value.toDoubleOrNull()?.takeIf { it > 0 }?.let { if (a != null && b != null) onSave(if (lengthEdited) it else line.value, label, colorIndex, lengthEdited, a, b) } }, enabled = value.toDoubleOrNull()?.let { it > 0 } == true && zValue(startZ, startBack) != null && zValue(endZ, endBack) != null) { Text("Save") } },
         dismissButton = {
             Row {
                 TextButton(onClick = onDelete, colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFB3261E))) { Text("Delete") }
