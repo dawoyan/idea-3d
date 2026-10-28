@@ -3312,7 +3312,27 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
     LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, solidOps, materials, unit, importedModels) { if (show3d) open3dView(viewerScope) }
+    /** The 2D plane whose normal is closest to the direction currently seen in 3D. */
+    fun closest2dPlane() : ModelPlane {
+        val yaw = Math.toRadians(viewerCamera.yaw.toDouble())
+        val pitch = Math.toRadians(viewerCamera.pitch.toDouble())
+        // The viewer starts facing the Front plane. Apply its same X then Y orbit
+        // rotations and select the plane with the dominant facing direction.
+        val facingX = abs(kotlin.math.sin(yaw) * kotlin.math.cos(pitch))
+        val facingY = abs(kotlin.math.sin(pitch))
+        val facingZ = abs(kotlin.math.cos(yaw) * kotlin.math.cos(pitch))
+        return when {
+            facingZ >= facingX && facingZ >= facingY -> ModelPlane.FRONT
+            facingY >= facingX -> ModelPlane.TOP
+            else -> ModelPlane.PROFILE
+        }
+    }
     fun leave3d() { viewerRequest++; viewerBuilding = false; show3d = false; viewerModel = null; viewerEditObject = null; viewerScope = null }
+    fun leave3dToPlane(plane: ModelPlane) {
+        leave3d()
+        if (plane != editPlane) switchPlane(plane) else fitView()
+    }
+    fun leave3dToClosestPlane() = leave3dToPlane(closest2dPlane())
     /** Switches to the view a foreign object was drawn in and selects it there, where all drawing tools apply. */
     fun openInOwnView(key: Pair<ModelPlane, Int>) {
         leave3d(); switchPlane(key.first); tool = Tool.ADJUST
@@ -4071,7 +4091,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 // View 3D, Fit and Sizes: first normally; last while Modify has something selected, so its own buttons lead.
                 @Composable fun ViewIcons() {
                     // Only shows the model in 3D; nothing is converted.
-                    if (show3d) ActionIcon("Back to 2D", R.drawable.ic_open_plane) { leave3d() }
+                    if (show3d) {
+                        ActionIcon("Back to 2D", R.drawable.ic_open_plane) { leave3dToClosestPlane() }
+                        ActionIcon("Front", R.drawable.ic_viewpoints) { leave3dToPlane(ModelPlane.FRONT) }
+                        ActionIcon("Profile", R.drawable.ic_viewpoints) { leave3dToPlane(ModelPlane.PROFILE) }
+                        ActionIcon("Top", R.drawable.ic_viewpoints) { leave3dToPlane(ModelPlane.TOP) }
+                    }
                     else ActionIcon("View 3D", R.drawable.ic_cube) { open3dView() }
                     if (!show3d) {
                         ActionIcon("Fit", R.drawable.ic_fit) { fitView() }
@@ -4184,9 +4209,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 // A selected item's View 3D button above previews only that item.
                 // The regular main-view button remains the whole-scene 3D view.
             }
-            PlaneSwitcher(editPlane, show3d, axesHint, mirroredViews, onPlane = { plane, flip ->
+            if (!show3d) PlaneSwitcher(editPlane, false, axesHint, mirroredViews, onPlane = { plane, flip ->
                 mirroredViews = if (flip) mirroredViews + plane else mirroredViews - plane
-                leave3d(); if (plane != editPlane) switchPlane(plane) else fitView()
+                if (plane != editPlane) switchPlane(plane) else fitView()
             })
             val model = viewerModel
             if (show3d && model != null) ThreeDViewerPane(
