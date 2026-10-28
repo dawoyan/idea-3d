@@ -1,4 +1,5 @@
 import java.util.Properties
+import com.android.build.gradle.internal.api.BaseVariantOutputImpl
 
 plugins {
     id("com.android.application")
@@ -18,8 +19,8 @@ android {
         applicationId = "com.davoyans.idea3d"
         minSdk = 26
         targetSdk = 36
-        versionCode = 60
-        versionName = "0.10.19"
+        versionCode = 61
+        versionName = "0.10.20"
     }
     signingConfigs {
         create("release") {
@@ -39,6 +40,13 @@ android {
     testOptions { unitTests.isReturnDefaultValues = true }
     buildFeatures { compose = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+}
+
+android.applicationVariants.all {
+    outputs.all {
+        (this as BaseVariantOutputImpl).outputFileName =
+            "idea-3d-${android.defaultConfig.versionName}.apk"
+    }
 }
 
 dependencies {
