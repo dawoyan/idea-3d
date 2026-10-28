@@ -1847,7 +1847,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun objectAt(point: Pt): Pair<ModelPlane, Int>? = ownObjectAt(point) ?: foreign.lastOrNull { insideForeign(it, point) }?.key
     /** Maps a canvas tap through the displayed mesh triangle to the object's own face.
      * This is what makes a line follow a visible object even when it was drawn in another view. */
-    fun surfacePickAt(point: Pt, only: Pair<ModelPlane, Int>? = null): SurfacePick? {
+    fun surfacePickAt(point: Pt, only: Pair<ModelPlane, Int>? = null, ignore: Set<Pair<ModelPlane, Int>> = emptySet()): SurfacePick? {
         fun inTriangle(a: Pt, b: Pt, c: Pt): Triple<Float, Float, Float>? {
             val den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y)
             if (abs(den) < 0.0001f) return null
@@ -1857,7 +1857,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             return if (u >= -.001f && v >= -.001f && w >= -.001f) Triple(u, v, w) else null
         }
         foreign.asReversed().forEach { target ->
-            if (only != null && target.key != only) return@forEach
+            if ((only != null && target.key != only) || target.key in ignore) return@forEach
             for (i in target.canvas.indices step 6) {
                 val weights = inTriangle(Pt(target.canvas[i], target.canvas[i + 1]), Pt(target.canvas[i + 2], target.canvas[i + 3]), Pt(target.canvas[i + 4], target.canvas[i + 5])) ?: continue
                 val (u, v, w) = weights
@@ -1867,13 +1867,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }
         ownObjectAt(point)?.let { ownKey ->
-            if (only == null || ownKey == only) {
+            if ((only == null || ownKey == only) && ownKey !in ignore) {
                 val geometry = planeGeometry(ownKey.first)
                 geometry.extrusions.firstOrNull { extrusion -> extrusionGuides(extrusion, geometry.guides).any { it.id == ownKey.second } }?.let { return SurfacePick(ownKey, point, facePositionMm(it)) }
             }
         }
         // Flat lines and shapes are valid visible attachment targets too. Their surface is their stored depth.
-        val flat = closestGuide(point, guides, 56.0) ?: closedGuideShapes(guides).lastOrNull { pointInsidePolygon(point, shapePoints(it)) }?.firstOrNull()
+        val flat = closestGuide(point, guides.filterNot { editPlane to it.id in ignore }, 56.0) ?: closedGuideShapes(guides).lastOrNull { shape -> pointInsidePolygon(point, shapePoints(shape)) && shape.none { editPlane to it.id in ignore } }?.firstOrNull()
         if (flat != null) {
             // `guides` is already the visible projection in this editor view.
             // Keep the attachment in that view even when the displayed target
@@ -2039,12 +2039,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val nextExtrusions = geometry.extrusions.map { e -> if (e.guideIds.none { it in ids }) e else e.copy(origin = moved(e.origin), handle = moved(e.handle)) }
         setPlaneShapes(key.first, nextGuides, nextExtrusions)
     }
-    fun startSurfaceAttach(keys: List<Pair<ModelPlane, Int>>) {
-        val usable = keys.distinctBy { it.first to (itemGuides(it).minOfOrNull { g -> g.id } ?: it.second) }
-        if (usable.isEmpty()) { logToast(context, "Select a line or flat shape first", Toast.LENGTH_LONG).show(); return }
-        surfaceAttachItems = usable
-        logToast(context, "Stick selected: now tap a visible line, shape, or 3D surface", Toast.LENGTH_LONG).show()
-    }
     fun attachSelectedToSurface(items: List<Pair<ModelPlane, Int>>, surface: SurfacePick) {
         val targetMap = modelSetup().mapping(surface.key.first) ?: return
         val target = targetMap.model(surface.point, surface.depthMm)
@@ -2058,6 +2052,26 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         pushUndo()
         items.forEach { key -> center(key)?.let { moveItem(key, target - it) } }
         logToast(context, "Selected geometry stuck to the visible surface", Toast.LENGTH_SHORT).show()
+    }
+    fun startSurfaceAttach(keys: List<Pair<ModelPlane, Int>>) {
+        val usable = keys.distinctBy { it.first to (itemGuides(it).minOfOrNull { g -> g.id } ?: it.second) }
+        if (usable.isEmpty()) { logToast(context, "Select a line or flat shape first", Toast.LENGTH_LONG).show(); return }
+        // Two selected items is the quick, direct form: the last one is the
+        // target and all earlier selections are laid onto its visible plane.
+        if (usable.size >= 2) {
+            val targetKey = usable.last()
+            val targetGuides = itemGuides(targetKey)
+            if (targetGuides.isNotEmpty()) {
+                val vertices = targetGuides.flatMap { listOf(it.start, it.end) }
+                val at = Pt(vertices.map { it.x }.average().toFloat(), vertices.map { it.y }.average().toFloat())
+                val depth = targetGuides.map { (it.startZMm + it.endZMm) / 2 }.average()
+                attachSelectedToSurface(usable.dropLast(1), SurfacePick(targetKey, at, depth))
+                logToast(context, "Stuck the earlier selection to the last selected item", Toast.LENGTH_LONG).show()
+                return
+            }
+        }
+        surfaceAttachItems = usable
+        logToast(context, "Stick selected: now tap a visible line, shape, or 3D surface", Toast.LENGTH_LONG).show()
     }
     /** Picked items once each (a shape and its hole, or two picks of one group member, are one item). */
     fun distinctPicked() = pickedItems.distinctBy { k -> k.first to (itemGuides(k).minOfOrNull { it.id } ?: k.second) }
@@ -2273,7 +2287,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun handleTap(point: Pt, hitRadius: Double) {
         surfaceAttachItems?.let { items ->
-            val surface = surfacePickAt(point)
+            val surface = surfacePickAt(point, ignore = items.toSet())
             if (surface == null) logToast(context, "Tap a visible line, shape, or 3D surface", Toast.LENGTH_LONG).show()
             else { attachSelectedToSurface(items, surface); surfaceAttachItems = null }
             return

@@ -394,7 +394,7 @@ internal fun ThreeDViewerPane(
 ) {
     val context = LocalContext.current
     val view = remember(mesh) { ModelView(context, mesh, camera) }
-    val figureOverlay = remember(mesh) { ScaleFigureOverlay(context, mesh) }
+    val figureOverlay = remember(mesh) { ScaleFigureOverlay(context, mesh, camera) }
     view.onObjectTap = onEditObject
     var showFrame by remember { mutableStateOf(false) }
     var showArrow by remember { mutableStateOf(false) }
@@ -445,19 +445,25 @@ internal fun ThreeDViewerPane(
 }
 
 /** A quiet, automatically chosen scale reference in the 3D corner. */
-private class ScaleFigureOverlay(context: Context, mesh: ViewerMesh) : View(context) {
+private class ScaleFigureOverlay(context: Context, mesh: ViewerMesh, private val camera: ViewerCamera) : View(context) {
     // Viewer vertices are normalized to -1..1 for OpenGL; the frame retains the
     // actual millimetre span and is therefore the only useful scale here.
     private val sizeMm = mesh.frame.extent
     private val kind = if (sizeMm >= 1200f) "Human" else if (sizeMm >= 400f) "German shepherd" else "Black-and-white cat"
+    private val referenceMm = when (kind) { "Human" -> 1750f; "German shepherd" -> 650f; else -> 260f }
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     init { isClickable = false; isFocusable = false }
     override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas); val h = height * .23f; val x = width * .06f; val bottom = height * .93f
+        super.onDraw(canvas)
+        // Match the apparent model scale: zooming the model also zooms this
+        // reference. It remains tucked into a corner so it never hides faces.
+        val h = (height * .45f * (referenceMm / sizeMm.coerceAtLeast(1f)) * camera.zoom).coerceIn(20f, height * .72f)
+        val x = width * .06f; val bottom = height * .93f
         paint.textSize = 28f; paint.color = android.graphics.Color.DKGRAY; canvas.drawText(kind, x, bottom - h - 12f, paint)
         paint.color = android.graphics.Color.BLACK
         if (kind == "Human") { canvas.drawCircle(x + h*.16f, bottom-h*.82f, h*.09f, paint); canvas.drawRect(x+h*.11f, bottom-h*.73f, x+h*.21f, bottom-h*.3f, paint); canvas.drawRect(x+h*.04f, bottom-h*.3f, x+h*.11f, bottom, paint); canvas.drawRect(x+h*.21f, bottom-h*.3f, x+h*.28f, bottom, paint) }
         else { canvas.drawOval(x, bottom-h*.55f, x+h*.55f, bottom-h*.15f, paint); canvas.drawCircle(x+h*.58f, bottom-h*.48f, h*.14f, paint); canvas.drawRect(x+h*.1f, bottom-h*.2f, x+h*.18f, bottom, paint); canvas.drawRect(x+h*.4f, bottom-h*.2f, x+h*.48f, bottom, paint); if (kind.contains("cat")) { paint.color = android.graphics.Color.WHITE; canvas.drawOval(x+h*.18f, bottom-h*.47f, x+h*.42f, bottom-h*.2f, paint) } }
+        postInvalidateOnAnimation()
     }
 }
 
