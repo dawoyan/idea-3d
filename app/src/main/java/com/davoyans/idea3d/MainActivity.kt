@@ -952,6 +952,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var viewerBuilding by remember { mutableStateOf(false) }
     var viewerBuildStartedAt by remember { mutableLongStateOf(0L) }
     var viewerElapsedSeconds by remember { mutableIntStateOf(0) }
+    // Start with one straight piece per curve. The 3D viewer exposes a dragger
+    // for people who need a smoother on-screen approximation.
+    var viewerCurveDetail by remember { mutableIntStateOf(1) }
     var show3d by remember { mutableStateOf(false) }
     val viewerCamera = remember { ViewerCamera() }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
@@ -3242,7 +3245,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         viewerBuildStartedAt = startedAt
         viewerElapsedSeconds = 0
         show3d = true
-        ActionLog.add("3D build start: ${if (scopeObject == null) "scene" else "selected object"}; guides=${allGuides().size}, extrusions=${allExtrusions().size}, materials=${materials.size}, operations=${solidOps.size}")
+        val curveDetail = viewerCurveDetail.coerceIn(1, 12)
+        ActionLog.add("3D build start: ${if (scopeObject == null) "scene" else "selected object"}; guides=${allGuides().size}, extrusions=${allExtrusions().size}, materials=${materials.size}, operations=${solidOps.size}, curveDetail=$curveDetail")
         val allGuideSnapshot = allGuides(); val allExtrusionSnapshot = allExtrusions()
         val scopedExtrusion = scopeObject?.let { key -> allExtrusionSnapshot.firstOrNull { it.plane == key.first && it.id == key.second } }
         // An item preview must not be blocked by a broken or unfinished object
@@ -3263,7 +3267,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 // Imported models join the drawing; a project of only imported models has no shapes to build.
                 // Preview prioritizes immediate feedback. Printable/export validation
                 // (especially pairwise overlap testing) happens only for export.
-                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true) }
+                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true, previewCurveSteps = curveDetail) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
                 ActionLog.add("3D build phase: meshes=${built.meshes.size}, objects=${built.objects.size}, imported=${placedSnapshot.size}")
                 val model = ModelBuild(built.meshes + placedSnapshot.map { it.second }, built.objects, built.warnings, built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish })
@@ -4185,8 +4189,22 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 leave3d(); if (plane != editPlane) switchPlane(plane) else fitView()
             })
             val model = viewerModel
-            if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index }, modifier = Modifier.fillMaxWidth().weight(1f))
-            else if (show3d && viewerBuilding) Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("${viewerElapsedSeconds}s", fontWeight = FontWeight.Medium) }
+            if (show3d && model != null) Column(Modifier.fillMaxWidth().weight(1f)) {
+                ThreeDViewerPane(model, viewerCamera, onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index }, modifier = Modifier.fillMaxWidth().weight(1f))
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Detail", fontSize = 12.sp)
+                    Slider(
+                        value = viewerCurveDetail.toFloat(),
+                        onValueChange = { viewerCurveDetail = it.roundToInt() },
+                        onValueChangeFinished = { open3dView(viewerScope) },
+                        valueRange = 1f..12f,
+                        steps = 10,
+                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+                    )
+                    Text(viewerCurveDetail.toString(), fontSize = 12.sp)
+                }
+            }
+            else if (show3d && viewerBuilding) Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("Rendering … ${viewerElapsedSeconds}s", fontWeight = FontWeight.Medium) }
             else {
             CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -7168,17 +7186,17 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
  * Bars and pipes for lines that have a material: one mesh per line, following curves in short straight pieces.
  * Keys are (plane, -(line id + 1)) so they never clash with shape objects.
  */
-private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null, preview: Boolean = false): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
+private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null, previewCurveSteps: Int? = null): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
     val counts = HashMap<String, Int>()
     return guides.flatMap { guide ->
         // Sheets belong to closed shapes; only bars and pipes follow a line.
         val material = guide.materialId?.let(materials::get)?.takeUnless { it.isSheet } ?: return@flatMap emptyList()
         val mapping = setup.mapping(guide.plane) ?: return@flatMap emptyList()
         val name = "${material.name} ${counts.merge(material.id, 1, Int::plus)}"
-        // Curved structural members are expensive: each preview segment is a full
-        // closed pipe/bar mesh. Three pieces keep the on-screen silhouette smooth
-        // enough while export retains the precise twelve-piece construction.
-        val steps = if (guide.curveMid == null) 1 else if (preview) 3 else 12
+        // Each curved preview segment is a complete closed pipe/bar mesh. The
+        // viewer starts with a single segment and lets the user increase it;
+        // export stays at the precise twelve-piece construction.
+        val steps = if (guide.curveMid == null) 1 else previewCurveSteps?.coerceIn(1, 12) ?: 12
         val points = (0..steps).map { i -> val t = i.toFloat() / steps; mapping.model(guidePointAt(guide, t), guide.startZMm + (guide.endZMm - guide.startZMm) * t) }
         // Curves are straight pieces, each a separate solid. Merging them was far too slow on a phone, so each piece is
         // lengthened past the bends instead, which closes the gaps on the outside of a bend.
@@ -7205,9 +7223,9 @@ private class ModelBuild(val meshes: List<Mesh>, val objects: List<Pair<ModelPla
  * Builds every plane's solids and applies the 3D cuts and joins. With [strict], anything that would make a bad
  * print (including objects that overlap without being joined) throws; otherwise overlaps come back as warnings.
  */
-private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap(), preview: Boolean = false): ModelBuild {
+private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap(), preview: Boolean = false, previewCurveSteps: Int? = null): ModelBuild {
     val objects = mutableListOf<Extrusion>()
-    val members = buildMembers(guides, materials, setup, preview = preview)
+    val members = buildMembers(guides, materials, setup, previewCurveSteps = previewCurveSteps)
     // A drawing made only of bars and pipes needs no closed shape.
     val specs = if (members.isNotEmpty()) buildSolidSpecs(guides, extrusions, setup, objects, strict = false) else buildSolidSpecs(guides, extrusions, setup, objects)
     val issues = mutableListOf<MeshIssue>()
