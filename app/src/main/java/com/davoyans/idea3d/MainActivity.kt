@@ -3923,6 +3923,48 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         selectMode = on; pickedItems = emptyList(); pickedPoints = emptyList(); itemRectStart = null; itemRectEnd = null; selectedGhostPoints = emptyList()
         if (on) { tool = Tool.ADJUST; clearOwnSelection(); selectedForeign = null; selectedGhostPoint = null; panOnEmptyDrag = false }
     }
+    /** The bottom Select button climbs from a node to its line, shape, then 3D object. */
+    fun selectionLadderLabel(): String = when {
+        selectMode && pickedItems.size == 1 && extrusionOf(pickedItems.single()) != null -> "Select 3D"
+        selectMode -> "Done"
+        selectedGuideEndpoint != null || selectedVertices.isNotEmpty() -> "Select line"
+        selectedGuideId != null || selectedWholeGuideId != null -> "Select shape"
+        selectedForeign != null || selectedExtrusionId != null -> "Select 3D"
+        else -> "Select"
+    }
+    fun promoteSelection() {
+        if (selectMode) {
+            val key = pickedItems.singleOrNull()
+            val extrusion = key?.let(::extrusionOf)
+            if (key != null && extrusion != null) {
+                selectMode = false; pickedItems = emptyList(); pickedPoints = emptyList(); tool = Tool.ADJUST
+                if (key.first == editPlane) {
+                    extrusionGuides(extrusion, guides).firstOrNull()?.let { selectedGuideId = it.id; selectedWholeGuideId = it.id }
+                    selectedExtrusionId = extrusion.id
+                } else selectedForeign = key.first to extrusion.id
+            } else setSelectMode(false)
+            return
+        }
+        // A node becomes only its guide first, even if that guide belongs to a larger closed shape.
+        val pointGuide = selectedGuideEndpoint?.guideId ?: selectedGuideId.takeIf { selectedVertices.isNotEmpty() }
+        if (pointGuide != null) {
+            selectedGuideEndpoint = null; selectedVertices = emptyList(); selectedCurveId = null
+            selectedGuideId = pointGuide; selectedWholeGuideId = pointGuide; tool = Tool.ADJUST
+            return
+        }
+        val guide = (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }
+        if (guide != null) {
+            val key = homeKey(guide)
+            setSelectMode(true); pickedItems = listOf(key)
+            return
+        }
+        selectedForeign?.let { key ->
+            setSelectMode(true)
+            planeGeometry(key.first).extrusions.firstOrNull { it.id == key.second }?.let { e -> extrusionGuides(e, planeGeometry(key.first).guides).firstOrNull()?.let { pickedItems = listOf(key.first to it.id) } }
+            return
+        }
+        setSelectMode(true)
+    }
     /** Copies of the picked items, a little down and right, in their own views; the copies are picked. */
     /**
      * Copies items into their own view, a little down and right of the original, with new ids and new path and
@@ -4212,7 +4254,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectionMode = selectionMode, onSelect = { setSelectMode(!selectMode) }, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
+        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
             // Select first, then Modify: the selected line or shape stays selected, as a whole.
             if (it == Tool.ADJUST && selectedGuideId != null && selectedWholeGuideId == null) selectedWholeGuideId = selectedGuideId
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
@@ -5713,7 +5755,7 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
     }
 }
 
-@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, selectActive: Boolean, selectionMode: SelectionMode, onSelect: () -> Unit, onSelectionMode: (SelectionMode) -> Unit, onFind: () -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
+@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, selectActive: Boolean, selectLabel: String, selectionMode: SelectionMode, onSelect: () -> Unit, onSelectionMode: (SelectionMode) -> Unit, onFind: () -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
     var lineMenuOpen by remember { mutableStateOf(false) }
     var measureMenuOpen by remember { mutableStateOf(false) }
     var selectMenuOpen by remember { mutableStateOf(false) }
@@ -5761,7 +5803,7 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
             if (tool == Tool.LINES) ToolIconButton("Broken", R.drawable.ic_broken_line, lineDrawing == LineDrawing.BROKEN, { val selected = lineDrawing == LineDrawing.BROKEN; onLineDrawing(LineDrawing.BROKEN); onTool(if (selected) Tool.NONE else Tool.LINES) }, Modifier.weight(1f), description = "Broken guide line", onLongPress = { lineMenuOpen = true })
             // Picking several things, and finding anything, sit with the tools so they never move.
             Box(Modifier.weight(1f)) {
-                ToolIconButton(if (selectActive) "Done" else "Select", R.drawable.ic_select, selectActive, onSelect, Modifier.fillMaxWidth(), description = "Select: ${selectionMode.label}", onLongPress = { selectMenuOpen = true })
+                ToolIconButton(selectLabel, R.drawable.ic_select, selectActive, onSelect, Modifier.fillMaxWidth(), description = "Select: ${selectionMode.label}", onLongPress = { selectMenuOpen = true })
                 DropdownMenu(expanded = selectMenuOpen, onDismissRequest = { selectMenuOpen = false }) {
                     Text("Select", Modifier.padding(horizontal = 16.dp, vertical = 10.dp), fontWeight = FontWeight.Bold)
                     SelectionMode.entries.forEach { mode -> DropdownMenuItem(text = { Text(if (mode == selectionMode) "${mode.label}  ✓" else mode.label) }, onClick = { selectMenuOpen = false; onSelectionMode(mode) }) }
