@@ -950,6 +950,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     // replace the viewer, otherwise a late stale/empty result makes geometry vanish.
     var viewerRequest by remember { mutableIntStateOf(0) }
     var viewerBuilding by remember { mutableStateOf(false) }
+    var viewerBuildStartedAt by remember { mutableLongStateOf(0L) }
+    var viewerElapsedSeconds by remember { mutableIntStateOf(0) }
     var show3d by remember { mutableStateOf(false) }
     val viewerCamera = remember { ViewerCamera() }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
@@ -3234,10 +3236,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     fun open3dView(scopeObject: Pair<ModelPlane, Int>? = null) {
         viewerScope = scopeObject
         val request = ++viewerRequest
+        val startedAt = System.currentTimeMillis()
         viewerModel = null
         viewerBuilding = true
+        viewerBuildStartedAt = startedAt
+        viewerElapsedSeconds = 0
         show3d = true
-        ActionLog.add("3D build started: ${if (scopeObject == null) "scene" else "selected object"}")
+        ActionLog.add("3D build start: ${if (scopeObject == null) "scene" else "selected object"}; guides=${allGuides().size}, extrusions=${allExtrusions().size}, materials=${materials.size}, operations=${solidOps.size}")
         val allGuideSnapshot = allGuides(); val allExtrusionSnapshot = allExtrusions()
         val scopedExtrusion = scopeObject?.let { key -> allExtrusionSnapshot.firstOrNull { it.plane == key.first && it.id == key.second } }
         // An item preview must not be blocked by a broken or unfinished object
@@ -3246,9 +3251,13 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val extrusionSnapshot = scopedExtrusion?.let(::listOf) ?: allExtrusionSnapshot
         val placedSnapshot = if (scopeObject == null) placedModels() else emptyList()
         val opsSnapshot = if (scopeObject == null) solidOps else emptyList(); val materialSnapshot = materials.associateBy { it.id }; val setup = modelSetup(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
+        val sheetEdges = guideSnapshot.count { it.materialId?.let(materialSnapshot::get)?.isSheet == true }
+        val memberEdges = guideSnapshot.count { it.materialId?.let(materialSnapshot::get)?.isSheet == false }
+        ActionLog.add("3D build input: closedShapes=${closedGuideShapes(guideSnapshot).size}, sheetEdges=$sheetEdges, memberEdges=$memberEdges")
         val frame = viewerModel?.frame
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching {
+                ActionLog.add("3D build phase: collecting meshes")
                 val colors = mutableListOf<Int>()
                 // Intersecting objects are shown with a warning so they can be moved apart or joined; export still refuses them.
                 // Imported models join the drawing; a project of only imported models has no shapes to build.
@@ -3256,6 +3265,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 // (especially pairwise overlap testing) happens only for export.
                 val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
+                ActionLog.add("3D build phase: geometry=${built.meshes.size}, shapeObjects=${built.objects.size}, imported=${placedSnapshot.size}")
                 val model = ModelBuild(built.meshes + placedSnapshot.map { it.second }, built.objects, built.warnings, built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish })
                 val shown = scopeObject?.let { key -> model.objects.indices.filter { model.objects[it] == key } } ?: model.meshes.indices.toList()
                 if (shown.isEmpty()) throw IllegalArgumentException("That item has no 3D material or depth yet")
@@ -3266,6 +3276,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
                 val finishes = meshes.flatMapIndexed { i, mesh -> List(mesh.triangles.size) { model.finishes.getOrNull(shown[i]) ?: Finish.PLAIN } }
                 val stl = ModelExport.stl(meshes)
+                ActionLog.add("3D build phase: viewer mesh has ${meshes.sumOf { it.triangles.size }} triangles")
                 // Imported models can't be tapped for exact values in 3D (index -1); their dialog is in the 2D views.
                 val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { if (shown[index] < model.objects.size) index else -1 } }.toIntArray()
                 val measurements = if (scopeObject != null) emptyList() else measurementSnapshot.mapNotNull { line ->
@@ -3276,10 +3287,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 }
                 ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes) to shownObjects
             } }
-            if (projectId != openedProject || request != viewerRequest) return@launch
+            if (projectId != openedProject || request != viewerRequest) { ActionLog.add("3D build discarded: a newer request replaced it"); return@launch }
             result.onSuccess { (mesh, ids) ->
                 viewerModel = mesh; viewerObjects = ids; viewerBuilding = false; show3d = true
-                ActionLog.add("3D build ready: ${ids.size} object${if (ids.size == 1) "" else "s"}")
+                ActionLog.add("3D build ready: ${ids.size} objects in ${System.currentTimeMillis() - startedAt} ms")
             }
                 .onFailure { error ->
                     val detail = error.localizedMessage ?: error.javaClass.simpleName
@@ -3287,6 +3298,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     logToast(context, "3D view: $detail", Toast.LENGTH_LONG).show()
                     viewerBuilding = false; show3d = false
                 }
+        }
+    }
+    LaunchedEffect(viewerBuilding, viewerBuildStartedAt) {
+        while (viewerBuilding) {
+            viewerElapsedSeconds = ((System.currentTimeMillis() - viewerBuildStartedAt) / 1000L).toInt()
+            delay(100)
         }
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
@@ -4169,10 +4186,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             })
             val model = viewerModel
             if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index }, modifier = Modifier.fillMaxWidth().weight(1f))
-            else if (show3d && viewerBuilding) Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                Text("Building 3D…", fontWeight = FontWeight.Medium)
-                Text("The action log will show the result or an error.", fontSize = 13.sp, color = Color(0xFF4D5A57), modifier = Modifier.padding(top = 6.dp))
-            }
+            else if (show3d && viewerBuilding) Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("${viewerElapsedSeconds}s", fontWeight = FontWeight.Medium) }
             else {
             CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
