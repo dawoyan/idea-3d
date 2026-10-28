@@ -2080,7 +2080,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         simpleTraceRunning = true
         ActionLog.add("2D simplify started: ${if (area == null) "whole picture" else "selected rectangle"}; command=$command")
         scope.launch {
-            val result = withContext(Dispatchers.Default) { simpleShapeTrace(image, existing, area, editPlane) }
+            // Scans are the normal workflow: preserve only a few strong strokes.
+            // Saying "photo" explicitly opts into the object/void recognizer.
+            val sketchFirst = !command.lowercase(Locale.US).contains("photo")
+            val result = withContext(Dispatchers.Default) { simpleShapeTrace(image, existing, area, editPlane, sketchFirst) }
             simpleTraceRunning = false
             if (result.guides.isEmpty()) {
                 ActionLog.add("2D simplify finished: no clear simple shapes")
@@ -6613,13 +6616,13 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
 
 /** A small command surface for the private, on-device visual simplifier. */
 @Composable private fun SimpleTraceCommandDialog(hasDetailRectangle: Boolean, onDismiss: () -> Unit, onRun: (String) -> Unit) {
-    var command by remember { mutableStateOf("Make simple 2D shapes") }
+    var command by remember { mutableStateOf("Make simple sketch shapes") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Simplify picture") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Describe a quick 2D pass. It finds large circles, rectangles and straight lines locally; it ignores text, shadows and texture.", fontSize = 13.sp)
+                Text("Sketches keep only the strongest strokes (maximum 12) so they stay simple and editable. Write “photo” to simplify a photographed object instead.", fontSize = 13.sp)
                 OutlinedTextField(value = command, onValueChange = { command = it }, label = { Text("Command") }, minLines = 2)
                 if (hasDetailRectangle) OutlinedButton(onClick = { command = "Detail selected rectangle" }) { Text("Detail selected rectangle") }
                 else Text("To detail one part later: draw and select a rectangle, then open this command again.", fontSize = 12.sp, color = Color(0xFF53615D))
@@ -7773,7 +7776,7 @@ private fun snapToGuide(point: Pt, guides: List<GuideLine>, radius: Double): Pt?
 
 private data class HoughPeak(val angleIndex: Int, val distanceIndex: Int, val votes: Int)
 
-private fun detectStrongGuideLines(source: Bitmap): List<GuideLine> {
+private fun detectStrongGuideLines(source: Bitmap, limit: Int = 36): List<GuideLine> {
     val largest = max(source.width, source.height).coerceAtLeast(1)
     val workScale = min(1f, 720f / largest)
     val work = if (workScale < 1f) Bitmap.createScaledBitmap(source, (source.width * workScale).roundToInt(), (source.height * workScale).roundToInt(), true) else source
@@ -7808,7 +7811,7 @@ private fun detectStrongGuideLines(source: Bitmap): List<GuideLine> {
         .sortedByDescending { it.votes }
     val accepted = mutableListOf<Triple<Double, Double, Pair<Pt, Pt>>>()
     peaks.forEach { peak ->
-        if (accepted.size >= 36) return@forEach
+        if (accepted.size >= limit) return@forEach
         val theta = peak.angleIndex * Math.PI / angleSteps
         val normalX = cos(theta); val normalY = sin(theta)
         val distanceFromOrigin = peak.distanceIndex - maxDistance
@@ -7866,12 +7869,17 @@ private fun tracedCircle(center: Pt, radius: Float, firstId: Int, pathId: Int, p
  * Fast, offline visual reduction. It deliberately looks only for dominant high-contrast blobs and their large
  * interior voids, which is why a weight plate becomes one disc plus holes rather than thousands of wood-grain lines.
  */
-private fun simpleShapeTrace(source: Bitmap, existing: List<GuideLine>, area: TraceArea?, plane: ModelPlane): SimpleTraceResult {
+private fun simpleShapeTrace(source: Bitmap, existing: List<GuideLine>, area: TraceArea?, plane: ModelPlane, sketchFirst: Boolean): SimpleTraceResult {
     val cropLeft = (area?.left ?: 0f).toInt().coerceIn(0, source.width - 1)
     val cropTop = (area?.top ?: 0f).toInt().coerceIn(0, source.height - 1)
     val cropRight = (area?.right ?: source.width.toFloat()).toInt().coerceIn(cropLeft + 1, source.width)
     val cropBottom = (area?.bottom ?: source.height.toFloat()).toInt().coerceIn(cropTop + 1, source.height)
     val crop = Bitmap.createBitmap(source, cropLeft, cropTop, cropRight - cropLeft, cropBottom - cropTop)
+    if (sketchFirst) {
+        val lines = detectStrongGuideLines(crop, limit = 12)
+        val next = nextGuideId(existing)
+        return SimpleTraceResult(lines.mapIndexed { i, line -> line.copy(id = next + i, start = Pt(line.start.x + cropLeft, line.start.y + cropTop), end = Pt(line.end.x + cropLeft, line.end.y + cropTop), plane = plane) }, "${lines.size} strong sketch line${if (lines.size == 1) "" else "s"}")
+    }
     val scale = min(1f, 480f / max(crop.width, crop.height).toFloat())
     val work = if (scale < 1f) Bitmap.createScaledBitmap(crop, (crop.width * scale).roundToInt(), (crop.height * scale).roundToInt(), true) else crop
     val w = work.width; val h = work.height
@@ -7891,7 +7899,7 @@ private fun simpleShapeTrace(source: Bitmap, existing: List<GuideLine>, area: Tr
     val foreground = BooleanArray(pixels.size) { i -> contrast(pixels[i]) > 125.0 && light(pixels[i]) < 145 }
     val main = traceComponents(foreground, w, h).filterNot { it.touchesEdge }.maxByOrNull { it.count }
         ?: run {
-            val fallback = detectStrongGuideLines(crop)
+            val fallback = detectStrongGuideLines(crop, limit = 12)
             return SimpleTraceResult(fallback.mapIndexed { i, line -> line.copy(id = nextGuideId(existing) + i, start = Pt(line.start.x + cropLeft, line.start.y + cropTop), end = Pt(line.end.x + cropLeft, line.end.y + cropTop), plane = plane) }, "${fallback.size} straight lines")
         }
     val objectW = main.right - main.left + 1; val objectH = main.bottom - main.top + 1
