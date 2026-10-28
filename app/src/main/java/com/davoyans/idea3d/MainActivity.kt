@@ -3265,7 +3265,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 // (especially pairwise overlap testing) happens only for export.
                 val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
-                ActionLog.add("3D build phase: geometry=${built.meshes.size}, shapeObjects=${built.objects.size}, imported=${placedSnapshot.size}")
+                ActionLog.add("3D build phase: meshes=${built.meshes.size}, objects=${built.objects.size}, imported=${placedSnapshot.size}")
                 val model = ModelBuild(built.meshes + placedSnapshot.map { it.second }, built.objects, built.warnings, built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish })
                 val shown = scopeObject?.let { key -> model.objects.indices.filter { model.objects[it] == key } } ?: model.meshes.indices.toList()
                 if (shown.isEmpty()) throw IllegalArgumentException("That item has no 3D material or depth yet")
@@ -7168,14 +7168,17 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
  * Bars and pipes for lines that have a material: one mesh per line, following curves in short straight pieces.
  * Keys are (plane, -(line id + 1)) so they never clash with shape objects.
  */
-private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
+private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null, preview: Boolean = false): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
     val counts = HashMap<String, Int>()
     return guides.flatMap { guide ->
         // Sheets belong to closed shapes; only bars and pipes follow a line.
         val material = guide.materialId?.let(materials::get)?.takeUnless { it.isSheet } ?: return@flatMap emptyList()
         val mapping = setup.mapping(guide.plane) ?: return@flatMap emptyList()
         val name = "${material.name} ${counts.merge(material.id, 1, Int::plus)}"
-        val steps = if (guide.curveMid == null) 1 else 12
+        // Curved structural members are expensive: each preview segment is a full
+        // closed pipe/bar mesh. Three pieces keep the on-screen silhouette smooth
+        // enough while export retains the precise twelve-piece construction.
+        val steps = if (guide.curveMid == null) 1 else if (preview) 3 else 12
         val points = (0..steps).map { i -> val t = i.toFloat() / steps; mapping.model(guidePointAt(guide, t), guide.startZMm + (guide.endZMm - guide.startZMm) * t) }
         // Curves are straight pieces, each a separate solid. Merging them was far too slow on a phone, so each piece is
         // lengthened past the bends instead, which closes the gaps on the outside of a bend.
@@ -7204,7 +7207,7 @@ private class ModelBuild(val meshes: List<Mesh>, val objects: List<Pair<ModelPla
  */
 private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap(), preview: Boolean = false): ModelBuild {
     val objects = mutableListOf<Extrusion>()
-    val members = buildMembers(guides, materials, setup)
+    val members = buildMembers(guides, materials, setup, preview = preview)
     // A drawing made only of bars and pipes needs no closed shape.
     val specs = if (members.isNotEmpty()) buildSolidSpecs(guides, extrusions, setup, objects, strict = false) else buildSolidSpecs(guides, extrusions, setup, objects)
     val issues = mutableListOf<MeshIssue>()
