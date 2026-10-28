@@ -4189,21 +4189,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 leave3d(); if (plane != editPlane) switchPlane(plane) else fitView()
             })
             val model = viewerModel
-            if (show3d && model != null) Column(Modifier.fillMaxWidth().weight(1f)) {
-                ThreeDViewerPane(model, viewerCamera, onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index }, modifier = Modifier.fillMaxWidth().weight(1f))
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Detail", fontSize = 12.sp)
-                    Slider(
-                        value = viewerCurveDetail.toFloat(),
-                        onValueChange = { viewerCurveDetail = it.roundToInt() },
-                        onValueChangeFinished = { open3dView(viewerScope) },
-                        valueRange = 1f..12f,
-                        steps = 10,
-                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
-                    )
-                    Text(viewerCurveDetail.toString(), fontSize = 12.sp)
-                }
-            }
+            if (show3d && model != null) ThreeDViewerPane(
+                model, viewerCamera,
+                onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index },
+                detail = viewerCurveDetail,
+                onDetailChange = { viewerCurveDetail = it.roundToInt() },
+                onDetailChangeFinished = { open3dView(viewerScope) },
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
             else if (show3d && viewerBuilding) Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("Rendering … ${viewerElapsedSeconds}s", fontWeight = FontWeight.Medium) }
             else {
             CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })

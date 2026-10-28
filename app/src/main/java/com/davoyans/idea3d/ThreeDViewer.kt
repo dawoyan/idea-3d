@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
@@ -382,7 +383,15 @@ private fun viewMatrix(camera: ViewerCamera, width: Int, height: Int): FloatArra
  * Profile planes; here one finger orbits, two fingers pan and zoom, and a tap opens an object's exact values.
  */
 @Composable
-internal fun ThreeDViewerPane(mesh: ViewerMesh, camera: ViewerCamera, onEditObject: (Int) -> Unit, modifier: Modifier = Modifier) {
+internal fun ThreeDViewerPane(
+    mesh: ViewerMesh,
+    camera: ViewerCamera,
+    onEditObject: (Int) -> Unit,
+    detail: Int,
+    onDetailChange: (Float) -> Unit,
+    onDetailChangeFinished: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val view = remember(mesh) { ModelView(context, mesh, camera) }
     view.onObjectTap = onEditObject
@@ -401,6 +410,20 @@ internal fun ThreeDViewerPane(mesh: ViewerMesh, camera: ViewerCamera, onEditObje
             CompactToggle("Frame", showFrame) { showFrame = it; view.setReferencesVisible(showFrame, showArrow) }
             CompactToggle("Reset", false) { view.reset() }
             CompactToggle("Save", false) { view.exportImage() }
+        }
+        // This occupies the old lighting-control position. Light stays fixed at
+        // top-left; drag only when a smoother curved-member preview is needed.
+        Row(Modifier.fillMaxWidth().background(Color(0xFFF2F5F4)).padding(horizontal = 12.dp).height(36.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(painterResource(R.drawable.ic_detail), contentDescription = "3D detail", tint = Color(0xFF00695C), modifier = Modifier.size(20.dp))
+            Slider(
+                value = detail.toFloat(),
+                onValueChange = onDetailChange,
+                onValueChangeFinished = onDetailChangeFinished,
+                valueRange = 1f..12f,
+                steps = 10,
+                modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+            )
+            Text(detail.toString(), fontSize = 12.sp, color = Color(0xFF00695C))
         }
         if (mesh.warnings.isNotEmpty()) Text(mesh.warnings.joinToString("\n"), Modifier.fillMaxWidth().background(Color(0xFFFFF4D6)).padding(horizontal = 12.dp, vertical = 4.dp), fontSize = 12.sp, color = Color(0xFF5C4400))
         // A rebuilt model creates a new GL view; key the host so it is actually swapped in.
