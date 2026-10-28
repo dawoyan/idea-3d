@@ -949,6 +949,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     // Several fast taps can start several mesh builds. Only the newest build may
     // replace the viewer, otherwise a late stale/empty result makes geometry vanish.
     var viewerRequest by remember { mutableIntStateOf(0) }
+    var viewerBuilding by remember { mutableStateOf(false) }
     var show3d by remember { mutableStateOf(false) }
     val viewerCamera = remember { ViewerCamera() }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
@@ -3233,6 +3234,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     fun open3dView(scopeObject: Pair<ModelPlane, Int>? = null) {
         viewerScope = scopeObject
         val request = ++viewerRequest
+        viewerModel = null
+        viewerBuilding = true
+        show3d = true
+        ActionLog.add("3D build started: ${if (scopeObject == null) "scene" else "selected object"}")
         val allGuideSnapshot = allGuides(); val allExtrusionSnapshot = allExtrusions()
         val scopedExtrusion = scopeObject?.let { key -> allExtrusionSnapshot.firstOrNull { it.plane == key.first && it.id == key.second } }
         // An item preview must not be blocked by a broken or unfinished object
@@ -3270,18 +3275,21 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes) to shownObjects
             } }
             if (projectId != openedProject || request != viewerRequest) return@launch
-            result.onSuccess { (mesh, ids) -> viewerModel = mesh; viewerObjects = ids; show3d = true }
+            result.onSuccess { (mesh, ids) ->
+                viewerModel = mesh; viewerObjects = ids; viewerBuilding = false; show3d = true
+                ActionLog.add("3D build ready: ${ids.size} object${if (ids.size == 1) "" else "s"}")
+            }
                 .onFailure { error ->
                     val detail = error.localizedMessage ?: error.javaClass.simpleName
                     ActionLog.add("error: 3D view failed: $detail")
                     logToast(context, "3D view: $detail", Toast.LENGTH_LONG).show()
-                    if (viewerModel == null) show3d = false
+                    viewerBuilding = false; show3d = false
                 }
         }
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
     LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, solidOps, materials, unit, importedModels) { if (show3d) open3dView(viewerScope) }
-    fun leave3d() { viewerRequest++; show3d = false; viewerModel = null; viewerEditObject = null; viewerScope = null }
+    fun leave3d() { viewerRequest++; viewerBuilding = false; show3d = false; viewerModel = null; viewerEditObject = null; viewerScope = null }
     /** Switches to the view a foreign object was drawn in and selects it there, where all drawing tools apply. */
     fun openInOwnView(key: Pair<ModelPlane, Int>) {
         leave3d(); switchPlane(key.first); tool = Tool.ADJUST
@@ -4159,6 +4167,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             })
             val model = viewerModel
             if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index }, modifier = Modifier.fillMaxWidth().weight(1f))
+            else if (show3d && viewerBuilding) Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Text("Building 3D…", fontWeight = FontWeight.Medium)
+                Text("The action log will show the result or an error.", fontSize = 13.sp, color = Color(0xFF4D5A57), modifier = Modifier.padding(top = 6.dp))
+            }
             else {
             CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
