@@ -4254,7 +4254,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
+        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, stickSurface = stickToVisibleSurface, onStickSurface = { stickToVisibleSurface = !stickToVisibleSurface }, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
             // Select first, then Modify: the selected line or shape stays selected, as a whole.
             if (it == Tool.ADJUST && selectedGuideId != null && selectedWholeGuideId == null) selectedWholeGuideId = selectedGuideId
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
@@ -5755,7 +5755,7 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
     }
 }
 
-@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, selectActive: Boolean, selectLabel: String, selectionMode: SelectionMode, onSelect: () -> Unit, onSelectionMode: (SelectionMode) -> Unit, onFind: () -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
+@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, selectActive: Boolean, selectLabel: String, selectionMode: SelectionMode, stickSurface: Boolean, onStickSurface: () -> Unit, onSelect: () -> Unit, onSelectionMode: (SelectionMode) -> Unit, onFind: () -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
     var lineMenuOpen by remember { mutableStateOf(false) }
     var measureMenuOpen by remember { mutableStateOf(false) }
     var selectMenuOpen by remember { mutableStateOf(false) }
@@ -5800,7 +5800,8 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
                     }
                 }
             }
-            if (tool == Tool.LINES) ToolIconButton("Broken", R.drawable.ic_broken_line, lineDrawing == LineDrawing.BROKEN, { val selected = lineDrawing == LineDrawing.BROKEN; onLineDrawing(LineDrawing.BROKEN); onTool(if (selected) Tool.NONE else Tool.LINES) }, Modifier.weight(1f), description = "Broken guide line", onLongPress = { lineMenuOpen = true })
+            if (tool == Tool.LINES && lineDrawing == LineDrawing.STRAIGHT) ToolIconButton("Stick", R.drawable.ic_cube, stickSurface, onStickSurface, Modifier.weight(1f), description = "Stick new line to a visible 3D surface")
+            else if (tool == Tool.LINES) ToolIconButton("Broken", R.drawable.ic_broken_line, lineDrawing == LineDrawing.BROKEN, { val selected = lineDrawing == LineDrawing.BROKEN; onLineDrawing(LineDrawing.BROKEN); onTool(if (selected) Tool.NONE else Tool.LINES) }, Modifier.weight(1f), description = "Broken guide line", onLongPress = { lineMenuOpen = true })
             // Picking several things, and finding anything, sit with the tools so they never move.
             Box(Modifier.weight(1f)) {
                 ToolIconButton(selectLabel, R.drawable.ic_select, selectActive, onSelect, Modifier.fillMaxWidth(), description = "Select: ${selectionMode.label}", onLongPress = { selectMenuOpen = true })
