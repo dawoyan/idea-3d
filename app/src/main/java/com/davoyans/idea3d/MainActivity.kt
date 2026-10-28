@@ -2039,7 +2039,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val usable = keys.distinctBy { it.first to (itemGuides(it).minOfOrNull { g -> g.id } ?: it.second) }
         if (usable.isEmpty()) { logToast(context, "Select a line or flat shape first", Toast.LENGTH_LONG).show(); return }
         surfaceAttachItems = usable
-        logToast(context, "Stick selected: now tap the visible 3D surface", Toast.LENGTH_LONG).show()
+        logToast(context, "Stick selected: now tap a visible line, shape, or 3D surface", Toast.LENGTH_LONG).show()
     }
     fun attachSelectedToSurface(items: List<Pair<ModelPlane, Int>>, surface: SurfacePick) {
         val targetMap = modelSetup().mapping(surface.key.first) ?: return
@@ -2270,7 +2270,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun handleTap(point: Pt, hitRadius: Double) {
         surfaceAttachItems?.let { items ->
             val surface = surfacePickAt(point)
-            if (surface == null) logToast(context, "Tap a visible 3D surface", Toast.LENGTH_LONG).show()
+            if (surface == null) logToast(context, "Tap a visible line, shape, or 3D surface", Toast.LENGTH_LONG).show()
             else { attachSelectedToSurface(items, surface); surfaceAttachItems = null }
             return
         }
@@ -6971,21 +6971,6 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                     }
                 }
                 Text("0 displays whole units. Saved measurements keep their precision.", fontSize = 12.sp, color = Color(0xFF53615D))
-                Text("Scale comparison", fontWeight = FontWeight.Medium)
-                ComparisonFigure.entries.chunked(4).forEach { row ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        row.forEach { figure ->
-                            val selected = options.figure == figure
-                            IconButton(onClick = { options = options.copy(figure = if (selected) null else figure) }, modifier = Modifier.size(48.dp).border(1.dp, if (selected) Color(0xFF006E67) else Color(0xFF9AA6A1), RoundedCornerShape(4.dp)).background(if (selected) Color(0xFFD9EEEA) else Color.Transparent).semantics { contentDescription = figure.description }) {
-                                Canvas(Modifier.size(34.dp)) {
-                                    val height = min(size.height, size.width / figure.widthRatio) * 0.9f
-                                    drawComparisonFigure(drawContext.canvas.nativeCanvas, figure, (size.width - height * figure.widthRatio) / 2f, (size.height + height) / 2f, height, 255)
-                                }
-                            }
-                        }
-                    }
-                }
-                if (options.figure != null && !hasScale) Text("Set a known calibration length to show the silhouette.", fontSize = 12.sp)
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { options = options.copy(guess = !options.guess) }) { Checkbox(options.guess, { options = options.copy(guess = it) }); Text("Guess unmeasured measurements") }
                 Text("Picture transparency", fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
