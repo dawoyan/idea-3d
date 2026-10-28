@@ -1,6 +1,9 @@
 package com.davoyans.idea3d
 
 import android.Manifest
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
@@ -816,6 +819,16 @@ class MainActivity : ComponentActivity() {
 }
 private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?.action == android.content.Intent.ACTION_SEND && intent.type?.startsWith("image/") == true) intent.getParcelableExtra(android.content.Intent.EXTRA_STREAM) else null
 
+/** Posts a completion message for work that may finish while the editor is in the background. */
+private fun backgroundDoneNotification(context: Context, text: String) {
+    val manager = context.getSystemService(NotificationManager::class.java)
+    val channel = "idea3d-background"
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) manager.createNotificationChannel(NotificationChannel(channel, "Idea 3D background work", NotificationManager.IMPORTANCE_DEFAULT))
+    val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, channel) else Notification.Builder(context)
+    manager.notify(3101, builder.setSmallIcon(R.drawable.ic_idea3d).setContentTitle("Idea 3D")
+        .setContentText(text).setAutoCancel(true).build())
+}
+
 @Composable private fun Idea3dTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = lightColorScheme(
         primary = Color(0xFF006E67), secondary = Color(0xFFB3261E), tertiary = Color(0xFF4D5F00),
@@ -881,6 +894,8 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var groupDragLast by remember { mutableStateOf<Pt?>(null) }
     var curveDragLast by remember { mutableStateOf<Pt?>(null) }
     var guideDetectionRunning by remember { mutableStateOf(false) }
+    var simpleTraceRunning by remember { mutableStateOf(false) }
+    var showSimpleTraceCommand by remember { mutableStateOf(false) }
     var scale by remember { mutableStateOf<Double?>(null) } // pixels per selected unit
     var axisScale by remember { mutableStateOf<Pair<Double, Double>?>(null) } // X and Y pixels per unit, only for per-axis calibration
     var modelReport by remember { mutableStateOf<ModelReport?>(null) }
@@ -1289,6 +1304,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         library = ProjectStore.list(context)
     }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> uri?.let(::importPicture) }
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val projectPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { ProjectStore.importProject(context, uri) } }
@@ -2047,6 +2063,40 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val a = vectors[i]; val b = vectors[(i + 1) % 4]
             abs((a.x * b.x + a.y * b.y) / (lengths[i] * lengths[(i + 1) % 4]).toFloat()) < .025f
         } }
+    }
+    /** Runs the deliberately small, on-device picture simplifier. A selected rectangle limits detail work to it. */
+    fun startSimpleTrace(command: String) {
+        val image = bitmap ?: return
+        val wantsDetail = command.lowercase(Locale.US).contains("detail")
+        val area = if (wantsDetail) selectedGuideId?.let(::rectangleShape)?.let { shape ->
+            TraceArea(shape.minOf { it.start.x }, shape.minOf { it.start.y }, shape.maxOf { it.start.x }, shape.maxOf { it.start.y })
+        } else null
+        if (wantsDetail && area == null) {
+            logToast(context, "Select a rectangle first, then ask to detail it", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        val existing = guides
+        simpleTraceRunning = true
+        ActionLog.add("2D simplify started: ${if (area == null) "whole picture" else "selected rectangle"}; command=$command")
+        scope.launch {
+            val result = withContext(Dispatchers.Default) { simpleShapeTrace(image, existing, area, editPlane) }
+            simpleTraceRunning = false
+            if (result.guides.isEmpty()) {
+                ActionLog.add("2D simplify finished: no clear simple shapes")
+                logToast(context, "No clear simple shapes found", Toast.LENGTH_LONG).show()
+                backgroundDoneNotification(context, "Simple-shape scan finished: no clear shapes found")
+                return@launch
+            }
+            pushUndo()
+            guides = if (area == null) result.guides else guides + result.guides
+            guidesDetected = true
+            selectedGuideId = result.guides.first().id; selectedWholeGuideId = result.guides.first().id
+            ActionLog.add("2D simplify finished: ${result.summary}")
+            val done = "Simple 2D shapes are ready: ${result.summary}"
+            logToast(context, done, Toast.LENGTH_LONG).show()
+            backgroundDoneNotification(context, done)
+        }
     }
     /** Replaces a rectangle with straight sides and quadratic rounded corners. */
     fun roundRectangle(guideId: Int) {
@@ -4101,6 +4151,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                     if (!show3d) {
                         ActionIcon("Fit", R.drawable.ic_fit) { fitView() }
                         ActionIcon("Sizes", R.drawable.ic_sizes, on = showSizes) { showSizes = !showSizes; preferences.edit().putBoolean("show_sizes", showSizes).apply() }
+                        if (bitmap != null) ActionIcon("Simplify", R.drawable.ic_idea3d, enabled = !simpleTraceRunning) { showSimpleTraceCommand = true }
                     }
                 }
                 val modifying = !show3d && !selectMode && pick == null && tool == Tool.ADJUST &&
@@ -4650,6 +4701,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
         val safeName = projectName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Idea3D" }
         ModelReportDialog(report, unit, onDismiss = { modelReport = null }, onStl = { modelReport = null; stlExporter.launch("$safeName.stl") }, on3mf = { modelReport = null; threeMfExporter.launch("$safeName.3mf") })
     }
+    if (showSimpleTraceCommand) SimpleTraceCommandDialog(
+        hasDetailRectangle = selectedGuideId?.let(::rectangleShape) != null,
+        onDismiss = { showSimpleTraceCommand = false },
+        onRun = { command -> showSimpleTraceCommand = false; startSimpleTrace(command) }
+    )
     if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); logToast(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onExportDxf = { showPictureEdit = false; showDxfExport = true }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onSaveMaterial = {
@@ -6555,6 +6611,26 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     )
 }
 
+/** A small command surface for the private, on-device visual simplifier. */
+@Composable private fun SimpleTraceCommandDialog(hasDetailRectangle: Boolean, onDismiss: () -> Unit, onRun: (String) -> Unit) {
+    var command by remember { mutableStateOf("Make simple 2D shapes") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Simplify picture") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Describe a quick 2D pass. It finds large circles, rectangles and straight lines locally; it ignores text, shadows and texture.", fontSize = 13.sp)
+                OutlinedTextField(value = command, onValueChange = { command = it }, label = { Text("Command") }, minLines = 2)
+                if (hasDetailRectangle) OutlinedButton(onClick = { command = "Detail selected rectangle" }) { Text("Detail selected rectangle") }
+                else Text("To detail one part later: draw and select a rectangle, then open this command again.", fontSize = 12.sp, color = Color(0xFF53615D))
+                Text("The scan runs off the editor thread and sends a notification when it finishes.", fontSize = 12.sp, color = Color(0xFF53615D))
+            }
+        },
+        confirmButton = { TextButton(onClick = { onRun(command.ifBlank { "Make simple 2D shapes" }) }) { Text("Run") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
 @Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
     var name by remember { mutableStateOf(currentName) }
     var unit by remember { mutableStateOf(currentUnit) }
@@ -7751,6 +7827,104 @@ private fun detectStrongGuideLines(source: Bitmap): List<GuideLine> {
         accepted += Triple(theta, distanceFromOrigin.toDouble(), startPoint to endPoint)
     }
     return accepted.mapIndexed { index, (_, _, segment) -> GuideLine(index + 1, segment.first, segment.second, manual = false) }
+}
+
+private data class TraceArea(val left: Float, val top: Float, val right: Float, val bottom: Float)
+private data class SimpleTraceResult(val guides: List<GuideLine>, val summary: String)
+private data class TraceComponent(val count: Int, val left: Int, val top: Int, val right: Int, val bottom: Int, val touchesEdge: Boolean)
+
+private fun traceComponents(mask: BooleanArray, width: Int, height: Int): List<TraceComponent> {
+    val seen = BooleanArray(mask.size)
+    val out = mutableListOf<TraceComponent>()
+    val queue = IntArray(mask.size)
+    for (seed in mask.indices) {
+        if (!mask[seed] || seen[seed]) continue
+        var head = 0; var tail = 0; queue[tail++] = seed; seen[seed] = true
+        var left = width; var top = height; var right = 0; var bottom = 0; var touches = false
+        while (head < tail) {
+            val index = queue[head++]; val x = index % width; val y = index / width
+            left = min(left, x); right = max(right, x); top = min(top, y); bottom = max(bottom, y)
+            if (x == 0 || y == 0 || x == width - 1 || y == height - 1) touches = true
+            fun visit(next: Int) { if (mask[next] && !seen[next]) { seen[next] = true; queue[tail++] = next } }
+            if (x > 0) visit(index - 1); if (x + 1 < width) visit(index + 1)
+            if (y > 0) visit(index - width); if (y + 1 < height) visit(index + width)
+        }
+        out += TraceComponent(tail, left, top, right, bottom, touches)
+    }
+    return out
+}
+
+private fun tracedCircle(center: Pt, radius: Float, firstId: Int, pathId: Int, plane: ModelPlane, hole: Boolean): List<GuideLine> {
+    fun at(angle: Double) = Pt((center.x + radius * cos(angle)).toFloat(), (center.y + radius * sin(angle)).toFloat())
+    return (0 until 8).map { i ->
+        val a = 2 * PI * i / 8; val b = 2 * PI * (i + 1) / 8
+        GuideLine(firstId + i, at(a), if (i == 7) at(0.0) else at(b), manual = true, pathId = pathId, curveMid = at((a + b) / 2), plane = plane, hole = hole)
+    }
+}
+
+/**
+ * Fast, offline visual reduction. It deliberately looks only for dominant high-contrast blobs and their large
+ * interior voids, which is why a weight plate becomes one disc plus holes rather than thousands of wood-grain lines.
+ */
+private fun simpleShapeTrace(source: Bitmap, existing: List<GuideLine>, area: TraceArea?, plane: ModelPlane): SimpleTraceResult {
+    val cropLeft = (area?.left ?: 0f).toInt().coerceIn(0, source.width - 1)
+    val cropTop = (area?.top ?: 0f).toInt().coerceIn(0, source.height - 1)
+    val cropRight = (area?.right ?: source.width.toFloat()).toInt().coerceIn(cropLeft + 1, source.width)
+    val cropBottom = (area?.bottom ?: source.height.toFloat()).toInt().coerceIn(cropTop + 1, source.height)
+    val crop = Bitmap.createBitmap(source, cropLeft, cropTop, cropRight - cropLeft, cropBottom - cropTop)
+    val scale = min(1f, 480f / max(crop.width, crop.height).toFloat())
+    val work = if (scale < 1f) Bitmap.createScaledBitmap(crop, (crop.width * scale).roundToInt(), (crop.height * scale).roundToInt(), true) else crop
+    val w = work.width; val h = work.height
+    if (w < 24 || h < 24) return SimpleTraceResult(emptyList(), "picture is too small")
+    val pixels = IntArray(w * h); work.getPixels(pixels, 0, w, 0, 0, w, h)
+    fun r(value: Int) = AndroidColor.red(value)
+    fun g(value: Int) = AndroidColor.green(value)
+    fun b(value: Int) = AndroidColor.blue(value)
+    val edge = buildList {
+        for (x in 0 until w step 3) { add(pixels[x]); add(pixels[(h - 1) * w + x]) }
+        for (y in 0 until h step 3) { add(pixels[y * w]); add(pixels[y * w + w - 1]) }
+    }
+    val br = edge.map(::r).average(); val bg = edge.map(::g).average(); val bb = edge.map(::b).average()
+    fun contrast(pixel: Int) = abs(r(pixel) - br) + abs(g(pixel) - bg) + abs(b(pixel) - bb)
+    fun light(pixel: Int) = (r(pixel) * 30 + g(pixel) * 59 + b(pixel) * 11) / 100
+    // A dark/high-contrast object is the most reliable starting point for workshop photographs.
+    val foreground = BooleanArray(pixels.size) { i -> contrast(pixels[i]) > 125.0 && light(pixels[i]) < 145 }
+    val main = traceComponents(foreground, w, h).filterNot { it.touchesEdge }.maxByOrNull { it.count }
+        ?: run {
+            val fallback = detectStrongGuideLines(crop)
+            return SimpleTraceResult(fallback.mapIndexed { i, line -> line.copy(id = nextGuideId(existing) + i, start = Pt(line.start.x + cropLeft, line.start.y + cropTop), end = Pt(line.end.x + cropLeft, line.end.y + cropTop), plane = plane) }, "${fallback.size} straight lines")
+        }
+    val objectW = main.right - main.left + 1; val objectH = main.bottom - main.top + 1
+    if (main.count < w * h / 120 || objectW < 20 || objectH < 20) return SimpleTraceResult(emptyList(), "no dominant object")
+    val centerX = (main.left + main.right) / 2f; val centerY = (main.top + main.bottom) / 2f
+    val radius = (objectW + objectH) / 4f
+    val circleLike = objectW.toFloat() / objectH in .72f..1.38f
+    var id = nextGuideId(existing); var path = nextGuidePathId(existing)
+    fun sourcePoint(x: Float, y: Float) = Pt(cropLeft + x / scale, cropTop + y / scale)
+    val output = mutableListOf<GuideLine>()
+    if (circleLike) {
+        output += tracedCircle(sourcePoint(centerX, centerY), radius / scale, id, path++, plane, hole = false); id += 8
+        // Wood/background-coloured islands safely inside the dark disc are large openings, not texture.
+        val holes = BooleanArray(pixels.size) { index ->
+            val x = index % w; val y = index / w
+            val inside = hypot((x - centerX).toDouble(), (y - centerY).toDouble()) < radius * .82
+            inside && contrast(pixels[index]) < 82.0 && light(pixels[index]) > 55
+        }
+        traceComponents(holes, w, h).filter { component ->
+            component.count > main.count * .012 && component.left > main.left && component.top > main.top && component.right < main.right && component.bottom < main.bottom
+        }.sortedByDescending { it.count }.take(8).forEach { hole ->
+            val hw = hole.right - hole.left + 1; val hh = hole.bottom - hole.top + 1
+            if (hw < 10 || hh < 10 || hw.toFloat() / hh !in .52f..1.9f) return@forEach
+            output += tracedCircle(sourcePoint((hole.left + hole.right) / 2f, (hole.top + hole.bottom) / 2f), (hw + hh) / 4f / scale, id, path++, plane, hole = true); id += 8
+        }
+    } else {
+        val left = cropLeft + main.left / scale; val top = cropTop + main.top / scale
+        val right = cropLeft + (main.right + 1) / scale; val bottom = cropTop + (main.bottom + 1) / scale
+        val points = listOf(Pt(left, top), Pt(right, top), Pt(right, bottom), Pt(left, bottom))
+        output += points.indices.map { i -> GuideLine(id + i, points[i], points[(i + 1) % 4], manual = true, pathId = path, plane = plane) }
+    }
+    val shapes = output.mapNotNull { it.pathId }.distinct().size
+    return SimpleTraceResult(output, "$shapes simple shape${if (shapes == 1) "" else "s"}")
 }
 private fun calibrationOf(lines: List<MeasureLine>, unit: String): Calibration =
     Calibration.from(lines.filter { it.isReference && it.isScaleReference }.map { line ->
