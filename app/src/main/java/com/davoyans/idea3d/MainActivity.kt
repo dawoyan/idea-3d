@@ -257,6 +257,8 @@ private class ForeignObject(
     val points: List<ForeignPoint>,
     val across: Vec3, val depth: Vec3, val acrossMin: Double, val acrossMax: Double, val faceMm: Double, val backMm: Double, val minThicknessMm: Double,
 ) { val key get() = plane to extrusionId }
+/** A point on the actually visible face of a 3D object, expressed in that object's own drawing plane. */
+private data class SurfacePick(val key: Pair<ModelPlane, Int>, val point: Pt, val depthMm: Double)
 
 /** An outline endpoint of a foreign object: where it is in its own canvas, where it shows here, and which side it is on. */
 private data class ForeignPoint(val own: Pt, val at: Pt, val back: Boolean)
@@ -932,6 +934,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var groupDragLast by remember { mutableStateOf<Pt?>(null) }
     var curveDragLast by remember { mutableStateOf<Pt?>(null) }
     var guideDetectionRunning by remember { mutableStateOf(false) }
+    var stickToVisibleSurface by remember { mutableStateOf(false) }
+    var stickStart by remember { mutableStateOf<SurfacePick?>(null) }
     var simpleTraceRunning by remember { mutableStateOf(false) }
     var showSimpleTraceCommand by remember { mutableStateOf(false) }
     // Set from Simplify → Select area. The next rectangle is immediately used as the detail area.
@@ -1839,6 +1843,41 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         return editPlane to extrusion.id
     }
     fun objectAt(point: Pt): Pair<ModelPlane, Int>? = ownObjectAt(point) ?: foreign.lastOrNull { insideForeign(it, point) }?.key
+    /** Maps a canvas tap through the displayed mesh triangle to the object's own face.
+     * This is what makes a line follow a visible object even when it was drawn in another view. */
+    fun surfacePickAt(point: Pt, only: Pair<ModelPlane, Int>? = null): SurfacePick? {
+        fun inTriangle(a: Pt, b: Pt, c: Pt): Triple<Float, Float, Float>? {
+            val den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y)
+            if (abs(den) < 0.0001f) return null
+            val u = ((b.y - c.y) * (point.x - c.x) + (c.x - b.x) * (point.y - c.y)) / den
+            val v = ((c.y - a.y) * (point.x - c.x) + (a.x - c.x) * (point.y - c.y)) / den
+            val w = 1f - u - v
+            return if (u >= -.001f && v >= -.001f && w >= -.001f) Triple(u, v, w) else null
+        }
+        foreign.asReversed().forEach { target ->
+            if (only != null && target.key != only) return@forEach
+            for (i in target.canvas.indices step 6) {
+                val weights = inTriangle(Pt(target.canvas[i], target.canvas[i + 1]), Pt(target.canvas[i + 2], target.canvas[i + 3]), Pt(target.canvas[i + 4], target.canvas[i + 5])) ?: continue
+                val (u, v, w) = weights
+                val own = Pt(target.own[i] * u + target.own[i + 2] * v + target.own[i + 4] * w, target.own[i + 1] * u + target.own[i + 3] * v + target.own[i + 5] * w)
+                val depth = (if (target.back[i / 2]) target.backMm else target.faceMm) * u + (if (target.back[i / 2 + 1]) target.backMm else target.faceMm) * v + (if (target.back[i / 2 + 2]) target.backMm else target.faceMm) * w
+                return SurfacePick(target.key, own, depth)
+            }
+        }
+        val ownKey = ownObjectAt(point) ?: return null
+        if (only != null && ownKey != only) return null
+        val geometry = planeGeometry(ownKey.first)
+        val extrusion = geometry.extrusions.firstOrNull { extrusion -> extrusionGuides(extrusion, geometry.guides).any { it.id == ownKey.second } } ?: return null
+        return SurfacePick(ownKey, point, facePositionMm(extrusion))
+    }
+    /** Inserts a normal editable guide line at the sampled surface depth. */
+    fun addSurfaceGuide(start: SurfacePick, end: SurfacePick) {
+        val geometry = planeGeometry(start.key.first)
+        val guide = GuideLine((geometry.guides.maxOfOrNull { it.id } ?: 0) + 1, start.point, end.point, manual = true, plane = start.key.first, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, startZMm = start.depthMm, endZMm = end.depthMm)
+        pushUndo(); setPlaneShapes(start.key.first, geometry.guides + guide, geometry.extrusions)
+        if (start.key.first == editPlane) { selectedGuideId = guide.id; selectedWholeGuideId = guide.id } else selectedForeign = start.key
+        logToast(context, "Line stuck to visible object surface", Toast.LENGTH_SHORT).show()
+    }
     fun ownSelectedObject(): Pair<ModelPlane, Int>? {
         val id = selectedWholeGuideId ?: return null
         return extrusions.firstOrNull { e -> extrusionGuides(e, guides).any { it.id == id } }?.let { editPlane to it.id }
@@ -2362,9 +2401,27 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 // Drawing: a tap on an existing line starts the new line there; it doesn't select that line.
                 selectedGuideId = null
                 guideDeleteCandidateId = null
+                if (stickToVisibleSurface && lineDrawing == LineDrawing.STRAIGHT) {
+                    val surface = surfacePickAt(point)
+                    if (surface != null) {
+                        stickStart = surface
+                        draftStart = point
+                        logToast(context, "Surface picked — tap the other end on the same object", Toast.LENGTH_SHORT).show()
+                        return
+                    }
+                    logToast(context, "Tap a visible 3D surface to start a stuck line", Toast.LENGTH_SHORT).show()
+                    return
+                }
                 // A circle's center stays where tapped; other drawings start on the line under the finger.
                 draftStart = if (lineDrawing == LineDrawing.CIRCLE) point else snapToLines(point, hitRadius)
             } else {
+                stickStart?.let { start ->
+                    val end = surfacePickAt(point, start.key)
+                    if (end == null) logToast(context, "End must be on the same visible object", Toast.LENGTH_LONG).show()
+                    else if (distance(start.point, end.point) > 0.5) addSurfaceGuide(start, end)
+                    stickStart = null; draftStart = null; pendingEnd = null
+                    return
+                }
                 val point = snapToLines(point, hitRadius)
                 if (distance(draftStart!!, point) > 4.0 && lineDrawing == LineDrawing.CIRCLE) addCircle(draftStart!!, point)
                 else if (distance(draftStart!!, point) > 4.0 && lineDrawing == LineDrawing.RECTANGLE) addRectangle(draftStart!!, point)
@@ -3666,6 +3723,27 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         extrusions = extrusions.filterNot { extrusion -> extrusion.guideIds.any { it in ids } }
         logToast(context, "Separated shape into independent lines", Toast.LENGTH_SHORT).show()
     }
+    /** Places one flat selected shape on the facing surface of the selected 3D object.
+     * The shape stays an independent editable outline: assign material/Grow it, then use 3D Cut, Common or Join. */
+    fun stickPickedShapeToObject() {
+        val picks = distinctPicked()
+        val target = picks.firstOrNull { extrusionOf(it) != null }
+        val shape = picks.firstOrNull { it != target && isClosedShape(it) && extrusionOf(it) == null }
+        if (target == null || shape == null || picks.size != 2) {
+            logToast(context, "Pick one flat closed shape and one 3D object", Toast.LENGTH_LONG).show(); return
+        }
+        val setup = modelSetup(); val targetMap = setup.mapping(target.first) ?: return; val shapeMap = setup.mapping(shape.first) ?: return
+        fun center(key: Pair<ModelPlane, Int>, mapping: PlaneMapping): Vec3? {
+            val gs = itemGuides(key); if (gs.isEmpty()) return null
+            val face = gs.firstOrNull()?.let { faceOffset(key.first, it.id) } ?: 0.0
+            val points = gs.flatMap { g -> listOf(mapping.model(g.start, g.startZMm + face), mapping.model(g.end, g.endZMm + face)) }
+            return Vec3(points.map { it.x }.average(), points.map { it.y }.average(), points.map { it.z }.average())
+        }
+        val onto = center(target, targetMap) ?: return; val from = center(shape, shapeMap) ?: return
+        pushUndo(); moveItem(shape, onto - from)
+        pickedItems = listOf(shape, target)
+        logToast(context, "Shape placed on ${objectName(target)}. Give it material/Grow, then use Cut, Common or Join 3D", Toast.LENGTH_LONG).show()
+    }
     fun mergePicked() {
         if (pickedItems.size < 2) { logToast(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         val first = pickedItems.first(); val rest = pickedItems.drop(1)
@@ -4235,6 +4313,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 // small screens, and burying this new command after the view controls made
                 // it too easy to miss.
                 if (!modifying && !selectMode) ViewIcons()
+                // Straight-line drawing can sample the rendered object surface instead of the current flat plane.
+                if (!show3d && !selectMode && tool == Tool.LINES && lineDrawing == LineDrawing.STRAIGHT && draftStart == null) {
+                    ActionIcon("Stick surface", R.drawable.ic_cube, on = stickToVisibleSurface) { stickToVisibleSurface = !stickToVisibleSurface }
+                }
                 when {
                     show3d -> {}
                     pick != null -> {
@@ -4255,6 +4337,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Space H", R.drawable.ic_even_h, enabled = total >= 3) { arrangePicked(horizontal = true, distribute = true) }
                         ActionIcon("Space V", R.drawable.ic_even_v, enabled = total >= 3) { arrangePicked(horizontal = false, distribute = true) }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
+                        ActionIcon("Place on surface", R.drawable.ic_cube, enabled = n == 2) { stickPickedShapeToObject() }
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
