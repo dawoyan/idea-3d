@@ -1873,9 +1873,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }
         // Flat lines and shapes are valid visible attachment targets too. Their surface is their stored depth.
-        val flat = closestGuide(point, guides, 36.0) ?: closedGuideShapes(guides).lastOrNull { pointInsidePolygon(point, shapePoints(it)) }?.firstOrNull()
+        val flat = closestGuide(point, guides, 56.0) ?: closedGuideShapes(guides).lastOrNull { pointInsidePolygon(point, shapePoints(it)) }?.firstOrNull()
         if (flat != null) {
-            val key = flat.plane to flat.id
+            // `guides` is already the visible projection in this editor view.
+            // Keep the attachment in that view even when the displayed target
+            // originated on another plane; its projected id cannot be used as a
+            // source-geometry id, but its visible location is the intended one.
+            val key = editPlane to flat.id
             if (only == null || key == only) return SurfacePick(key, point, (flat.startZMm + flat.endZMm) / 2)
         }
         return null

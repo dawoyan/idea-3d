@@ -394,6 +394,7 @@ internal fun ThreeDViewerPane(
 ) {
     val context = LocalContext.current
     val view = remember(mesh) { ModelView(context, mesh, camera) }
+    val figureOverlay = remember(mesh) { ScaleFigureOverlay(context, mesh) }
     view.onObjectTap = onEditObject
     var showFrame by remember { mutableStateOf(false) }
     var showArrow by remember { mutableStateOf(false) }
@@ -428,9 +429,17 @@ internal fun ThreeDViewerPane(
             Text(detail.toString(), fontSize = 12.sp, color = Color(0xFF00695C))
         }
         if (mesh.warnings.isNotEmpty()) Text(mesh.warnings.joinToString("\n"), Modifier.fillMaxWidth().background(Color(0xFFFFF4D6)).padding(horizontal = 12.dp, vertical = 4.dp), fontSize = 12.sp, color = Color(0xFF5C4400))
-        // A rebuilt model creates a new GL view; key the host so it is actually swapped in.
-        androidx.compose.runtime.key(view, showFigure) {
-            AndroidView(factory = { context -> FrameLayout(context).apply { addView(view); addView(view.overlay); if (showFigure) addView(ScaleFigureOverlay(context, mesh)) } }, modifier = Modifier.fillMaxWidth().weight(1f))
+        // A rebuilt model creates a new GL view. Figure visibility is updated in
+        // the existing host: recreating it would try to parent the GL view twice.
+        androidx.compose.runtime.key(view) {
+            AndroidView(
+                factory = { FrameLayout(it).apply { addView(view); addView(view.overlay) } },
+                update = { host ->
+                    host.removeView(figureOverlay)
+                    if (showFigure) host.addView(figureOverlay)
+                },
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
         }
     }
 }
