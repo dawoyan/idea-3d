@@ -3925,11 +3925,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     /** The bottom Select button climbs from a node to its line, shape, then 3D object. */
     fun selectionLadderLabel(): String = when {
-        selectMode && pickedItems.size == 1 && extrusionOf(pickedItems.single()) != null -> "Select 3D"
+        selectMode && pickedItems.size == 1 && extrusionOf(pickedItems.single()) != null -> "3D"
         selectMode -> "Done"
-        selectedGuideEndpoint != null || selectedVertices.isNotEmpty() -> "Select line"
-        selectedGuideId != null || selectedWholeGuideId != null -> "Select shape"
-        selectedForeign != null || selectedExtrusionId != null -> "Select 3D"
+        selectedGuideEndpoint != null || selectedVertices.isNotEmpty() -> "Whole"
+        selectedGuideId != null || selectedWholeGuideId != null -> "Shape"
+        selectedForeign != null || selectedExtrusionId != null -> "3D"
         else -> "Select"
     }
     fun promoteSelection() {
@@ -4254,7 +4254,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, stickSurface = stickToVisibleSurface, onStickSurface = { stickToVisibleSurface = !stickToVisibleSurface }, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
+        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
             // Select first, then Modify: the selected line or shape stays selected, as a whole.
             if (it == Tool.ADJUST && selectedGuideId != null && selectedWholeGuideId == null) selectedWholeGuideId = selectedGuideId
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
@@ -4356,9 +4356,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 // it too easy to miss.
                 if (!modifying && !selectMode) ViewIcons()
                 // Straight-line drawing can sample the rendered object surface instead of the current flat plane.
-                if (!show3d && !selectMode && tool == Tool.LINES && lineDrawing == LineDrawing.STRAIGHT && draftStart == null) {
-                    ActionIcon("Stick surface", R.drawable.ic_cube, on = stickToVisibleSurface) { stickToVisibleSurface = !stickToVisibleSurface }
-                }
                 when {
                     show3d -> {}
                     pick != null -> {
@@ -4490,6 +4487,16 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan }, onDoubleTap = { }, doubleTapEnabled = false,
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
                 selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null || selectedForeign != null || selectedModelId != null), onNudge = ::nudgeSelected
+            )
+            // This stays above the canvas instead of in a scrolling toolbar: it must be discoverable while drawing.
+            if (tool == Tool.LINES && !selectMode) AssistChip(
+                onClick = {
+                    if (lineDrawing != LineDrawing.STRAIGHT) lineDrawing = LineDrawing.STRAIGHT
+                    stickToVisibleSurface = !stickToVisibleSurface
+                },
+                label = { Text(if (stickToVisibleSurface) "Sticking to surface" else "Stick to surface") },
+                leadingIcon = { Icon(painterResource(R.drawable.ic_cube), null, Modifier.size(18.dp)) },
+                modifier = Modifier.align(Alignment.TopEnd).padding(10.dp)
             )
             }
             // Leveling and perspective correction work on the photo, so they belong to the front plane.
@@ -5755,7 +5762,7 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
     }
 }
 
-@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, selectActive: Boolean, selectLabel: String, selectionMode: SelectionMode, stickSurface: Boolean, onStickSurface: () -> Unit, onSelect: () -> Unit, onSelectionMode: (SelectionMode) -> Unit, onFind: () -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
+@Composable private fun BottomControls(tool: Tool, lineDrawing: LineDrawing, measureDrawing: LineDrawing, drawingBroken: Boolean, guideColorIndex: Int, guideStrokeWidth: Float, unknownSize: Boolean, onUnknownSize: (Boolean) -> Unit, selectActive: Boolean, selectLabel: String, selectionMode: SelectionMode, onSelect: () -> Unit, onSelectionMode: (SelectionMode) -> Unit, onFind: () -> Unit, onTool: (Tool) -> Unit, onFinishBroken: () -> Unit, onLineDrawing: (LineDrawing) -> Unit, onMeasureDrawing: (LineDrawing) -> Unit, onGuideStyle: (Int, Float) -> Unit) {
     var lineMenuOpen by remember { mutableStateOf(false) }
     var measureMenuOpen by remember { mutableStateOf(false) }
     var selectMenuOpen by remember { mutableStateOf(false) }
@@ -5800,8 +5807,7 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
                     }
                 }
             }
-            if (tool == Tool.LINES && lineDrawing == LineDrawing.STRAIGHT) ToolIconButton("Stick", R.drawable.ic_cube, stickSurface, onStickSurface, Modifier.weight(1f), description = "Stick new line to a visible 3D surface")
-            else if (tool == Tool.LINES) ToolIconButton("Broken", R.drawable.ic_broken_line, lineDrawing == LineDrawing.BROKEN, { val selected = lineDrawing == LineDrawing.BROKEN; onLineDrawing(LineDrawing.BROKEN); onTool(if (selected) Tool.NONE else Tool.LINES) }, Modifier.weight(1f), description = "Broken guide line", onLongPress = { lineMenuOpen = true })
+            if (tool == Tool.LINES) ToolIconButton("Broken", R.drawable.ic_broken_line, lineDrawing == LineDrawing.BROKEN, { val selected = lineDrawing == LineDrawing.BROKEN; onLineDrawing(LineDrawing.BROKEN); onTool(if (selected) Tool.NONE else Tool.LINES) }, Modifier.weight(1f), description = "Broken guide line", onLongPress = { lineMenuOpen = true })
             // Picking several things, and finding anything, sit with the tools so they never move.
             Box(Modifier.weight(1f)) {
                 ToolIconButton(selectLabel, R.drawable.ic_select, selectActive, onSelect, Modifier.fillMaxWidth(), description = "Select: ${selectionMode.label}", onLongPress = { selectMenuOpen = true })
