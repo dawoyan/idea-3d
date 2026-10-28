@@ -946,6 +946,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     var viewerObjects by remember { mutableStateOf<List<Pair<ModelPlane, Int>>>(emptyList()) }
     // Null = full scene from the main view; a key = temporary item-only preview.
     var viewerScope by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
+    // Several fast taps can start several mesh builds. Only the newest build may
+    // replace the viewer, otherwise a late stale/empty result makes geometry vanish.
+    var viewerRequest by remember { mutableIntStateOf(0) }
     var show3d by remember { mutableStateOf(false) }
     val viewerCamera = remember { ViewerCamera() }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
@@ -3229,6 +3232,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     /** Builds either the entire scene or one selected 3D object. The camera and frame stay put across rebuilds. */
     fun open3dView(scopeObject: Pair<ModelPlane, Int>? = null) {
         viewerScope = scopeObject
+        val request = ++viewerRequest
         val allGuideSnapshot = allGuides(); val allExtrusionSnapshot = allExtrusions()
         val scopedExtrusion = scopeObject?.let { key -> allExtrusionSnapshot.firstOrNull { it.plane == key.first && it.id == key.second } }
         // An item preview must not be blocked by a broken or unfinished object
@@ -3249,6 +3253,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val shown = scopeObject?.let { key -> model.objects.indices.filter { model.objects[it] == key } } ?: model.meshes.indices.toList()
                 if (shown.isEmpty()) throw IllegalArgumentException("That item has no 3D material or depth yet")
                 val meshes = shown.map { model.meshes[it] }
+                if (meshes.isEmpty()) throw IllegalArgumentException(if (scopeObject == null) "No valid 3D objects in this scene" else "This item has no valid 3D mesh")
                 val shownObjects = if (scopeObject == null) model.objects else shown.map { model.objects[it] }
                 val warnings = model.warnings.map { it.toString() }
                 meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
@@ -3264,7 +3269,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 }
                 ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes) to shownObjects
             } }
-            if (projectId != openedProject) return@launch
+            if (projectId != openedProject || request != viewerRequest) return@launch
             result.onSuccess { (mesh, ids) -> viewerModel = mesh; viewerObjects = ids; show3d = true }
                 .onFailure { error ->
                     val detail = error.localizedMessage ?: error.javaClass.simpleName
@@ -3276,7 +3281,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
     LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, solidOps, materials, unit, importedModels) { if (show3d) open3dView(viewerScope) }
-    fun leave3d() { show3d = false; viewerModel = null; viewerEditObject = null; viewerScope = null }
+    fun leave3d() { viewerRequest++; show3d = false; viewerModel = null; viewerEditObject = null; viewerScope = null }
     /** Switches to the view a foreign object was drawn in and selects it there, where all drawing tools apply. */
     fun openInOwnView(key: Pair<ModelPlane, Int>) {
         leave3d(); switchPlane(key.first); tool = Tool.ADJUST
@@ -4275,10 +4280,11 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
           val shapeExtrusion = extrusions.firstOrNull { it.guideIds.any { id -> id in shapeIds } }
           val shapeGuides = guides.filter { sameGuideObject(it, path.first()) }
           val current = shapeGuides.firstNotNullOfOrNull { g -> materials.firstOrNull { it.id == g.materialId } }
-          ShapeEditDialog(path.first(), shapeExtrusion, guides, extrusions, unit, scale, width, height, materials, MadeOf(current?.id, current != null && !current.isSheet), onDismiss = { shapeEditId = null }, onSave = { color, transparency, widthValue, heightValue, depthValue, depthEdited, positionZ, made ->
+          ShapeEditDialog(path.first(), shapeExtrusion, guides, extrusions, unit, scale, width, height, materials, MadeOf(current?.id, current != null && !current.isSheet), onDismiss = { shapeEditId = null }, onSave = { color, transparency, widthValue, heightValue, widthEdited, heightEdited, depthValue, depthEdited, positionZ, made ->
             pushUndo()
-            val targetWidth = widthValue?.let { value -> scale?.let { value * it } }
-            val targetHeight = heightValue?.let { value -> scale?.let { value * it } }
+            // Choosing a material must not reapply the displayed dimensions.
+            val targetWidth = if (widthEdited) widthValue?.let { value -> scale?.let { value * it } } else null
+            val targetHeight = if (heightEdited) heightValue?.let { value -> scale?.let { value * it } } else null
             val sx = (targetWidth?.div(width) ?: 1.0).toFloat()
             val sy = (targetHeight?.div(height) ?: if (scale == null && widthValue != null && heightValue != null) width * heightValue / (widthValue * height) else 1.0).toFloat()
             // A circle or oval keeps its center; other shapes keep their top-left corner.
@@ -4287,7 +4293,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             fun resize(point: Pt) = Pt(ax + (point.x - ax) * sx, ay + (point.y - ay) * sy)
             val ids = guides.filter { sameGuideObject(it, path.first()) }.map { it.id }.toSet()
             val changed = abs(sx - 1f) > 0.0001f || abs(sy - 1f) > 0.0001f
-            guides = guides.map { guide -> if (guide.id in ids) guide.copy(start = resize(guide.start), end = resize(guide.end), curveMid = guide.curveMid?.let(::resize), colorIndex = color, fillTransparency = if (guide.pathId == path.first().pathId) (if (transparency == 100 && made.materialId != null && !made.frame) null else transparency) else guide.fillTransparency, lengthMm = if (changed) null else guide.lengthMm, shapeWidthMm = if (guide.id == path.first().id) widthValue?.times(unitFactorMm(unit)) else guide.shapeWidthMm, shapeHeightMm = if (guide.id == path.first().id) heightValue?.times(unitFactorMm(unit)) else guide.shapeHeightMm) else guide }
+            guides = guides.map { guide -> if (guide.id in ids) guide.copy(start = resize(guide.start), end = resize(guide.end), curveMid = guide.curveMid?.let(::resize), colorIndex = color, fillTransparency = if (guide.pathId == path.first().pathId) (if (transparency == 100 && made.materialId != null && !made.frame) null else transparency) else guide.fillTransparency, lengthMm = if (changed) null else guide.lengthMm, shapeWidthMm = if (guide.id == path.first().id && widthEdited) widthValue?.times(unitFactorMm(unit)) else guide.shapeWidthMm, shapeHeightMm = if (guide.id == path.first().id && heightEdited) heightValue?.times(unitFactorMm(unit)) else guide.shapeHeightMm) else guide }
             extrusions = extrusions.map { extrusion -> if (extrusion.guideIds.any { it in ids }) { val resized = extrusion.copy(origin = resize(extrusion.origin), handle = resize(extrusion.handle)); resized.depthMm?.let { extrusionWithDepth(resized, it, scale, unit) } ?: resized } else extrusion }
             if (depthEdited && shapeExtrusion != null) extrusions = extrusions.map { extrusion ->
                 if (extrusion.id != shapeExtrusion.id) extrusion else if (depthValue == null) extrusion.copy(depthMm = null) else extrusionWithDepth(extrusion, depthValue * unitFactorMm(unit), scale, unit)
@@ -6717,7 +6723,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
 /** What a closed shape is made of: nothing, a sheet that fills it, or bars or pipes along its edges (a frame). */
 private data class MadeOf(val materialId: String?, val frame: Boolean)
 
-@Composable private fun ShapeEditDialog(guide: GuideLine, extrusion: Extrusion?, guides: List<GuideLine>, extrusions: List<Extrusion>, unit: String, scale: Double?, width: Float, height: Float, materials: List<Material>, madeOf: MadeOf, onDismiss: () -> Unit, onSave: (Int, Int?, Double?, Double?, Double?, Boolean, Double?, MadeOf) -> Unit) {
+@Composable private fun ShapeEditDialog(guide: GuideLine, extrusion: Extrusion?, guides: List<GuideLine>, extrusions: List<Extrusion>, unit: String, scale: Double?, width: Float, height: Float, materials: List<Material>, madeOf: MadeOf, onDismiss: () -> Unit, onSave: (Int, Int?, Double?, Double?, Boolean, Boolean, Double?, Boolean, Double?, MadeOf) -> Unit) {
     var made by remember(guide.id) { mutableStateOf(madeOf) }
     var color by remember(guide.id) { mutableIntStateOf(guide.colorIndex) }
     // 100 means lines only: the outline is drawn but nothing fills it, and it has no 3D body.
@@ -6789,7 +6795,7 @@ private data class MadeOf(val materialId: String?, val frame: Boolean)
                 }
             }
         }
-    }, confirmButton = { TextButton(enabled = (shapeWidth.isBlank() || widthValue != null && widthValue > 0) && (shapeHeight.isBlank() || heightValue != null && heightValue > 0) && (depth.isBlank() || depthValue != null && depthValue >= 0) && (extrusion == null || positionValue != null && positionValue.isFinite()), onClick = { onSave(color, transparency, widthValue, heightValue, depthValue, depthEdited, if (extrusion != null) positionValue else null, made) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    }, confirmButton = { TextButton(enabled = (shapeWidth.isBlank() || widthValue != null && widthValue > 0) && (shapeHeight.isBlank() || heightValue != null && heightValue > 0) && (depth.isBlank() || depthValue != null && depthValue >= 0) && (extrusion == null || positionValue != null && positionValue.isFinite()), onClick = { onSave(color, transparency, widthValue, heightValue, widthEdited, heightEdited, depthValue, depthEdited, if (extrusion != null) positionValue else null, made) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable private fun LineEditDialog(line: MeasureLine, unit: String, points: Pair<String, String>?, onDismiss: () -> Unit, onSave: (Double, String, Int, Boolean, Double, Double) -> Unit, onDelete: () -> Unit) {
