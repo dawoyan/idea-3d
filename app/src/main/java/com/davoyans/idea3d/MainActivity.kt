@@ -1043,6 +1043,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var selectMode by remember { mutableStateOf(false) }
     var selectionMode by remember { mutableStateOf(SelectionMode.VISIBLE) }
     var pickedItems by remember { mutableStateOf(emptyList<Pair<ModelPlane, Int>>()) }
+    // Existing selected lines/shapes waiting for a visible 3D face to attach to.
+    var surfaceAttachItems by remember { mutableStateOf<List<Pair<ModelPlane, Int>>?>(null) }
     var itemDragLast by remember { mutableStateOf<Pt?>(null) }
     var itemRectStart by remember { mutableStateOf<Pt?>(null) }
     var itemRectEnd by remember { mutableStateOf<Pt?>(null) }
@@ -2025,6 +2027,26 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val nextExtrusions = geometry.extrusions.map { e -> if (e.guideIds.none { it in ids }) e else e.copy(origin = moved(e.origin), handle = moved(e.handle)) }
         setPlaneShapes(key.first, nextGuides, nextExtrusions)
     }
+    fun startSurfaceAttach(keys: List<Pair<ModelPlane, Int>>) {
+        val usable = keys.distinctBy { it.first to (itemGuides(it).minOfOrNull { g -> g.id } ?: it.second) }
+        if (usable.isEmpty()) { logToast(context, "Select a line or flat shape first", Toast.LENGTH_LONG).show(); return }
+        surfaceAttachItems = usable
+        logToast(context, "Stick selected: now tap the visible 3D surface", Toast.LENGTH_LONG).show()
+    }
+    fun attachSelectedToSurface(items: List<Pair<ModelPlane, Int>>, surface: SurfacePick) {
+        val targetMap = modelSetup().mapping(surface.key.first) ?: return
+        val target = targetMap.model(surface.point, surface.depthMm)
+        fun center(key: Pair<ModelPlane, Int>): Vec3? {
+            val map = modelSetup().mapping(key.first) ?: return null
+            val guides = itemGuides(key); if (guides.isEmpty()) return null
+            val face = guides.firstOrNull()?.let { faceOffset(key.first, it.id) } ?: 0.0
+            val points = guides.flatMap { g -> listOf(map.model(g.start, g.startZMm + face), map.model(g.end, g.endZMm + face)) }
+            return Vec3(points.map { it.x }.average(), points.map { it.y }.average(), points.map { it.z }.average())
+        }
+        pushUndo()
+        items.forEach { key -> center(key)?.let { moveItem(key, target - it) } }
+        logToast(context, "Selected geometry stuck to the visible surface", Toast.LENGTH_SHORT).show()
+    }
     /** Picked items once each (a shape and its hole, or two picks of one group member, are one item). */
     fun distinctPicked() = pickedItems.distinctBy { k -> k.first to (itemGuides(k).minOfOrNull { it.id } ?: k.second) }
     fun movePicked(delta: Vec3) {
@@ -2238,6 +2260,12 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         logToast(context, "Rectangle corners rounded", Toast.LENGTH_SHORT).show()
     }
     fun handleTap(point: Pt, hitRadius: Double) {
+        surfaceAttachItems?.let { items ->
+            val surface = surfacePickAt(point)
+            if (surface == null) logToast(context, "Tap a visible 3D surface", Toast.LENGTH_LONG).show()
+            else { attachSelectedToSurface(items, surface); surfaceAttachItems = null }
+            return
+        }
         if (selectMode) {
             // Visible surface considers only the current view, preventing selection of a
             // projected element hidden behind the one under the finger.
@@ -4497,6 +4525,19 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 label = { Text(if (stickToVisibleSurface) "Sticking to surface" else "Stick to surface") },
                 leadingIcon = { Icon(painterResource(R.drawable.ic_cube), null, Modifier.size(18.dp)) },
                 modifier = Modifier.align(Alignment.TopEnd).padding(10.dp)
+            )
+            val attachKeys = when {
+                surfaceAttachItems != null -> surfaceAttachItems!!
+                selectMode && pickedItems.isNotEmpty() -> pickedItems
+                else -> (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id }?.let(::homeKey) }?.let(::listOf).orEmpty()
+            }
+            if (attachKeys.isNotEmpty()) AssistChip(
+                onClick = {
+                    if (surfaceAttachItems != null) surfaceAttachItems = null else startSurfaceAttach(attachKeys)
+                },
+                label = { Text(if (surfaceAttachItems != null) "Tap surface · Cancel" else "Stick selected") },
+                leadingIcon = { Icon(painterResource(R.drawable.ic_cube), null, Modifier.size(18.dp)) },
+                modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
             )
             }
             // Leveling and perspective correction work on the photo, so they belong to the front plane.
