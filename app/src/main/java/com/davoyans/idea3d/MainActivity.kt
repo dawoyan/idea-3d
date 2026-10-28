@@ -3252,7 +3252,9 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 val colors = mutableListOf<Int>()
                 // Intersecting objects are shown with a warning so they can be moved apart or joined; export still refuses them.
                 // Imported models join the drawing; a project of only imported models has no shapes to build.
-                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot) }
+                // Preview prioritizes immediate feedback. Printable/export validation
+                // (especially pairwise overlap testing) happens only for export.
+                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
                 val model = ModelBuild(built.meshes + placedSnapshot.map { it.second }, built.objects, built.warnings, built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish })
                 val shown = scopeObject?.let { key -> model.objects.indices.filter { model.objects[it] == key } } ?: model.meshes.indices.toList()
@@ -7186,7 +7188,7 @@ private class ModelBuild(val meshes: List<Mesh>, val objects: List<Pair<ModelPla
  * Builds every plane's solids and applies the 3D cuts and joins. With [strict], anything that would make a bad
  * print (including objects that overlap without being joined) throws; otherwise overlaps come back as warnings.
  */
-private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap()): ModelBuild {
+private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap(), preview: Boolean = false): ModelBuild {
     val objects = mutableListOf<Extrusion>()
     val members = buildMembers(guides, materials, setup)
     // A drawing made only of bars and pipes needs no closed shape.
@@ -7206,11 +7208,11 @@ private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops
     val keys = objects.map { it.plane to it.id }
     val operations = ops.mapNotNull { op -> val target = keys.indexOf(op.target); val tool = keys.indexOf(op.tool); if (target < 0 || tool < 0 || target == tool) null else SolidOperation(target, tool, op.join, op.keepTool, op.common) }
     val combined = SolidCombiner.apply(raw.map { it!! }, operations)
-    combined.forEach { mesh -> if (mesh != null) issues += MeshBuilder.validate(mesh) }
+    if (!preview) combined.forEach { mesh -> if (mesh != null) issues += MeshBuilder.validate(mesh) }
     if (issues.any { it.blocking }) throw MeshException(issues)
     val removed = combined.indices.filter { combined[it] == null }
     val ignore = operations.map { it.target to it.tool }.toSet() + removed.flatMap { r -> specs.indices.map { r to it } }
-    val overlaps = MeshBuilder.overlapIssues(specs, ignore)
+    val overlaps = if (preview) emptyList() else MeshBuilder.overlapIssues(specs, ignore)
     if (strict && overlaps.any { it.blocking }) throw MeshException(overlaps)
     val kept = combined.indices.filter { combined[it] != null }
     // A shape made of a sheet takes the sheet's color and look.
