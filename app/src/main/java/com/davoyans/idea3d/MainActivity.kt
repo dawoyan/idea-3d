@@ -1866,11 +1866,19 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 return SurfacePick(target.key, own, depth)
             }
         }
-        val ownKey = ownObjectAt(point) ?: return null
-        if (only != null && ownKey != only) return null
-        val geometry = planeGeometry(ownKey.first)
-        val extrusion = geometry.extrusions.firstOrNull { extrusion -> extrusionGuides(extrusion, geometry.guides).any { it.id == ownKey.second } } ?: return null
-        return SurfacePick(ownKey, point, facePositionMm(extrusion))
+        ownObjectAt(point)?.let { ownKey ->
+            if (only == null || ownKey == only) {
+                val geometry = planeGeometry(ownKey.first)
+                geometry.extrusions.firstOrNull { extrusion -> extrusionGuides(extrusion, geometry.guides).any { it.id == ownKey.second } }?.let { return SurfacePick(ownKey, point, facePositionMm(it)) }
+            }
+        }
+        // Flat lines and shapes are valid visible attachment targets too. Their surface is their stored depth.
+        val flat = closestGuide(point, guides, 36.0) ?: closedGuideShapes(guides).lastOrNull { pointInsidePolygon(point, shapePoints(it)) }?.firstOrNull()
+        if (flat != null) {
+            val key = flat.plane to flat.id
+            if (only == null || key == only) return SurfacePick(key, point, (flat.startZMm + flat.endZMm) / 2)
+        }
+        return null
     }
     /** Inserts a normal editable guide line at the sampled surface depth. */
     fun addSurfaceGuide(start: SurfacePick, end: SurfacePick) {
