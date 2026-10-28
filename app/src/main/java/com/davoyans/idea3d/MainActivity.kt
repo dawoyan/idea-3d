@@ -2145,9 +2145,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val result = withContext(Dispatchers.Default) { simpleShapeTrace(image, existing, area, editPlane, sketchFirst) }
             simpleTraceRunning = false
             if (result.guides.isEmpty()) {
-                ActionLog.add("2D simplify finished: no clear simple shapes")
-                logToast(context, "No clear simple shapes found", Toast.LENGTH_LONG).show()
-                backgroundDoneNotification(context, "Simple-shape scan finished: no clear shapes found")
+                // Keep the reason in the copied debug log. This is especially useful for faint paper sketches.
+                ActionLog.add("2D simplify finished: ${result.summary}")
+                logToast(context, "No lines found — crop tightly around darker strokes, then Simplify", Toast.LENGTH_LONG).show()
+                backgroundDoneNotification(context, "Simple-shape scan finished: no lines found")
                 return@launch
             }
             pushUndo()
@@ -7898,10 +7899,13 @@ private fun detectStrongGuideLines(source: Bitmap, limit: Int = 36): List<GuideL
     val bins = maxDistance * 2 + 1
     val votes = IntArray(angleSteps * bins)
     val edgePoints = ArrayList<Pair<Int, Int>>()
+    // Paper scans often have anti-aliased pencil/pen edges. 120 discarded those before the
+    // Hough pass, even when they were visibly the strongest strokes in the image.
+    val edgeThreshold = 55
     for (y in 1 until height - 1 step 2) for (x in 1 until width - 1 step 2) {
         val gx = gray[y * width + x + 1] - gray[y * width + x - 1]
         val gy = gray[(y + 1) * width + x] - gray[(y - 1) * width + x]
-        if (abs(gx) + abs(gy) < 120) continue
+        if (abs(gx) + abs(gy) < edgeThreshold) continue
         edgePoints += x to y
         var angle = Math.atan2(gy.toDouble(), gx.toDouble())
         if (angle < 0.0) angle += Math.PI
@@ -7911,7 +7915,7 @@ private fun detectStrongGuideLines(source: Bitmap, limit: Int = 36): List<GuideL
         val distance = (x * cos(theta) + y * sin(theta)).roundToInt() + maxDistance
         if (distance in 0 until bins) votes[angleIndex * bins + distance]++
     }
-    val threshold = max(14, min(width, height) / 22)
+    val threshold = max(8, min(width, height) / 32)
     val peaks = votes.indices.mapNotNull { index -> votes[index].takeIf { it >= threshold }?.let { HoughPeak(index / bins, index % bins, it) } }
         .sortedByDescending { it.votes }
     val accepted = mutableListOf<Triple<Double, Double, Pair<Pt, Pt>>>()
@@ -7929,7 +7933,7 @@ private fun detectStrongGuideLines(source: Bitmap, limit: Int = 36): List<GuideL
                 start = min(start, projection); end = max(end, projection)
             }
         }
-        if (!start.isFinite() || end - start < max(52f, min(width, height) * 0.13f)) return@forEach
+        if (!start.isFinite() || end - start < max(34f, min(width, height) * 0.09f)) return@forEach
         val startPoint = Pt(((normalX * distanceFromOrigin + directionX * start) / workScale).toFloat(), ((normalY * distanceFromOrigin + directionY * start) / workScale).toFloat())
         val endPoint = Pt(((normalX * distanceFromOrigin + directionX * end) / workScale).toFloat(), ((normalY * distanceFromOrigin + directionY * end) / workScale).toFloat())
         accepted += Triple(theta, distanceFromOrigin.toDouble(), startPoint to endPoint)
@@ -7983,7 +7987,7 @@ private fun simpleShapeTrace(source: Bitmap, existing: List<GuideLine>, area: Tr
     if (sketchFirst) {
         val lines = detectStrongGuideLines(crop, limit = 12)
         val next = nextGuideId(existing)
-        return SimpleTraceResult(lines.mapIndexed { i, line -> line.copy(id = next + i, start = Pt(line.start.x + cropLeft, line.start.y + cropTop), end = Pt(line.end.x + cropLeft, line.end.y + cropTop), plane = plane) }, "${lines.size} strong sketch line${if (lines.size == 1) "" else "s"}")
+        return SimpleTraceResult(lines.mapIndexed { i, line -> line.copy(id = next + i, start = Pt(line.start.x + cropLeft, line.start.y + cropTop), end = Pt(line.end.x + cropLeft, line.end.y + cropTop), plane = plane) }, "${lines.size} strong sketch line${if (lines.size == 1) "" else "s"}; crop=${crop.width}×${crop.height}")
     }
     val scale = min(1f, 480f / max(crop.width, crop.height).toFloat())
     val work = if (scale < 1f) Bitmap.createScaledBitmap(crop, (crop.width * scale).roundToInt(), (crop.height * scale).roundToInt(), true) else crop
