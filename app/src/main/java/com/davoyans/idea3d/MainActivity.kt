@@ -3229,8 +3229,14 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
     /** Builds either the entire scene or one selected 3D object. The camera and frame stay put across rebuilds. */
     fun open3dView(scopeObject: Pair<ModelPlane, Int>? = null) {
         viewerScope = scopeObject
-        val placedSnapshot = placedModels()
-        val guideSnapshot = allGuides(); val extrusionSnapshot = allExtrusions(); val opsSnapshot = solidOps; val materialSnapshot = materials.associateBy { it.id }; val setup = modelSetup(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
+        val allGuideSnapshot = allGuides(); val allExtrusionSnapshot = allExtrusions()
+        val scopedExtrusion = scopeObject?.let { key -> allExtrusionSnapshot.firstOrNull { it.plane == key.first && it.id == key.second } }
+        // An item preview must not be blocked by a broken or unfinished object
+        // elsewhere in the scene. Include only its outline and its holes.
+        val guideSnapshot = scopedExtrusion?.let { e -> extrusionGuides(e, allGuideSnapshot) + holesInside(extrusionGuides(e, allGuideSnapshot), allGuideSnapshot) } ?: allGuideSnapshot
+        val extrusionSnapshot = scopedExtrusion?.let(::listOf) ?: allExtrusionSnapshot
+        val placedSnapshot = if (scopeObject == null) placedModels() else emptyList()
+        val opsSnapshot = if (scopeObject == null) solidOps else emptyList(); val materialSnapshot = materials.associateBy { it.id }; val setup = modelSetup(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
         val frame = viewerModel?.frame
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching {
@@ -3260,7 +3266,12 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             } }
             if (projectId != openedProject) return@launch
             result.onSuccess { (mesh, ids) -> viewerModel = mesh; viewerObjects = ids; show3d = true }
-                .onFailure { error -> logToast(context, "3D view: ${error.localizedMessage}", Toast.LENGTH_LONG).show(); if (viewerModel == null) show3d = false }
+                .onFailure { error ->
+                    val detail = error.localizedMessage ?: error.javaClass.simpleName
+                    ActionLog.add("error: 3D view failed: $detail")
+                    logToast(context, "3D view: $detail", Toast.LENGTH_LONG).show()
+                    if (viewerModel == null) show3d = false
+                }
         }
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
@@ -3685,6 +3696,10 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
             val groups = source.mapNotNull { it.groupId }.distinct().associateWith { group++ }
             val copied = source.map { g -> g.copy(id = ids.getValue(g.id), start = moved(g.start), end = moved(g.end), curveMid = g.curveMid?.let(::moved), startZMm = g.startZMm + dz, endZMm = g.endZMm + dz,
                 pathId = g.pathId?.let(paths::get), groupId = g.groupId?.let(groups::get), manual = true, midDepthMm = null,
+                // An outline is raw geometry. Carrying the source's remembered
+                // material dimensions into it made a later material assignment
+                // resize it a second time.
+                lengthMm = if (full) g.lengthMm else null, shapeWidthMm = if (full) g.shapeWidthMm else null, shapeHeightMm = if (full) g.shapeHeightMm else null,
                 materialId = if (full) g.materialId else null, materialTurnDeg = if (full) g.materialTurnDeg else 0.0, fillTransparency = if (full) g.fillTransparency else null) }
             val extrusion = if (!full) null else extrusionOf(key)?.let { e -> e.copy(id = (geometry.extrusions.maxOfOrNull { it.id } ?: 0) + 1, guideIds = e.guideIds.mapNotNull { ids[it] }, origin = moved(e.origin), handle = moved(e.handle)) }
             setPlaneShapes(key.first, geometry.guides + copied, geometry.extrusions + listOfNotNull(extrusion))
@@ -4138,10 +4153,7 @@ private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?
                 leave3d(); if (plane != editPlane) switchPlane(plane) else fitView()
             })
             val model = viewerModel
-            if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, initialSun = ((extrusions.firstOrNull()?.sun?.x ?: ((bitmap?.width ?: 1) * 0.15f)) / (bitmap?.width ?: 1)).coerceIn(0f, 1f), onSunChange = { position ->
-                val width = bitmap?.width ?: 1
-                if (extrusions.any { abs(it.sun.x - position * width) > 0.01f }) { pushUndo(); extrusions = extrusions.map { it.copy(sun = Pt(position * width, 0f)) } }
-            }, onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index }, modifier = Modifier.fillMaxWidth().weight(1f))
+            if (show3d && model != null) ThreeDViewerPane(model, viewerCamera, onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index }, modifier = Modifier.fillMaxWidth().weight(1f))
             else {
             CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -7367,7 +7379,9 @@ private fun extrusionFaces(extrusion: Extrusion, guides: List<GuideLine>, width:
         points.zipWithNext().map { (a, b) ->
             val dx = b.x - a.x; val dy = b.y - a.y
             val mx = (a.x + b.x) / 2f; val my = (a.y + b.y) / 2f
-            val lx = extrusion.sun.x - mx; val ly = -my
+            // Fixed top-left lighting.  The saved sun position is retained only
+            // for compatibility with old projects, not used as a UI control.
+            val lx = -1f; val ly = -1f
             val outward = winding[guide.pathId] ?: if ((-dy * (mx - centerX) + dx * (my - centerY)) < 0f) -1f else 1f
             val length = hypot(dx.toDouble(), dy.toDouble()) * hypot(lx.toDouble(), ly.toDouble())
             val light = if (length > 0.0001) (outward * (-dy * lx + dx * ly) / length).toFloat().coerceIn(-1f, 1f) else 0f

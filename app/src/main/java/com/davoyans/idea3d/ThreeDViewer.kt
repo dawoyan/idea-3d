@@ -18,8 +18,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -384,25 +382,23 @@ private fun viewMatrix(camera: ViewerCamera, width: Int, height: Int): FloatArra
  * Profile planes; here one finger orbits, two fingers pan and zoom, and a tap opens an object's exact values.
  */
 @Composable
-internal fun ThreeDViewerPane(mesh: ViewerMesh, camera: ViewerCamera, initialSun: Float, onSunChange: (Float) -> Unit, onEditObject: (Int) -> Unit, modifier: Modifier = Modifier) {
+internal fun ThreeDViewerPane(mesh: ViewerMesh, camera: ViewerCamera, onEditObject: (Int) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val view = remember(mesh) { ModelView(context, mesh, camera) }
     view.onObjectTap = onEditObject
     var showFrame by remember { mutableStateOf(false) }
     var showArrow by remember { mutableStateOf(false) }
     var showMeasurements by remember { mutableStateOf(false) }
-    var sun by remember { mutableStateOf(initialSun.coerceIn(0f, 1f)) }
-    LaunchedEffect(view) { view.setSunPosition(sun); view.setReferencesVisible(showFrame, showArrow); view.showMeasurements = showMeasurements }
+    // Lighting is intentionally fixed: a quiet top-left sun makes surfaces legible
+    // without turning the viewer into a lighting editor.
+    LaunchedEffect(view) { view.setSunPosition(0.15f); view.setReferencesVisible(showFrame, showArrow); view.showMeasurements = showMeasurements }
     DisposableEffect(view) { view.onResume(); onDispose { view.onPause() } }
     Column(modifier) {
-        // One slim row: what to show, where the light comes from, and the view actions.
+        // One slim row: what to show and the view actions.
         Row(Modifier.fillMaxWidth().background(Color(0xFFF2F5F4)).padding(horizontal = 6.dp).height(40.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             CompactToggle("Sizes", showMeasurements) { showMeasurements = it; view.showMeasurements = it; view.overlay.invalidate() }
             CompactToggle("Front", showArrow) { showArrow = it; view.setReferencesVisible(showFrame, showArrow) }
             CompactToggle("Frame", showFrame) { showFrame = it; view.setReferencesVisible(showFrame, showArrow) }
-            Icon(painterResource(R.drawable.ic_sun), contentDescription = "Light direction", tint = Color(0xFFE7A500), modifier = Modifier.size(18.dp))
-            Slider(value = sun, onValueChange = { sun = it; view.setSunPosition(it) }, onValueChangeFinished = { onSunChange(sun) }, modifier = Modifier.weight(1f).height(32.dp),
-                colors = SliderDefaults.colors(thumbColor = Color(0xFFE7A500), activeTrackColor = Color(0xFFE7A500), inactiveTrackColor = Color(0xFFD6DCDA)))
             CompactToggle("Reset", false) { view.reset() }
             CompactToggle("Save", false) { view.exportImage() }
         }
