@@ -934,6 +934,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var guideDetectionRunning by remember { mutableStateOf(false) }
     var simpleTraceRunning by remember { mutableStateOf(false) }
     var showSimpleTraceCommand by remember { mutableStateOf(false) }
+    // Set from Simplify → Select area. The next rectangle is immediately used as the detail area.
+    var choosingSimplifyArea by remember { mutableStateOf(false) }
     var scale by remember { mutableStateOf<Double?>(null) } // pixels per selected unit
     var axisScale by remember { mutableStateOf<Pair<Double, Double>?>(null) } // X and Y pixels per unit, only for per-axis calibration
     var modelReport by remember { mutableStateOf<ModelReport?>(null) }
@@ -2091,6 +2093,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val pts = listOf(corner, Pt(end.x, corner.y), end, Pt(corner.x, end.y))
         guides = guides + pts.indices.map { i -> GuideLine(firstId + i, pts[i], pts[(i + 1) % 4], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth) }
         tool = Tool.NONE; selectedGuideId = firstId; selectedWholeGuideId = null; guideDeleteCandidateId = firstId
+        if (choosingSimplifyArea) {
+            choosingSimplifyArea = false
+            showSimpleTraceCommand = true
+            logToast(context, "Area selected — choose Detail selected area", Toast.LENGTH_LONG).show()
+        }
         if (square) logToast(context, "Square", Toast.LENGTH_SHORT).show()
     }
     /** Places a saved outline in the middle of this view; it remains ordinary editable 2D geometry. */
@@ -4214,6 +4221,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     if (!show3d) {
                         ActionIcon("Fit", R.drawable.ic_fit) { fitView() }
                         ActionIcon("Sizes", R.drawable.ic_sizes, on = showSizes) { showSizes = !showSizes; preferences.edit().putBoolean("show_sizes", showSizes).apply() }
+                        // Cycle the paper/photo underneath the editable lines: full → 50% → hidden.
+                        if (bitmap != null) ActionIcon("Image ${when (pictureOptions.transparency) { 0 -> "full"; 50 -> "50%"; else -> "hidden" }}", R.drawable.ic_idea3d, on = pictureOptions.transparency > 0) {
+                            pictureOptions = pictureOptions.copy(transparency = when (pictureOptions.transparency) { 0 -> 50; 50 -> 100; else -> 0 })
+                        }
                         if (bitmap != null) ActionIcon("Simplify", R.drawable.ic_idea3d, enabled = !simpleTraceRunning) { showSimpleTraceCommand = true }
                         if (bitmap != null) ActionIcon("Assets", R.drawable.ic_clone) { showSketchAssets = true }
                     }
@@ -4772,6 +4783,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     if (showSimpleTraceCommand) SimpleTraceCommandDialog(
         hasDetailRectangle = selectedGuideId?.let(::rectangleShape) != null,
         onDismiss = { showSimpleTraceCommand = false },
+        onPickArea = {
+            showSimpleTraceCommand = false; choosingSimplifyArea = true
+            lineDrawing = LineDrawing.RECTANGLE; tool = Tool.LINES
+            logToast(context, "Drag a rectangle around the part to detail", Toast.LENGTH_LONG).show()
+        },
         onRun = { command -> showSimpleTraceCommand = false; startSimpleTrace(command) }
     )
     if (showSketchAssets) SketchAssetsDialog(
@@ -6698,17 +6714,18 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
 }
 
 /** A small command surface for the private, on-device visual simplifier. */
-@Composable private fun SimpleTraceCommandDialog(hasDetailRectangle: Boolean, onDismiss: () -> Unit, onRun: (String) -> Unit) {
+@Composable private fun SimpleTraceCommandDialog(hasDetailRectangle: Boolean, onDismiss: () -> Unit, onPickArea: () -> Unit, onRun: (String) -> Unit) {
     var command by remember { mutableStateOf("Make simple sketch shapes") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Simplify picture") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Sketches keep only the strongest strokes (maximum 12) so they stay simple and editable. Write “photo” to simplify a photographed object instead.", fontSize = 13.sp)
+                Text("Sketches keep up to 12 strong strokes, so they stay simple but useful and editable. Write “photo” to simplify a photographed object instead.", fontSize = 13.sp)
                 OutlinedTextField(value = command, onValueChange = { command = it }, label = { Text("Command") }, minLines = 2)
                 if (hasDetailRectangle) OutlinedButton(onClick = { command = "Detail selected rectangle" }) { Text("Detail selected rectangle") }
-                else Text("To detail one part later: draw and select a rectangle, then open this command again.", fontSize = 12.sp, color = Color(0xFF53615D))
+                else OutlinedButton(onClick = onPickArea) { Text("Select area to detail") }
+                Text(if (hasDetailRectangle) "Run after choosing Detail selected rectangle." else "Tap Select area to detail, drag the rectangle, then this panel reopens automatically.", fontSize = 12.sp, color = Color(0xFF53615D))
                 Text("The scan runs off the editor thread and sends a notification when it finishes.", fontSize = 12.sp, color = Color(0xFF53615D))
             }
         },
@@ -7901,7 +7918,7 @@ private fun detectStrongGuideLines(source: Bitmap, limit: Int = 36): List<GuideL
     val edgePoints = ArrayList<Pair<Int, Int>>()
     // Paper scans often have anti-aliased pencil/pen edges. 120 discarded those before the
     // Hough pass, even when they were visibly the strongest strokes in the image.
-    val edgeThreshold = 55
+    val edgeThreshold = 28
     for (y in 1 until height - 1 step 2) for (x in 1 until width - 1 step 2) {
         val gx = gray[y * width + x + 1] - gray[y * width + x - 1]
         val gy = gray[(y + 1) * width + x] - gray[(y - 1) * width + x]
@@ -7915,7 +7932,7 @@ private fun detectStrongGuideLines(source: Bitmap, limit: Int = 36): List<GuideL
         val distance = (x * cos(theta) + y * sin(theta)).roundToInt() + maxDistance
         if (distance in 0 until bins) votes[angleIndex * bins + distance]++
     }
-    val threshold = max(8, min(width, height) / 32)
+    val threshold = max(5, min(width, height) / 42)
     val peaks = votes.indices.mapNotNull { index -> votes[index].takeIf { it >= threshold }?.let { HoughPeak(index / bins, index % bins, it) } }
         .sortedByDescending { it.votes }
     val accepted = mutableListOf<Triple<Double, Double, Pair<Pt, Pt>>>()
@@ -7933,7 +7950,7 @@ private fun detectStrongGuideLines(source: Bitmap, limit: Int = 36): List<GuideL
                 start = min(start, projection); end = max(end, projection)
             }
         }
-        if (!start.isFinite() || end - start < max(34f, min(width, height) * 0.09f)) return@forEach
+        if (!start.isFinite() || end - start < max(22f, min(width, height) * 0.06f)) return@forEach
         val startPoint = Pt(((normalX * distanceFromOrigin + directionX * start) / workScale).toFloat(), ((normalY * distanceFromOrigin + directionY * start) / workScale).toFloat())
         val endPoint = Pt(((normalX * distanceFromOrigin + directionX * end) / workScale).toFloat(), ((normalY * distanceFromOrigin + directionY * end) / workScale).toFloat())
         accepted += Triple(theta, distanceFromOrigin.toDouble(), startPoint to endPoint)
