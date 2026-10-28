@@ -283,6 +283,44 @@ private enum class ComparisonFigure(val description: String, val sizeMm: Double,
 }
 private data class PictureOptions(val figure: ComparisonFigure? = null, val sum: Boolean = false, val legend: Boolean = false, val guess: Boolean = false, val transparency: Int = 0)
 private data class SavedProject(val id: String, val name: String, val unit: String, val lines: List<MeasureLine>, val guides: List<GuideLine> = emptyList(), val guidesDetected: Boolean = false, val capturedAt: Long, val rotation: Float = 0f, val options: PictureOptions = PictureOptions(), val extrusions: List<Extrusion> = emptyList(), val blankScene: Boolean = false, val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList(), val itemGroups: List<List<Pair<ModelPlane, Int>>> = emptyList(), val models: List<ImportedModel> = emptyList())
+/** A reusable flat outline. It can be inserted into any picture, then given material and depth there. */
+private data class SketchAsset(val id: String, val name: String, val guides: List<GuideLine>)
+private object SketchAssetStore {
+    private const val PREFS = "idea3d-assets"; private const val KEY = "sketch-assets"
+    fun load(context: Context): List<SketchAsset> = runCatching {
+        val values = JSONArray(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, "[]"))
+        buildList {
+            for (index in 0 until values.length()) {
+                val asset = values.getJSONObject(index); val lines = asset.getJSONArray("guides")
+                val guides = buildList {
+                    for (i in 0 until lines.length()) {
+                        val g = lines.getJSONObject(i)
+                        add(GuideLine(g.getInt("id"), Pt(g.getDouble("sx").toFloat(), g.getDouble("sy").toFloat()), Pt(g.getDouble("ex").toFloat(), g.getDouble("ey").toFloat()), true,
+                            pathId = g.optInt("path", -1).takeIf { it >= 0 }, colorIndex = g.optInt("color", 0), strokeWidth = g.optDouble("stroke", 5.0).toFloat(),
+                            curveMid = if (g.has("mx")) Pt(g.getDouble("mx").toFloat(), g.getDouble("my").toFloat()) else null, hole = g.optBoolean("hole", false)))
+                    }
+                }
+                add(SketchAsset(asset.getString("id"), asset.getString("name"), guides))
+            }
+        }
+    }.getOrDefault(emptyList())
+    fun save(context: Context, assets: List<SketchAsset>) {
+        val values = JSONArray()
+        assets.forEach { asset ->
+            val assetJson = JSONObject(); assetJson.put("id", asset.id); assetJson.put("name", asset.name)
+            val lines = JSONArray()
+            asset.guides.forEach { g ->
+                val line = JSONObject()
+                line.put("id", g.id); line.put("sx", g.start.x); line.put("sy", g.start.y); line.put("ex", g.end.x); line.put("ey", g.end.y)
+                g.pathId?.let { line.put("path", it) }; line.put("color", g.colorIndex); line.put("stroke", g.strokeWidth)
+                g.curveMid?.let { point -> line.put("mx", point.x); line.put("my", point.y) }; line.put("hole", g.hole)
+                lines.put(line)
+            }
+            assetJson.put("guides", lines); values.put(assetJson)
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, values.toString()).apply()
+    }
+}
 
 /**
  * A 3D model file brought in from outside (STL, OBJ or 3MF), kept as one solid piece: its mesh is stored next to
@@ -943,6 +981,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var joinPick by remember { mutableStateOf<JoinPick?>(null) }
     var materials by remember { mutableStateOf(MaterialStore.load(context)) }
     var showMaterials by remember { mutableStateOf(false) }
+    var sketchAssets by remember { mutableStateOf(SketchAssetStore.load(context)) }
+    var showSketchAssets by remember { mutableStateOf(false) }
+    var saveSketchAssetShape by remember { mutableStateOf<List<GuideLine>?>(null) }
     var saveMaterialShape by remember { mutableStateOf<List<GuideLine>?>(null) }
     var showMaterialList by remember { mutableStateOf(false) }
     var showFinder by remember { mutableStateOf(false) }
@@ -2051,6 +2092,24 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         guides = guides + pts.indices.map { i -> GuideLine(firstId + i, pts[i], pts[(i + 1) % 4], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth) }
         tool = Tool.NONE; selectedGuideId = firstId; selectedWholeGuideId = null; guideDeleteCandidateId = firstId
         if (square) logToast(context, "Square", Toast.LENGTH_SHORT).show()
+    }
+    /** Places a saved outline in the middle of this view; it remains ordinary editable 2D geometry. */
+    fun insertSketchAsset(asset: SketchAsset) {
+        if (asset.guides.isEmpty()) return
+        val points = asset.guides.flatMap { listOf(it.start, it.end) + listOfNotNull(it.curveMid) }
+        val sourceCenter = Pt((points.minOf { it.x } + points.maxOf { it.x }) / 2f, (points.minOf { it.y } + points.maxOf { it.y }) / 2f)
+        val image = planeCanvas ?: return
+        val targetCenter = Pt(image.width / 2f, image.height / 2f)
+        var nextId = nextGuideId(guides); var nextPath = nextGuidePathId(guides)
+        val paths = mutableMapOf<Int, Int>()
+        fun moved(point: Pt) = Pt(point.x - sourceCenter.x + targetCenter.x, point.y - sourceCenter.y + targetCenter.y)
+        val inserted = asset.guides.map { g ->
+            val path = g.pathId?.let { old -> paths.getOrPut(old) { nextPath++ } }
+            g.copy(id = nextId++, start = moved(g.start), end = moved(g.end), curveMid = g.curveMid?.let(::moved), pathId = path, plane = editPlane)
+        }
+        pushUndo(); guides = guides + inserted; tool = Tool.ADJUST
+        selectedGuideId = inserted.first().id; selectedWholeGuideId = inserted.first().id
+        logToast(context, "Added asset \"${asset.name}\"", Toast.LENGTH_SHORT).show()
     }
     /** True for a four-sided straight rectangle, regardless of its rotation on the canvas. */
     fun rectangleShape(guideId: Int): List<GuideLine>? {
@@ -4155,6 +4214,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Fit", R.drawable.ic_fit) { fitView() }
                         ActionIcon("Sizes", R.drawable.ic_sizes, on = showSizes) { showSizes = !showSizes; preferences.edit().putBoolean("show_sizes", showSizes).apply() }
                         if (bitmap != null) ActionIcon("Simplify", R.drawable.ic_idea3d, enabled = !simpleTraceRunning) { showSimpleTraceCommand = true }
+                        if (bitmap != null) ActionIcon("Assets", R.drawable.ic_clone) { showSketchAssets = true }
                     }
                 }
                 val modifying = !show3d && !selectMode && pick == null && tool == Tool.ADJUST &&
@@ -4197,6 +4257,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
                             val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
                             ActionIcon("Material", R.drawable.ic_save_material) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
+                            if (inShape) ActionIcon("Save asset", R.drawable.ic_save_material) {
+                                val outline = closedGuideShapes(guides).firstOrNull { path -> path.any { sameGuideObject(it, guide) } }.orEmpty()
+                                saveSketchAssetShape = outline + holesInside(outline, guides)
+                            }
                             if (inShape) ActionIcon("Separate", R.drawable.ic_broken_line) { separateShape(guide.id) }
                             val itemKey = homeKey(guide)
                             if (itemGroups.any { members -> members.any { sameItem(it, itemKey) } }) ActionIcon("Ungroup", R.drawable.ic_group) { ungroupItem(itemKey) }
@@ -4709,6 +4773,24 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         onDismiss = { showSimpleTraceCommand = false },
         onRun = { command -> showSimpleTraceCommand = false; startSimpleTrace(command) }
     )
+    if (showSketchAssets) SketchAssetsDialog(
+        assets = sketchAssets,
+        onDismiss = { showSketchAssets = false },
+        onAdd = { asset -> showSketchAssets = false; insertSketchAsset(asset) },
+        onDelete = { asset -> sketchAssets = sketchAssets - asset; SketchAssetStore.save(context, sketchAssets) }
+    )
+    saveSketchAssetShape?.let { shape -> SaveSketchAssetDialog(
+        onDismiss = { saveSketchAssetShape = null },
+        onSave = { name ->
+            val points = shape.flatMap { listOf(it.start, it.end) + listOfNotNull(it.curveMid) }
+            val left = points.minOf { it.x }; val top = points.minOf { it.y }
+            fun local(point: Pt) = Pt(point.x - left, point.y - top)
+            val asset = SketchAsset(UUID.randomUUID().toString(), name, shape.map { it.copy(start = local(it.start), end = local(it.end), curveMid = it.curveMid?.let(::local), plane = ModelPlane.FRONT) })
+            sketchAssets = sketchAssets + asset; SketchAssetStore.save(context, sketchAssets); saveSketchAssetShape = null
+            logToast(context, "Saved \"$name\" to Assets", Toast.LENGTH_SHORT).show()
+        }
+    )
+    }
     if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); logToast(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onExportDxf = { showPictureEdit = false; showDxfExport = true }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onSaveMaterial = {
@@ -6632,6 +6714,29 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
         confirmButton = { TextButton(onClick = { onRun(command.ifBlank { "Make simple 2D shapes" }) }) { Text("Run") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
+}
+
+@Composable private fun SketchAssetsDialog(assets: List<SketchAsset>, onDismiss: () -> Unit, onAdd: (SketchAsset) -> Unit, onDelete: (SketchAsset) -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("2D Assets") }, text = {
+        if (assets.isEmpty()) Text("Select a closed shape, then Modify → Save asset. Saved assets can be added to any drawing and turned into 3D later.")
+        else Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            assets.forEach { asset -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(asset.name, Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                TextButton(onClick = { onAdd(asset) }) { Text("Add") }
+                IconButton(onClick = { onDelete(asset) }) { Icon(painterResource(R.drawable.ic_delete), contentDescription = "Delete asset", tint = Color(0xFFB3261E)) }
+            } }
+        }
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
+}
+
+@Composable private fun SaveSketchAssetDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var name by remember { mutableStateOf("Sketch asset") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Save 2D asset") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("This saves the selected outline and its holes for use in other drawings. It stays 2D until you give it material or Grow.", fontSize = 13.sp)
+            OutlinedTextField(name, { name = it }, label = { Text("Asset name") }, singleLine = true)
+        }
+    }, confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onSave(name.trim()) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
