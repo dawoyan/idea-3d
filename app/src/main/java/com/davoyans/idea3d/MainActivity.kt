@@ -200,7 +200,7 @@ private data class FeatureSnap(val point: Pt, val found: Boolean)
 private data class ScreenLine(val id: Int, val start: Offset, val end: Offset)
 private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "", val plane: ModelPlane = ModelPlane.FRONT)
 private fun MeasureLine.hasDepth() = abs(startZMm) > 0.000001 || abs(endZMm) > 0.000001
-private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null, val hole: Boolean = false)
+private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null, val hole: Boolean = false, val locked: Boolean = false)
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
 private data class SelectedAlignmentObject(val guideIds: Set<Int>, val lineIds: Set<Int>, val points: List<Pt>)
 private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0, val plane: ModelPlane = ModelPlane.FRONT)
@@ -749,6 +749,7 @@ private object ProjectStore {
             guide.materialId?.let { put("material", it) }
             if (guide.materialTurnDeg != 0.0) put("materialTurn", guide.materialTurnDeg)
             if (guide.hole) put("hole", true)
+            if (guide.locked) put("locked", true)
         }) }
         val extrusions = JSONArray()
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
@@ -831,7 +832,7 @@ private object ProjectStore {
         val values = json.getJSONArray("lines")
         val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key, ModelPlane.of(line.optString("plane")))) } }
         val guideValues = json.optJSONArray("guides") ?: JSONArray()
-        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(0, 20, 50, 90, 100) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0, hole = guide.optBoolean("hole", false))) } }
+        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(0, 20, 50, 90, 100) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0, null, hole = guide.optBoolean("hole", false), locked = guide.optBoolean("locked", false))) } }
         val figure = ComparisonFigure.entries.firstOrNull { it.name == json.optString("figure") } ?: if (!json.has("figure") && json.optBoolean("silhouette")) ComparisonFigure.STANDING else null
         val transparency = json.optInt("transparency", 0).takeIf { it in listOf(0, 10, 90, 100) } ?: 0
         val extrusionValues = json.optJSONArray("extrusions") ?: JSONArray()
@@ -1967,6 +1968,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             .mapNotNull { sel -> ghostPointHere(sel)?.let { sel to distance(it, point) } }.filter { it.second <= radius }.minByOrNull { it.second }?.first
     /** Moves an end point of another view's line by a model-space [delta]: along its own drawing and in its depth (Z for Front). */
     fun moveGhostPoint(sel: Triple<ModelPlane, Int, Boolean>, delta: Vec3) {
+        if (planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second }?.locked == true) return
         val own = modelSetup().mapping(sel.first) ?: return
         val geometry = planeGeometry(sel.first)
         val line = geometry.guides.firstOrNull { it.id == sel.second } ?: return
@@ -2013,6 +2015,22 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val base = all.filter { sameGuideObject(it, seed) }
         return base + holesInside(base, all).filterNot { h -> base.any { it.id == h.id } }
     }
+    /** A lock belongs to the whole editable item, never just one of its visible edges. */
+    fun itemLocked(key: Pair<ModelPlane, Int>) = itemGuides(key).any { it.locked }
+    fun pointLocked(sel: Triple<ModelPlane, Int, Boolean>) =
+        planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second }?.locked == true
+    fun setItemsLocked(keys: List<Pair<ModelPlane, Int>>, locked: Boolean) {
+        val items = keys.distinctBy { key -> key.first to (itemGuides(key).minOfOrNull { it.id } ?: key.second) }
+        if (items.isEmpty()) return
+        pushUndo()
+        items.groupBy { it.first }.forEach { (plane, planeItems) ->
+            val geometry = planeGeometry(plane)
+            val ids = planeItems.flatMap { itemGuides(it).map { g -> g.id } }.toSet()
+            setPlaneShapes(plane, geometry.guides.map { guide -> if (guide.id in ids) guide.copy(locked = locked) else guide }, geometry.extrusions)
+        }
+        ActionLog.add(if (locked) "locked ${items.size} item(s)" else "unlocked ${items.size} item(s)")
+        logToast(context, if (locked) "Locked: it cannot be changed until unlocked" else "Unlocked", Toast.LENGTH_SHORT).show()
+    }
     /** An item's outline as polylines in this view's canvas pixels. */
     fun itemOutlineHere(key: Pair<ModelPlane, Int>): List<List<Pt>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList(); val own = setup.mapping(key.first) ?: return emptyList()
@@ -2052,6 +2070,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     /** Moves a whole item by a model-space [delta]: its drawing in its own view and its depth. */
     fun moveItem(key: Pair<ModelPlane, Int>, delta: Vec3) {
+        if (itemLocked(key)) return
         val own = modelSetup().mapping(key.first) ?: return
         val geometry = planeGeometry(key.first)
         val ids = itemGuides(key).map { it.id }.toSet()
@@ -2063,6 +2082,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         setPlaneShapes(key.first, nextGuides, nextExtrusions)
     }
     fun attachSelectedToSurface(items: List<Pair<ModelPlane, Int>>, surface: SurfacePick) {
+        if (items.any(::itemLocked)) {
+            logToast(context, "Unlock selected geometry before placing it", Toast.LENGTH_SHORT).show(); return
+        }
         val targetMap = modelSetup().mapping(surface.key.first) ?: return
         val target = targetMap.model(surface.point, surface.depthMm)
         fun center(key: Pair<ModelPlane, Int>): Vec3? {
@@ -2280,6 +2302,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     /** Replaces a rectangle with straight sides and quadratic rounded corners. */
     fun roundRectangle(guideId: Int) {
+        if (guides.firstOrNull { it.id == guideId }?.locked == true) { logToast(context, "Unlock this shape before rounding it", Toast.LENGTH_SHORT).show(); return }
         val shape = rectangleShape(guideId) ?: run { logToast(context, "Round works on a four-sided rectangle", Toast.LENGTH_SHORT).show(); return }
         val vertices = shape.map { it.start }
         val lengths = shape.map { distance(it.start, it.end).toFloat() }
@@ -2530,8 +2553,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         deleteCandidateId = null
     }
     fun deleteGuide(id: Int) {
-        pushUndo()
         val selected = guides.firstOrNull { it.id == id }
+        if (selected?.locked == true) { logToast(context, "Unlock this item before deleting", Toast.LENGTH_SHORT).show(); return }
+        pushUndo()
         guides = guides.filterNot { selected != null && sameGuideObject(it, selected) }
         val remainingIds = guides.map { it.id }.toSet()
         extrusions = extrusions.map { it.copy(guideIds = it.guideIds.filter { guideId -> guideId in remainingIds }) }.filter { it.guideIds.isNotEmpty() }
@@ -2543,11 +2567,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun deleteSelectedGuidePoint() {
         selectedCurveId?.let { id ->
             val guide = guides.firstOrNull { it.id == id && it.curveMid != null } ?: return
+            if (guide.locked) { logToast(context, "Unlock this item before changing points", Toast.LENGTH_SHORT).show(); return }
             pushUndo(); guides = guides.map { if (it.id == guide.id) it.copy(curveMid = null) else it }; selectedCurveId = null; selectedWholeGuideId = id
             return
         }
         val endpoint = selectedGuideEndpoint ?: return
         val guide = guides.firstOrNull { it.id == endpoint.guideId } ?: return
+        if (guide.locked) { logToast(context, "Unlock this item before changing points", Toast.LENGTH_SHORT).show(); return }
         val path = guide.pathId?.let { id -> guides.filter { it.pathId == id } } ?: listOf(guide)
         val vertex = if (endpoint.isStart) guide.start else guide.end
         val before = path.firstOrNull { distance(it.end, vertex) < 0.6 }
@@ -2574,6 +2600,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun activateExtrusion(point: Pt, radius: Double, targetId: Int? = null) {
         val image = bitmap ?: return
         var guide = (if (targetId != null) guides.firstOrNull { it.id == targetId } else closestGuide(point, guides, radius * 2)) ?: return
+        if (guide.locked) { logToast(context, "Unlock this item before making it 3D", Toast.LENGTH_SHORT).show(); return }
         if (guide.plane != editPlane) {
             // A shape drawn in another view becomes this view's shape, extruded along this view's depth.
             val source = guides.filter { sameGuideObject(it, guide) }
@@ -2608,6 +2635,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val selected = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }
         val guide = selected?.let { closestGuide(point, guides.filter { candidate -> sameGuideObject(candidate, it) }, hitRadius) }
             ?: closestGuide(point, guides, hitRadius) ?: return false
+        if (guide.locked) { logToast(context, "Unlock this item before changing points", Toast.LENGTH_SHORT).show(); return false }
         if (distance(point, guide.start) <= hitRadius || distance(point, guide.end) <= hitRadius) return false
         if (pointKind == PointKind.CURVE) {
             // Previously this silently put the handle at the geometric midpoint.
@@ -3623,6 +3651,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
      * view, with its 3D depth, groups, cuts and joins, so it stays a proper shape there.
      */
     fun turnItems(keys: List<Pair<ModelPlane, Int>>, points: List<Triple<ModelPlane, Int, Boolean>>, deg: Double) {
+        if (keys.any(::itemLocked) || points.any(::pointLocked)) {
+            logToast(context, "Unlock the selected item before turning it", Toast.LENGTH_SHORT).show(); return
+        }
         val setup = modelSetup(); val axis = editPlane.toward
         fun pointModel(sel: Triple<ModelPlane, Int, Boolean>): Vec3? {
             val g = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
@@ -3742,6 +3773,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
      * [anchored], only items touching the first one are welded to it. Returns whether anything was welded.
      */
     fun weldItems(keys: List<Pair<ModelPlane, Int>>, anchored: Boolean): Boolean {
+        if (keys.any(::itemLocked)) {
+            logToast(context, "Unlock locked items before welding", Toast.LENGTH_SHORT).show(); return false
+        }
         var any = false
         var undoPushed = false
         keys.groupBy { it.first }.forEach { (plane, planeKeys) ->
@@ -3798,6 +3832,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     /** Turns one closed outline into independent lines, retaining the material on each edge. */
     fun separateShape(id: Int) {
         val guide = guides.firstOrNull { it.id == id } ?: return
+        if (guide.locked) { logToast(context, "Unlock this shape before separating it", Toast.LENGTH_SHORT).show(); return }
         val path = guide.pathId
         if (path == null) {
             logToast(context, "This is already an independent line", Toast.LENGTH_SHORT).show()
@@ -3815,6 +3850,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
      * The shape stays an independent editable outline: assign material/Grow it, then use 3D Cut, Common or Join. */
     fun stickPickedShapeToObject() {
         val picks = distinctPicked()
+        if (picks.any(::itemLocked)) { logToast(context, "Unlock selected items before placing them", Toast.LENGTH_SHORT).show(); return }
         val target = picks.firstOrNull { extrusionOf(it) != null }
         val shape = picks.firstOrNull { it != target && isClosedShape(it) && extrusionOf(it) == null }
         if (target == null || shape == null || picks.size != 2) {
@@ -3834,6 +3870,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun mergePicked() {
         if (pickedItems.size < 2) { logToast(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
+        if (pickedItems.any(::itemLocked)) { logToast(context, "Unlock locked items before merging", Toast.LENGTH_SHORT).show(); return }
         val first = pickedItems.first(); val rest = pickedItems.drop(1)
         val firstSolid = extrusionOf(first)
         if (firstSolid != null && rest.all { extrusionOf(it) != null }) {
@@ -3932,6 +3969,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val target = pickedItems.firstOrNull()
         val cutter = target?.let { t -> val group = withGroup(t); pickedItems.lastOrNull { p -> group.none { sameItem(it, p) } } }
         if (target == null || cutter == null) { logToast(context, "Pick two items: first the one to cut, then the cutter", Toast.LENGTH_LONG).show(); return }
+        if (itemLocked(target) || itemLocked(cutter)) { logToast(context, "Unlock both items before cutting", Toast.LENGTH_SHORT).show(); return }
         // Two shapes drawn in the same view are cut right in the drawing (3D follows, depth and material kept): a
         // cutter wholly inside becomes a hole, otherwise its bite is taken out and the cutter is used up.
         if (target.first == cutter.first && isClosedShape(target)) {
@@ -3955,6 +3993,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun commonPicked() {
         val first = pickedItems.firstOrNull(); val second = first?.let { a -> pickedItems.firstOrNull { !sameItem(it, a) } }
         if (first == null || second == null) { logToast(context, "Pick two shapes: first and second", Toast.LENGTH_SHORT).show(); return }
+        if (itemLocked(first) || itemLocked(second)) { logToast(context, "Unlock both items before keeping their common area", Toast.LENGTH_SHORT).show(); return }
         if (first.first == second.first && isClosedShape(first) && isClosedShape(second)) {
             if (editPlane != first.first) switchPlane(first.first)
             applyShapeOperation(JunctionAction(JunctionKind.SHAPE_OVERLAP, first.second, second.second, Pt(0f, 0f)), "common")
@@ -3969,6 +4008,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     /** Arrange: line up the picked items' centers on this view's horizontal or vertical, or space them evenly. */
     fun arrangePicked(horizontal: Boolean, distribute: Boolean) {
+        if (pickedItems.any(::itemLocked) || pickedPoints.any(::pointLocked)) {
+            logToast(context, "Unlock selected items before aligning or spacing them", Toast.LENGTH_SHORT).show(); return
+        }
         val here = modelSetup().mapping(editPlane) ?: return
         val itemBoxes: List<Pair<Any, FloatArray>> = distinctPicked().mapNotNull { k -> itemBox(k)?.let { k to it } }
         val pointBoxes: List<Pair<Any, FloatArray>> = pickedPoints.filterNot { p -> pickedItems.any { it.first == p.first && itemGuides(it).any { g -> g.id == p.second } } }.mapNotNull { p -> ghostPointHere(p)?.let { at -> p to floatArrayOf(at.x, at.y, at.x, at.y) } }
@@ -4024,6 +4066,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun deletePicked() {
         if (pickedItems.isEmpty() && pickedPoints.isEmpty()) return
+        if (pickedItems.any(::itemLocked) || pickedPoints.any(::pointLocked)) {
+            logToast(context, "Unlock locked items before deleting", Toast.LENGTH_SHORT).show(); return
+        }
         pushUndo()
         // A picked point removes the lines that end at it.
         pickedPoints.groupBy { it.first }.forEach { (plane, sels) ->
@@ -4487,10 +4532,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     }
                     selectMode -> {
                         val n = pickedItems.size; val total = n + pickedPoints.size
+                        val allLocked = n > 0 && pickedItems.all(::itemLocked)
                         // One picked line or shape: choose what it is made of.
                         val pickedGuide = pickedItems.singleOrNull()?.takeIf { pickedPoints.isEmpty() }?.let { (plane, id) -> guides.firstOrNull { it.id == if (plane == editPlane) id else encodedId(plane, id) } }
-                        ActionIcon("Material", R.drawable.ic_save_material, enabled = pickedGuide != null) {
+                        ActionIcon("Material", R.drawable.ic_save_material, enabled = pickedGuide != null && !pickedItems.any(::itemLocked)) {
                             pickedGuide?.let { g -> if (closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), g) }) shapeEditId = g.id else lineMaterialId = g.id }
+                        }
+                        ActionIcon(if (allLocked) "Unlock" else "Lock", R.drawable.ic_select, enabled = n > 0 && pickedPoints.isEmpty()) {
+                            setItemsLocked(pickedItems, !allLocked)
                         }
                         TurnIcons()
                         ActionIcon("Align H", R.drawable.ic_align_horizontal, enabled = total >= 2) { arrangePicked(horizontal = true, distribute = false) }
@@ -4512,19 +4561,20 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         // Most used first: Material, Grow, Outline, Turn, Clone, Weld (Properties and Delete are in the title bar).
                         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
                             val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
-                            ActionIcon("Material", R.drawable.ic_save_material) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
+                            val itemKey = homeKey(guide)
+                            ActionIcon("Material", R.drawable.ic_save_material, enabled = !itemLocked(itemKey)) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
+                            ActionIcon(if (itemLocked(itemKey)) "Unlock" else "Lock", R.drawable.ic_select) { setItemsLocked(listOf(itemKey), !itemLocked(itemKey)) }
                             if (inShape) ActionIcon("Save asset", R.drawable.ic_save_material) {
                                 val outline = closedGuideShapes(guides).firstOrNull { path -> path.any { sameGuideObject(it, guide) } }.orEmpty()
                                 saveSketchAssetShape = outline + holesInside(outline, guides)
                             }
-                            if (inShape) ActionIcon("Separate", R.drawable.ic_broken_line) { separateShape(guide.id) }
-                            val itemKey = homeKey(guide)
+                            if (inShape) ActionIcon("Separate", R.drawable.ic_broken_line, enabled = !itemLocked(itemKey)) { separateShape(guide.id) }
                             if (itemGroups.any { members -> members.any { sameItem(it, itemKey) } }) ActionIcon("Ungroup", R.drawable.ic_group) { ungroupItem(itemKey) }
-                            if (guide.groupId != null) ActionIcon("Unweld", R.drawable.ic_close) { unweldGuide(guide.id) }
+                            if (guide.groupId != null) ActionIcon("Unweld", R.drawable.ic_close, enabled = !itemLocked(itemKey)) { unweldGuide(guide.id) }
                             // Grow: shows arrows to pull the shape into a 3D object (or change its depth).
-                            if (tool == Tool.ADJUST && inShape) ActionIcon("Grow", R.drawable.ic_cube, on = growMode) { growMode = !growMode }
+                            if (tool == Tool.ADJUST && inShape) ActionIcon("Grow", R.drawable.ic_cube, enabled = !itemLocked(itemKey), on = growMode) { growMode = !growMode }
                             if (inShape) ActionIcon("Outline", R.drawable.ic_outline) { outlineOf(listOf(homeKey(guide))) }
-                            if (tool == Tool.ADJUST && rectangleShape(guide.id) != null) ActionIcon("Round", R.drawable.ic_point_curve) { roundRectangle(guide.id) }
+                            if (tool == Tool.ADJUST && rectangleShape(guide.id) != null) ActionIcon("Round", R.drawable.ic_point_curve, enabled = !itemLocked(itemKey)) { roundRectangle(guide.id) }
                         }
                         // A 3D object from another view: Grow shows its front and back arrows.
                         if (tool == Tool.ADJUST && selectedForeign != null) ActionIcon("Grow", R.drawable.ic_cube, on = growMode) { growMode = !growMode }
