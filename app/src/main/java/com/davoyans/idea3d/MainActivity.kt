@@ -2597,6 +2597,44 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         activePolylineId = null
         activeMeasurePathId = null
     }
+    /** Turns an open Broken guide into one closed editable shape.
+     * Segments retain their order; any visible gap between successive segments (and the final gap back to the
+     * beginning) receives a real straight edge.  Thus a slightly disconnected sketch still becomes a usable face. */
+    fun closeBrokenGuide(id: Int) {
+        val seed = guides.firstOrNull { it.id == id } ?: return
+        if (seed.locked) { logToast(context, "Unlock this broken line before closing it", Toast.LENGTH_SHORT).show(); return }
+        val pathId = seed.pathId ?: run { logToast(context, "Close shape is for a Broken line", Toast.LENGTH_SHORT).show(); return }
+        val path = guides.filter { it.pathId == pathId && it.plane == seed.plane }.sortedBy { it.id }
+        if (path.size < 2) { logToast(context, "Draw at least two segments before closing a shape", Toast.LENGTH_SHORT).show(); return }
+        if (closedGuideShapes(guides).any { shape -> shape.any { it.id == seed.id } }) {
+            logToast(context, "This is already a closed shape", Toast.LENGTH_SHORT).show(); return
+        }
+        val vertices = path.flatMap { listOf(it.start, it.end) }.fold(emptyList<Pt>()) { out, point ->
+            if (out.any { distance(it, point) < 0.6 }) out else out + point
+        }
+        if (vertices.size < 3) { logToast(context, "A shape needs at least three different points", Toast.LENGTH_SHORT).show(); return }
+        pushUndo()
+        var nextId = nextGuideId(guides)
+        fun bridge(from: GuideLine, to: GuideLine) = from.copy(
+            id = nextId++, start = from.end, end = to.start, curveMid = null,
+            startZMm = from.endZMm, endZMm = to.startZMm, lengthMm = null,
+            fillTransparency = null, materialId = null, materialTurnDeg = 0.0
+        )
+        val rebuilt = buildList {
+            path.forEachIndexed { index, line ->
+                // The first edge owns the face fill; it makes the newly closed face obvious without changing its style.
+                add(if (index == 0 && line.fillTransparency == null) line.copy(fillTransparency = 50) else line)
+                val following = path.getOrElse(index + 1) { path.first() }
+                if (distance(line.end, following.start) >= 0.6) add(bridge(line, following))
+            }
+        }
+        val ids = path.map { it.id }.toSet()
+        guides = guides.filterNot { it.id in ids } + rebuilt
+        selectedGuideId = rebuilt.first().id; selectedWholeGuideId = rebuilt.first().id
+        selectedGuideEndpoint = null; selectedCurveId = null
+        ActionLog.add("closed broken line $pathId: ${rebuilt.size - path.size} missing edge(s) added")
+        logToast(context, "Closed shape: missing edges were drawn and its points are now one editable face", Toast.LENGTH_LONG).show()
+    }
     fun activateExtrusion(point: Pt, radius: Double, targetId: Int? = null) {
         val image = bitmap ?: return
         var guide = (if (targetId != null) guides.firstOrNull { it.id == targetId } else closestGuide(point, guides, radius * 2)) ?: return
@@ -4568,6 +4606,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                                 val outline = closedGuideShapes(guides).firstOrNull { path -> path.any { sameGuideObject(it, guide) } }.orEmpty()
                                 saveSketchAssetShape = outline + holesInside(outline, guides)
                             }
+                            if (!inShape && guide.pathId != null) ActionIcon("Close shape", R.drawable.ic_join, enabled = !itemLocked(itemKey)) { closeBrokenGuide(guide.id) }
                             if (inShape) ActionIcon("Separate", R.drawable.ic_broken_line, enabled = !itemLocked(itemKey)) { separateShape(guide.id) }
                             if (itemGroups.any { members -> members.any { sameItem(it, itemKey) } }) ActionIcon("Ungroup", R.drawable.ic_group) { ungroupItem(itemKey) }
                             if (guide.groupId != null) ActionIcon("Unweld", R.drawable.ic_close, enabled = !itemLocked(itemKey)) { unweldGuide(guide.id) }
@@ -6671,6 +6710,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 // Every line's ends get a dot, so a line seen end on (a point) is still visible.
                 // Joints inside a smooth curved outline (a circle's pieces) get no dot.
                 val smoothIds = smoothOutlineIds(guides)
+                val closedShapeIds = closedGuideShapes(guides).flatten().map { it.id }.toSet()
                 fun smoothJoint(p: Pt, g: GuideLine) = g.curveMid != null && g.pathId != null && guides.count { o -> o.pathId == g.pathId && o.curveMid != null && (distance(o.start, p) < 0.6 || distance(o.end, p) < 0.6) } >= 2
                 guides.sortedBy { if (selectedGuide != null && sameGuideObject(it, selectedGuide)) 0 else 1 }
                     .flatMap { guide -> listOf(guide.start to guide, guide.end to guide) }.filterNot { (p, g) -> smoothJoint(p, g) || g.id in smoothIds || g.id in filledIds && !(selectedGuide != null && sameGuideObject(g, selectedGuide)) }
@@ -6679,10 +6719,12 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val center = viewAt(point)
                         val active = selectedGuide != null && sameGuideObject(guide, selectedGuide)
                         // The same size on screen at any zoom, so dots never swallow the drawing.
-                        drawCircle(guideColor(guide.colorIndex), if (active) 6.dp.toPx() else 3.dp.toPx(), center)
+                        // Broken-guide points are amber; completed shape corners stay in the line's colour.
+                        val pointColor = if (guide.pathId != null && guide.id !in closedShapeIds) Color(0xFFF57C00) else guideColor(guide.colorIndex)
+                        drawCircle(pointColor, if (active) 6.dp.toPx() else 3.dp.toPx(), center)
                         if (active) drawCircle(Color.White, 2.5.dp.toPx(), center)
                         // A line pointing straight into the screen shows as a ring.
-                        if ((viewAt(guide.start) - viewAt(guide.end)).getDistance() < 4f) drawCircle(guideColor(guide.colorIndex), 7.dp.toPx(), center, style = Stroke(2.dp.toPx()))
+                        if ((viewAt(guide.start) - viewAt(guide.end)).getDistance() < 4f) drawCircle(pointColor, 7.dp.toPx(), center, style = Stroke(2.dp.toPx()))
                     }
                 val screenLines = lines.map { ScreenLine(it.id, viewAt(it.start), viewAt(it.end)) }
                 val occupiedLabels = mutableListOf<androidx.compose.ui.geometry.Rect>()
