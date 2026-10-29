@@ -390,6 +390,8 @@ internal fun ThreeDViewerPane(
     detail: Int,
     onDetailChange: (Float) -> Unit,
     onDetailChangeFinished: () -> Unit,
+    showDrawings: Boolean,
+    onShowDrawingsChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -408,6 +410,7 @@ internal fun ThreeDViewerPane(
         // One slim row: what to show and the view actions.
         Row(Modifier.fillMaxWidth().background(Color(0xFFF2F5F4)).padding(horizontal = 6.dp).height(40.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             CompactToggle("Sizes", showMeasurements) { showMeasurements = it; view.showMeasurements = it; view.overlay.invalidate() }
+            CompactToggle("Drawings", showDrawings) { onShowDrawingsChange(it) }
             CompactToggle("Figure", showFigure) { showFigure = it }
             CompactToggle("Front", showArrow) { showArrow = it; view.setReferencesVisible(showFrame, showArrow) }
             CompactToggle("Frame", showFrame) { showFrame = it; view.setReferencesVisible(showFrame, showArrow) }

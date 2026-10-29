@@ -1017,6 +1017,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     // Start with one straight piece per curve. The 3D viewer exposes a dragger
     // for people who need a smoother on-screen approximation.
     var viewerCurveDetail by remember { mutableIntStateOf(1) }
+    // Guides are useful context while modelling, even before a material is set.
+    var viewerShowDrawings by remember { mutableStateOf(true) }
     var show3d by remember { mutableStateOf(false) }
     val viewerCamera = remember { ViewerCamera() }
     var viewerEditObject by remember { mutableStateOf<Int?>(null) }
@@ -3523,7 +3525,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 // Imported models join the drawing; a project of only imported models has no shapes to build.
                 // Preview prioritizes immediate feedback. Printable/export validation
                 // (especially pairwise overlap testing) happens only for export.
-                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true, previewCurveSteps = curveDetail) }
+                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true, previewCurveSteps = curveDetail, showDrawings = viewerShowDrawings) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
                 ActionLog.add("3D build phase: meshes=${built.meshes.size}, objects=${built.objects.size}, imported=${placedSnapshot.size}")
                 val model = ModelBuild(built.meshes + placedSnapshot.map { it.second }, built.objects, built.warnings, built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish })
@@ -4455,10 +4457,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Fit", R.drawable.ic_fit) { fitView() }
                         ActionIcon("Sizes", R.drawable.ic_sizes, on = showSizes) { showSizes = !showSizes; preferences.edit().putBoolean("show_sizes", showSizes).apply() }
                         // Cycle the paper/photo underneath the editable lines: full → 50% → hidden.
-                        if (bitmap != null) ActionIcon("Image ${when (pictureOptions.transparency) { 0 -> "full"; 50 -> "50%"; else -> "hidden" }}", R.drawable.ic_idea3d, on = pictureOptions.transparency > 0) {
+                        if (!isBlankCanvas()) ActionIcon("Image ${when (pictureOptions.transparency) { 0 -> "full"; 50 -> "50%"; else -> "hidden" }}", R.drawable.ic_idea3d, on = pictureOptions.transparency > 0) {
                             pictureOptions = pictureOptions.copy(transparency = when (pictureOptions.transparency) { 0 -> 50; 50 -> 100; else -> 0 })
                         }
-                        if (bitmap != null) ActionIcon("Simplify", R.drawable.ic_idea3d, enabled = !simpleTraceRunning) { showSimpleTraceCommand = true }
+                        if (!isBlankCanvas()) ActionIcon("Simplify", R.drawable.ic_idea3d, enabled = !simpleTraceRunning) { showSimpleTraceCommand = true }
                         if (bitmap != null) ActionIcon("Assets", R.drawable.ic_clone) { showSketchAssets = true }
                     }
                 }
@@ -4585,6 +4587,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 detail = viewerCurveDetail,
                 onDetailChange = { viewerCurveDetail = it.roundToInt() },
                 onDetailChangeFinished = { open3dView(viewerScope) },
+                showDrawings = viewerShowDrawings,
+                onShowDrawingsChange = { viewerShowDrawings = it; open3dView(viewerScope) },
                 modifier = Modifier.fillMaxWidth().weight(1f)
             )
             else if (show3d && viewerBuilding) Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { Text("Rendering … ${viewerElapsedSeconds}s", fontWeight = FontWeight.Medium) }
@@ -7677,11 +7681,15 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
  * Bars and pipes for lines that have a material: one mesh per line, following curves in short straight pieces.
  * Keys are (plane, -(line id + 1)) so they never clash with shape objects.
  */
-private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null, previewCurveSteps: Int? = null): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
+private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null, previewCurveSteps: Int? = null, showDrawings: Boolean = false): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
     val counts = HashMap<String, Int>()
     return guides.flatMap { guide ->
         // Sheets belong to closed shapes; only bars and pipes follow a line.
-        val material = guide.materialId?.let(materials::get)?.takeUnless { it.isSheet } ?: return@flatMap emptyList()
+        // A thin neutral bar makes unmaterialed drawing guides visible in 3D.
+        // It is preview-only and is never included in exports.
+        val assigned = guide.materialId?.let(materials::get)
+        val material = assigned?.takeUnless { it.isSheet }
+            ?: if (assigned == null && showDrawings) Material("preview-drawing", "Drawing", MemberProfile(ProfileKind.ROUND_BAR, 3.0, 3.0), 0xFF2563EB.toInt()) else return@flatMap emptyList()
         val mapping = setup.mapping(guide.plane) ?: return@flatMap emptyList()
         val name = "${material.name} ${counts.merge(material.id, 1, Int::plus)}"
         // Each curved preview segment is a complete closed pipe/bar mesh. The
@@ -7714,9 +7722,9 @@ private class ModelBuild(val meshes: List<Mesh>, val objects: List<Pair<ModelPla
  * Builds every plane's solids and applies the 3D cuts and joins. With [strict], anything that would make a bad
  * print (including objects that overlap without being joined) throws; otherwise overlaps come back as warnings.
  */
-private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap(), preview: Boolean = false, previewCurveSteps: Int? = null): ModelBuild {
+private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap(), preview: Boolean = false, previewCurveSteps: Int? = null, showDrawings: Boolean = false): ModelBuild {
     val objects = mutableListOf<Extrusion>()
-    val members = buildMembers(guides, materials, setup, previewCurveSteps = previewCurveSteps)
+    val members = buildMembers(guides, materials, setup, previewCurveSteps = previewCurveSteps, showDrawings = showDrawings)
     // A drawing made only of bars and pipes needs no closed shape.
     val specs = if (members.isNotEmpty()) buildSolidSpecs(guides, extrusions, setup, objects, strict = false) else buildSolidSpecs(guides, extrusions, setup, objects)
     val issues = mutableListOf<MeshIssue>()
