@@ -2039,7 +2039,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         foreign.lastOrNull { insideForeign(it, point) }?.let { o -> planeGeometry(o.plane).extrusions.firstOrNull { it.id == o.extrusionId }?.let { e -> extrusionGuides(e, planeGeometry(o.plane).guides).firstOrNull()?.let { return o.plane to it.id } } }
         return null
     }
-    fun sameItem(a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>) = a.first == b.first && itemGuides(a).any { it.id == b.second }
+    // Either key may name a different edge of the same shape. Keep this
+    // symmetric: otherwise the same visible outline could be picked twice and
+    // boolean tools would receive an invalid target/cutter pair.
+    fun sameItem(a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>) = a.first == b.first &&
+        (a.second == b.second || itemGuides(a).any { it.id == b.second } || itemGuides(b).any { it.id == a.second })
     /** An item together with everything grouped with it. */
     fun withGroup(key: Pair<ModelPlane, Int>): List<Pair<ModelPlane, Int>> = itemGroups.firstOrNull { group -> group.any { sameItem(key, it) } } ?: listOf(key)
     fun togglePicked(key: Pair<ModelPlane, Int>) {
@@ -2999,7 +3003,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             else -> null
         }
         if (result.isNullOrEmpty()) {
-            logToast(context, "Cannot create editable shapes from this cut.", Toast.LENGTH_LONG).show()
+            val reason = if ((operation == "cut-first" || operation == "cut-second") && target != null && razor != null && shapeBoolean(target, razor, android.graphics.Path.Op.INTERSECT).isNullOrEmpty())
+                "The two closed shapes do not overlap"
+            else "The outlines cross or touch in a way that cannot become one editable shape"
+            logToast(context, "Cut failed: $reason", Toast.LENGTH_LONG).show()
             return
         }
         val removed = if (operation == "merge" || operation == "common") first + second.orEmpty() else target ?: return
