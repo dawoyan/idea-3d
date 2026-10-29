@@ -1051,6 +1051,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var selectedGhostPoints by remember { mutableStateOf(emptyList<Triple<ModelPlane, Int, Boolean>>()) }
     // Points picked in Select mode, from any view (including this one): (view, line id, start?).
     var pickedPoints by remember { mutableStateOf(emptyList<Triple<ModelPlane, Int, Boolean>>()) }
+    // Arrow-pad repeats are one gesture, not dozens of undo operations. It is
+    // extended by each repeat and naturally closes shortly after release.
+    var nudgeUndoDeadline by remember { mutableStateOf(0L) }
     // Size labels on lines and shapes can be hidden to see the drawing clearly.
     var showSizes by remember { mutableStateOf(preferences.getBoolean("show_sizes", true)) }
     // Grow arrows (front and back of a shape or object) show only after the Grow button is tapped.
@@ -1193,6 +1196,16 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun pushUndo(includeImage: Boolean = false) {
         val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels)
         undoHistory = undoHistory + snapshot
+    }
+    fun pushNudgeUndo(selection: String) {
+        val now = System.currentTimeMillis()
+        if (now > nudgeUndoDeadline) {
+            pushUndo()
+            ActionLog.add("nudge start: $selection")
+        }
+        // The first hold repeat comes after 280 ms, followed by ~25–70 ms
+        // repeats. 550 ms also folds the release click into this one gesture.
+        nudgeUndoDeadline = now + 550L
     }
     fun changePictureUnit(nextUnit: String) {
         if (unit == nextUnit) return
@@ -1984,6 +1997,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun togglePoint(sel: Triple<ModelPlane, Int, Boolean>) {
         pickedPoints = if (pickedPoints.any { samePoint(it, sel) }) pickedPoints.filterNot { samePoint(it, sel) } else pickedPoints + sel
+        ActionLog.add("select point ${sel.first.label} line ${sel.second} ${if (sel.third) "start" else "end"}; picked points=${pickedPoints.size}")
     }
     /** All lines of an item (a line, broken line, shape or object) in its own view. */
     /** An item's lines in its own view; a shape's holes are part of it, and picking a hole picks its shape. */
@@ -2313,6 +2327,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 SelectionMode.SHAPES -> item?.takeIf(::closedItem)?.let(::togglePicked)
                 SelectionMode.ALL, SelectionMode.VISIBLE -> item?.let(::togglePicked)
             }
+            item?.let { ActionLog.add("select ${selectionMode.name.lowercase()} ${it.first.label} line ${it.second}; picked items=${pickedItems.size}, points=${pickedPoints.size}") }
             return
         }
         joinPick?.let { pickJoinArm(it, point, hitRadius); return }
@@ -3301,31 +3316,31 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun handleDragCancel() { foreignDrag = null; selectionStart = null; selectionEnd = null; handleDragEnd() }
     fun nudgeSelected(dx: Float, dy: Float) {
-        selectedForeignPoint?.let { nudgeForeignPoint(it, dx, dy); return }
+        selectedForeignPoint?.let { pushNudgeUndo("foreign point(s)=${it.points.size}"); nudgeForeignPoint(it, dx, dy); return }
         // A whole 3D object from another view, or an imported model: one step in the arrow's direction.
         val objectStep = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble())
         selectedForeign?.let { (plane, extrusionId) ->
             val g = planeGeometry(plane)
             val seed = g.extrusions.firstOrNull { it.id == extrusionId }?.let { e -> extrusionGuides(e, g.guides).firstOrNull() } ?: return
-            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushUndo(); moveItem(plane to seed.id, it.normalized() * objectStep) }
+            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushNudgeUndo("foreign 3D object"); moveItem(plane to seed.id, it.normalized() * objectStep) }
             return
         }
         selectedModelId?.let { id ->
-            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { d -> pushUndo(); importedModels = importedModels.map { if (it.id == id) it.copy(center = it.center + d.normalized() * objectStep) else it } }
+            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { d -> pushNudgeUndo("imported model $id"); importedModels = importedModels.map { if (it.id == id) it.copy(center = it.center + d.normalized() * objectStep) else it } }
             return
         }
         selectedGhostPoint?.let { sel ->
             val step = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble())
-            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushUndo(); moveGhostPoint(sel, it.normalized() * step) }
+            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushNudgeUndo("one point ${sel.first.label} line ${sel.second}"); moveGhostPoint(sel, it.normalized() * step) }
             return
         }
         if (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty())) {
             val step = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble())
-            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushUndo(); movePicked(it.normalized() * step) }
+            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushNudgeUndo("${pickedItems.size} item(s), ${pickedPoints.size} point(s)"); movePicked(it.normalized() * step) }
             return
         }
         if (selectedVertices.isNotEmpty() || selectedGhostPoints.isNotEmpty()) {
-            pushUndo(); transformSelectedVertices { Pt(it.x + dx, it.y + dy) }
+            pushNudgeUndo("${selectedVertices.size} box-selected vertex/vertices"); transformSelectedVertices { Pt(it.x + dx, it.y + dy) }
             modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { d -> selectedGhostPoints.forEach { moveGhostPoint(it, d) } }
             return
         }
@@ -3334,13 +3349,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val mid = guide.curveMid ?: return@let
             val image = bitmap ?: return@let
             val target = Pt((mid.x + dx).coerceIn(0f, image.width.toFloat()), (mid.y + dy).coerceIn(0f, image.height.toFloat()))
-            pushUndo()
+            pushNudgeUndo("curve point $id")
             guides = guides.map { if (it.id == id) it.copy(curveMid = target) else it }
             adjustmentIndicatorPoint = target; adjustmentLineId = null; adjustmentGuideId = id; adjustmentFlashToken++
             return
         }
         selectedExtrusionId?.let { id ->
-            pushUndo()
+            pushNudgeUndo("3D depth handle $id")
             extrusions = extrusions.map { if (it.id == id) { val handle = depthHandle(it, Pt(it.handle.x + dx, it.handle.y + dy)); it.copy(handle = handle, depthMm = depthMmForHandle(it, handle, scale, unit)) } else it }
             return
         }
@@ -3350,7 +3365,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val current = if (endpoint.isStart) line.start else line.end
             val (snappedPoint, alignment) = snapEndpointAlignment(line, endpoint, Pt(current.x + dx, current.y + dy), lines, levelRotation)
             if (updateAlignment(alignment)) alignmentPauseUntil = System.currentTimeMillis() + 1200L
-            pushUndo()
+            pushNudgeUndo("measurement endpoint ${endpoint.lineId}")
             lines = recalculate(lines.map { item ->
                 if (line.pathId != null && item.pathId == line.pathId) item.copy(start = if (distance(item.start, current) < 0.6) snappedPoint else item.start, end = if (distance(item.end, current) < 0.6) snappedPoint else item.end)
                 else if (item.id != endpoint.lineId) item else if (endpoint.isStart) item.copy(start = snappedPoint) else item.copy(end = snappedPoint)
@@ -3365,7 +3380,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val selectedGuide = guides.firstOrNull { it.id == endpoint.guideId } ?: return@let
             val vertex = if (endpoint.isStart) selectedGuide.start else selectedGuide.end
             val target = Pt(vertex.x + dx, vertex.y + dy)
-            pushUndo()
+            pushNudgeUndo("guide endpoint ${endpoint.guideId}")
             guides = guides.map { guide ->
                 if (sameGuideObject(guide, selectedGuide)) guide.copy(
                     start = if (distance(guide.start, vertex) < 0.6) target else guide.start,
@@ -3381,7 +3396,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             return
         }
         selectedLabelId?.let { id ->
-            pushUndo()
+            pushNudgeUndo("label $id")
             lines = lines.map { line -> if (line.id != id) line else {
                 val length = distance(line.start, line.end).toFloat().coerceAtLeast(1f)
                 val along = ((line.end.x - line.start.x) * dx + (line.end.y - line.start.y) * dy) / length
@@ -3390,7 +3405,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             return
         }
         selectedWholeLineId?.let { id ->
-            pushUndo()
+            pushNudgeUndo("line $id")
             val pathId = lines.firstOrNull { it.id == id }?.pathId
             lines = recalculate(lines.map { line -> if (line.id == id || pathId != null && line.pathId == pathId) line.copy(start = Pt(line.start.x + dx, line.start.y + dy), end = Pt(line.end.x + dx, line.end.y + dy)) else line })
             lines.firstOrNull { it.id == id }?.let { line -> adjustmentIndicatorPoint = Pt((line.start.x + line.end.x) / 2f, (line.start.y + line.end.y) / 2f) }
@@ -3400,7 +3415,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             return
         }
         selectedWholeGuideId?.let { id ->
-            pushUndo()
+            pushNudgeUndo("guide object $id")
             translateGuideObject(id, dx, dy)
             guides.firstOrNull { it.id == id }?.let { guide -> adjustmentIndicatorPoint = Pt((guide.start.x + guide.end.x) / 2f, (guide.start.y + guide.end.y) / 2f) }
             adjustmentLineId = null
@@ -4266,7 +4281,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ModelPlane.entries.forEach { p -> val g = planeGeometry(p); append("${p.label}: ${g.guides.size} lines, ${closedGuideShapes(g.guides).size} shapes, ${g.extrusions.size} 3D objects, ${g.lines.size} measurements\n") }
                         append("Selected: line ${selectedWholeGuideId ?: selectedGuideId}, object $selectedForeign, model $selectedModelId, picked $pickedItems\n")
                     }
-                    append("Last actions:\n"); append(ActionLog.text())
+                    append("Actions from the last 10 minutes:\n"); append(ActionLog.text())
                 }
                 (context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("Idea 3D debug log", summary))
                 logToast(context, "Debug log copied: paste it into your message", Toast.LENGTH_LONG).show()
@@ -5458,7 +5473,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 Text("Export a plain text record of the measurements on the open picture.", fontSize = 13.sp, color = Color(0xFF53615D))
                 OutlinedButton(onClick = onExportLog, enabled = hasProject, shape = RoundedCornerShape(8.dp)) { Text("Export measurement log") }
                 // The last actions and messages, to paste into a message when something goes wrong.
-                Button(onClick = onCopyDebugLog, shape = RoundedCornerShape(8.dp)) { Text("Copy debug log (last actions)") }
+                Button(onClick = onCopyDebugLog, shape = RoundedCornerShape(8.dp)) { Text("Copy debug log (last 10 min)") }
             }
         }
     }
@@ -5634,24 +5649,41 @@ private sealed class ModelReport {
 
 /**
  * The last actions and messages, for "Copy debug log" in Settings: taps on buttons and tools, and every message
- * shown. Kept in memory, newest last.
+ * shown. Kept for a time window rather than an arbitrary item count, so a long
+ * hold or noisy sequence cannot erase the actions that explain a problem.
  */
 internal object ActionLog {
-    private val entries = ArrayDeque<String>()
+    private data class Entry(val at: Long, val text: String)
+    private val entries = ArrayDeque<Entry>()
     private val time = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US)
     private var file: File? = null
+    private const val WINDOW_MS = 10 * 60 * 1000L
+    private const val KEEP_MS = 24 * 60 * 60 * 1000L
     /** Keeps the log in the app's storage, so it survives a restart or a crash (whose details are logged too). */
     @Synchronized fun start(context: Context) {
         if (file != null) return
-        file = File(context.filesDir, "action-log.txt").also { f -> runCatching { f.readLines().takeLast(60).forEach { entries.addLast(it) } } }
+        file = File(context.filesDir, "action-log.txt").also { f -> runCatching {
+            f.readLines().forEach { line ->
+                val tab = line.indexOf('\t')
+                if (tab > 0) line.substring(0, tab).toLongOrNull()?.let { entries.addLast(Entry(it, line.substring(tab + 1))) }
+            }
+        } }
+        trim(System.currentTimeMillis())
+        add("session started")
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error -> add("CRASH: ${error.stackTraceToString().lines().take(12).joinToString(" | ")}"); previous?.uncaughtException(thread, error) }
     }
     @Synchronized fun add(entry: String) {
-        entries.addLast("${time.format(java.util.Date())} $entry"); while (entries.size > 60) entries.removeFirst()
-        runCatching { file?.writeText(entries.joinToString("\n")) }
+        val now = System.currentTimeMillis()
+        entries.addLast(Entry(now, "${time.format(java.util.Date(now))} $entry"))
+        trim(now)
+        runCatching { file?.writeText(entries.joinToString("\n") { "${it.at}\t${it.text}" }) }
     }
-    @Synchronized fun text(): String = entries.joinToString("\n")
+    @Synchronized fun text(): String {
+        val cutoff = System.currentTimeMillis() - WINDOW_MS
+        return entries.filter { it.at >= cutoff }.joinToString("\n") { it.text }.ifBlank { "No actions in the last 10 minutes" }
+    }
+    private fun trim(now: Long) { while ((entries.firstOrNull()?.at ?: now) < now - KEEP_MS) entries.removeFirst() }
 }
 
 /** A message on screen, also written to the debug log. */
