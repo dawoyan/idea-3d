@@ -2310,16 +2310,23 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             return
         }
         if (selectMode) {
-            // Visible surface considers only the current view, preventing selection of a
-            // projected element hidden behind the one under the finger.
-            val localPoints = pointGuides(guides.filter { it.plane == editPlane }).flatMap { g -> listOf(Triple(editPlane, g.id, true) to g.start, Triple(editPlane, g.id, false) to g.end) }
+            // The canvas contains this view plus projected guides from the other
+            // planes. Use that displayed layer for a quick tap; in an overlap,
+            // the later-drawn (visually topmost) guide wins.
+            data class VisiblePoint(val selection: Triple<ModelPlane, Int, Boolean>, val at: Pt, val drawOrder: Int)
+            val visiblePoints = guides.flatMapIndexed { index, guide ->
+                val key = homeKey(guide)
+                listOf(VisiblePoint(Triple(key.first, key.second, true), guide.start, index), VisiblePoint(Triple(key.first, key.second, false), guide.end, index))
+            }
             val pointPick = when (selectionMode) {
                 SelectionMode.POINTS, SelectionMode.ALL -> allPointsHere()
-                SelectionMode.VISIBLE -> localPoints
+                SelectionMode.VISIBLE -> visiblePoints.filter { distance(it.at, point) <= hitRadius }
+                    .minWithOrNull(compareBy<VisiblePoint> { distance(it.at, point) }.thenByDescending { it.drawOrder })
+                    ?.let { it.selection to it.at }?.let(::listOf).orEmpty()
                 else -> emptyList()
             }.filter { distance(it.second, point) <= hitRadius }.minByOrNull { distance(it.second, point) }
             if (pointPick != null) { togglePoint(pointPick.first); return }
-            val item = if (selectionMode == SelectionMode.VISIBLE) closestGuide(point, guides.filter { it.plane == editPlane }, hitRadius * 1.7)?.let(::homeKey) else itemAt(point, hitRadius)
+            val item = if (selectionMode == SelectionMode.VISIBLE) closestGuide(point, guides, hitRadius * 1.7)?.let(::homeKey) else itemAt(point, hitRadius)
             fun closedItem(key: Pair<ModelPlane, Int>): Boolean {
                 val geometry = planeGeometry(key.first); val ids = itemGuides(key).map { it.id }.toSet()
                 return closedGuideShapes(geometry.guides).any { path -> path.any { it.id == key.second || it.id in ids } }
