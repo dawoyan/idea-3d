@@ -1043,6 +1043,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var selectMode by remember { mutableStateOf(false) }
     var selectionMode by remember { mutableStateOf(SelectionMode.VISIBLE) }
     var pickedItems by remember { mutableStateOf(emptyList<Pair<ModelPlane, Int>>()) }
+    // Horizontal? / pending confirmation. Distribution changes positions by
+    // design, so it should never happen from an accidental toolbar tap.
+    var showDistributionConfirm by remember { mutableStateOf<Pair<Boolean, Boolean>?>(null) }
     // Existing selected lines/shapes waiting for a visible 3D face to attach to.
     var surfaceAttachItems by remember { mutableStateOf<List<Pair<ModelPlane, Int>>?>(null) }
     var itemDragLast by remember { mutableStateOf<Pt?>(null) }
@@ -3957,9 +3960,43 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         @Suppress("UNCHECKED_CAST")
         fun moveAny(k: Any, d: Vec3) = if (k is Triple<*, *, *>) moveGhostPoint(k as Triple<ModelPlane, Int, Boolean>, d) else moveItem(k as Pair<ModelPlane, Int>, d)
         if (boxes.size < 2 || distribute && boxes.size < 3) { logToast(context, if (distribute) "Pick at least three items to space them" else "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
-        pushUndo()
         fun cx(b: FloatArray) = (b[0] + b[2]) / 2.0
         fun cy(b: FloatArray) = (b[1] + b[3]) / 2.0
+        // Selected points can share a corner or a broken-line path. Moving one
+        // at a time made later moves act on already changed geometry, which is
+        // why repeated Align taps were needed. Apply every endpoint change from
+        // one immutable snapshot instead.
+        if (itemBoxes.isEmpty()) {
+            val targets = if (!distribute) {
+                val target = if (horizontal) pointBoxes.map { cy(it.second) }.average() else pointBoxes.map { cx(it.second) }.average()
+                pointBoxes.associate { (key, box) -> key as Triple<ModelPlane, Int, Boolean> to if (horizontal) here.modelDelta(0.0, target - cy(box)) else here.modelDelta(target - cx(box), 0.0) }
+            } else {
+                val sorted = pointBoxes.sortedBy { if (horizontal) cx(it.second) else cy(it.second) }
+                val from = if (horizontal) cx(sorted.first().second) else cy(sorted.first().second)
+                val to = if (horizontal) cx(sorted.last().second) else cy(sorted.last().second)
+                sorted.mapIndexed { index, (key, box) ->
+                    val target = from + (to - from) * index / (sorted.size - 1)
+                    (key as Triple<ModelPlane, Int, Boolean>) to if (horizontal) here.modelDelta(target - cx(box), 0.0) else here.modelDelta(0.0, target - cy(box))
+                }.toMap()
+            }
+            pushUndo()
+            targets.entries.groupBy { it.key.first }.forEach { (plane, changes) ->
+                val geometry = planeGeometry(plane); val own = modelSetup().mapping(plane) ?: return@forEach
+                data class PointMove(val at: Pt, val delta: Vec3, val line: GuideLine)
+                val moves = changes.mapNotNull { (selection, delta) -> geometry.guides.firstOrNull { it.id == selection.second }?.let { line -> PointMove(if (selection.third) line.start else line.end, delta, line) } }
+                fun move(point: Pt, guide: GuideLine): Pair<Pt, Double>? = moves.firstOrNull { change -> sameGuideObject(guide, change.line) && distance(point, change.at) < 0.6 }?.let { change ->
+                    val pixel = own.pixelDelta(change.delta); Pt(point.x + pixel.x, point.y + pixel.y) to (change.delta dot plane.toward)
+                }
+                val next = geometry.guides.map { guide ->
+                    val start = move(guide.start, guide); val end = move(guide.end, guide)
+                    guide.copy(start = start?.first ?: guide.start, end = end?.first ?: guide.end, startZMm = guide.startZMm + (start?.second ?: 0.0), endZMm = guide.endZMm + (end?.second ?: 0.0), lengthMm = if (start != null || end != null) null else guide.lengthMm)
+                }
+                setPlaneShapes(plane, next, geometry.extrusions)
+            }
+            ActionLog.add("${if (distribute) "spread" else "align"} ${if (horizontal) "horizontal" else "vertical"}: ${targets.size} points together")
+            return
+        }
+        pushUndo()
         if (!distribute) {
             val target = if (horizontal) boxes.map { cy(it.second) }.average() else boxes.map { cx(it.second) }.average()
             boxes.forEach { (k, b) -> moveAny(k, if (horizontal) here.modelDelta(0.0, target - cy(b)) else here.modelDelta(target - cx(b), 0.0)) }
@@ -4281,7 +4318,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ModelPlane.entries.forEach { p -> val g = planeGeometry(p); append("${p.label}: ${g.guides.size} lines, ${closedGuideShapes(g.guides).size} shapes, ${g.extrusions.size} 3D objects, ${g.lines.size} measurements\n") }
                         append("Selected: line ${selectedWholeGuideId ?: selectedGuideId}, object $selectedForeign, model $selectedModelId, picked $pickedItems\n")
                     }
-                    append("Actions from the last 10 minutes:\n"); append(ActionLog.text())
+                    append("Actions from this session (last 5 minutes):\n"); append(ActionLog.text())
                 }
                 (context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("Idea 3D debug log", summary))
                 logToast(context, "Debug log copied: paste it into your message", Toast.LENGTH_LONG).show()
@@ -4442,8 +4479,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         TurnIcons()
                         ActionIcon("Align H", R.drawable.ic_align_horizontal, enabled = total >= 2) { arrangePicked(horizontal = true, distribute = false) }
                         ActionIcon("Align V", R.drawable.ic_align_vertical, enabled = total >= 2) { arrangePicked(horizontal = false, distribute = false) }
-                        ActionIcon("Space H", R.drawable.ic_even_h, enabled = total >= 3) { arrangePicked(horizontal = true, distribute = true) }
-                        ActionIcon("Space V", R.drawable.ic_even_v, enabled = total >= 3) { arrangePicked(horizontal = false, distribute = true) }
+                        ActionIcon("Spread H", R.drawable.ic_even_h, enabled = total >= 3) { showDistributionConfirm = true to true }
+                        ActionIcon("Spread V", R.drawable.ic_even_v, enabled = total >= 3) { showDistributionConfirm = false to true }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Place on surface", R.drawable.ic_cube, enabled = n == 2) { stickPickedShapeToObject() }
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
@@ -4753,6 +4790,15 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     TextButton(onClick = { alignSelectedVertices(horizontal, reference) }) { Text("${index + 1}. ${reference.description}") }
                 }
             } }, confirmButton = {}, dismissButton = { TextButton(onClick = { pendingAlignment = null }) { Text("Cancel") } })
+    }
+    showDistributionConfirm?.let { (horizontal, _) ->
+        AlertDialog(
+            onDismissRequest = { showDistributionConfirm = null },
+            title = { Text("Spread selected ${if (horizontal) "horizontally" else "vertically"}?") },
+            text = { Text("This evenly distributes the selected points or objects between the outer two. It changes their positions; Align only puts them on one shared axis.") },
+            confirmButton = { TextButton(onClick = { arrangePicked(horizontal, distribute = true); showDistributionConfirm = null }) { Text("Spread") } },
+            dismissButton = { TextButton(onClick = { showDistributionConfirm = null }) { Text("Cancel") } }
+        )
     }
     lineMaterialId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
         var chosen by remember(id) { mutableStateOf(guide.materialId) }
@@ -5473,7 +5519,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 Text("Export a plain text record of the measurements on the open picture.", fontSize = 13.sp, color = Color(0xFF53615D))
                 OutlinedButton(onClick = onExportLog, enabled = hasProject, shape = RoundedCornerShape(8.dp)) { Text("Export measurement log") }
                 // The last actions and messages, to paste into a message when something goes wrong.
-                Button(onClick = onCopyDebugLog, shape = RoundedCornerShape(8.dp)) { Text("Copy debug log (last 10 min)") }
+                Button(onClick = onCopyDebugLog, shape = RoundedCornerShape(8.dp)) { Text("Copy debug log (session, last 5 min)") }
             }
         }
     }
@@ -5657,7 +5703,8 @@ internal object ActionLog {
     private val entries = ArrayDeque<Entry>()
     private val time = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US)
     private var file: File? = null
-    private const val WINDOW_MS = 10 * 60 * 1000L
+    private var sessionStartedAt = 0L
+    private const val WINDOW_MS = 5 * 60 * 1000L
     private const val KEEP_MS = 24 * 60 * 60 * 1000L
     /** Keeps the log in the app's storage, so it survives a restart or a crash (whose details are logged too). */
     @Synchronized fun start(context: Context) {
@@ -5668,7 +5715,8 @@ internal object ActionLog {
                 if (tab > 0) line.substring(0, tab).toLongOrNull()?.let { entries.addLast(Entry(it, line.substring(tab + 1))) }
             }
         } }
-        trim(System.currentTimeMillis())
+        sessionStartedAt = System.currentTimeMillis()
+        trim(sessionStartedAt)
         add("session started")
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error -> add("CRASH: ${error.stackTraceToString().lines().take(12).joinToString(" | ")}"); previous?.uncaughtException(thread, error) }
@@ -5680,8 +5728,8 @@ internal object ActionLog {
         runCatching { file?.writeText(entries.joinToString("\n") { "${it.at}\t${it.text}" }) }
     }
     @Synchronized fun text(): String {
-        val cutoff = System.currentTimeMillis() - WINDOW_MS
-        return entries.filter { it.at >= cutoff }.joinToString("\n") { it.text }.ifBlank { "No actions in the last 10 minutes" }
+        val cutoff = maxOf(sessionStartedAt, System.currentTimeMillis() - WINDOW_MS)
+        return entries.filter { it.at >= cutoff }.joinToString("\n") { it.text }.ifBlank { "No actions in this session during the last 5 minutes" }
     }
     private fun trim(now: Long) { while ((entries.firstOrNull()?.at ?: now) < now - KEEP_MS) entries.removeFirst() }
 }
