@@ -921,6 +921,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     // selected line still selects/moves it; an armed point tool makes the next tap
     // on that line an immediate Corel-style node edit.
     var pointEditArmed by remember { mutableStateOf(false) }
+    // A blocked gesture has its own visible feedback: it must never quietly become a point edit.
+    var lockedFlashGuideId by remember { mutableStateOf<Int?>(null) }
+    var lockedFlashToken by remember { mutableIntStateOf(0) }
+    fun flashLockedGuide(guide: GuideLine, action: String) {
+        lockedFlashGuideId = guide.id; lockedFlashToken++
+        ActionLog.add("blocked locked ${if (guide.pathId != null) "shape/line" else "line"} ${guide.id}: $action")
+        logToast(context, "Locked — unlock it before $action", Toast.LENGTH_SHORT).show()
+    }
     // Assigned after the local editor function is declared; handleTap is declared
     // earlier in this composable and invokes it once the composition is complete.
     var addGuidePointAction: ((Pt, Double) -> Boolean)? = null
@@ -1077,6 +1085,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var mirroredViews by remember { mutableStateOf(emptySet<ModelPlane>()) }
     // How far one tap on a turn button turns: 15°, 90° or 5°.
     var turnStep by remember { mutableStateOf(15.0) }
+    var showExactTurn by remember { mutableStateOf(false) }
     /** The front canvas is the picture; Top and Profile canvases start at the picture's size and can be cropped or grown. */
     fun frameOf(plane: ModelPlane): PlaneFrame {
         val width = bitmap?.width ?: 1; val height = bitmap?.height ?: 1
@@ -2166,6 +2175,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
 
     /** Crossing lines are joined right on the canvas; every other junction keeps its dialog. */
     fun onJunction(action: JunctionAction) {
+        if (action.kind == JunctionKind.JOIN_GUIDES) {
+            guides.firstOrNull { (it.id == action.firstId || it.id == action.secondId) && it.locked }?.let { locked ->
+                flashLockedGuide(locked, "splitting or joining"); return
+            }
+        }
         if (action.kind != JunctionKind.JOIN_GUIDES && action.kind != JunctionKind.JOIN_MEASUREMENTS) { junctionAction = action; return }
         val arms = if (action.kind == JunctionKind.JOIN_MEASUREMENTS) {
             lines.filter { it.id == action.firstId || it.id == action.secondId }.flatMap { line -> listOf(line.start, line.end).filter { distance(it, action.point) >= 0.6 }.map { JunctionArm(line.id, it, measurementColor(line)) } }
@@ -2638,7 +2652,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun activateExtrusion(point: Pt, radius: Double, targetId: Int? = null) {
         val image = bitmap ?: return
         var guide = (if (targetId != null) guides.firstOrNull { it.id == targetId } else closestGuide(point, guides, radius * 2)) ?: return
-        if (guide.locked) { logToast(context, "Unlock this item before making it 3D", Toast.LENGTH_SHORT).show(); return }
+        if (guide.locked) { flashLockedGuide(guide, "making it 3D"); return }
         if (guide.plane != editPlane) {
             // A shape drawn in another view becomes this view's shape, extruded along this view's depth.
             val source = guides.filter { sameGuideObject(it, guide) }
@@ -2673,7 +2687,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val selected = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }
         val guide = selected?.let { closestGuide(point, guides.filter { candidate -> sameGuideObject(candidate, it) }, hitRadius) }
             ?: closestGuide(point, guides, hitRadius) ?: return false
-        if (guide.locked) { logToast(context, "Unlock this item before changing points", Toast.LENGTH_SHORT).show(); return false }
+        if (guide.locked) { flashLockedGuide(guide, "changing points"); return false }
         if (distance(point, guide.start) <= hitRadius || distance(point, guide.end) <= hitRadius) return false
         if (pointKind == PointKind.CURVE) {
             // Previously this silently put the handle at the geometric midpoint.
@@ -4387,7 +4401,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
-                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
+                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan },
                 onDoubleTap = { setPresentation(false) }, doubleTapEnabled = true,
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
@@ -4529,7 +4543,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     // actions in the scrolling command row.
                     Row(Modifier.border(1.dp, Color(0xFFB8C1BE), RoundedCornerShape(8.dp)).clip(RoundedCornerShape(8.dp))) {
                         ActionIcon("Turn ↺", R.drawable.ic_rotate_left) { turnSelection(turnStep) }
-                        ActionIcon("${turnStep.toInt()}°", R.drawable.ic_sizes) { turnStep = if (turnStep == 15.0) 90.0 else if (turnStep == 90.0) 5.0 else 15.0 }
+                        ActionIcon("${turnStep.toInt()}°", R.drawable.ic_sizes, onLongClick = { showExactTurn = true }) { turnStep = if (turnStep == 15.0) 90.0 else if (turnStep == 90.0) 5.0 else 15.0 }
                         ActionIcon("Turn ↻", R.drawable.ic_rotate_right) { turnSelection(-turnStep) }
                     }
                 }
@@ -4696,7 +4710,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
-                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
+                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan }, onDoubleTap = { }, doubleTapEnabled = false,
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
                 selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null || selectedForeign != null || selectedModelId != null), onNudge = ::nudgeSelected
@@ -4906,6 +4920,18 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             confirmButton = { TextButton(onClick = { arrangePicked(horizontal, distribute = true); showDistributionConfirm = null }) { Text("Spread") } },
             dismissButton = { TextButton(onClick = { showDistributionConfirm = null }) { Text("Cancel") } }
         )
+    }
+    if (showExactTurn) {
+        var angle by remember { mutableStateOf(java.text.DecimalFormat("0.##").format(turnStep)) }
+        val value = angle.replace(',', '.').toDoubleOrNull()
+        AlertDialog(onDismissRequest = { showExactTurn = false }, title = { Text("Exact rotation") }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Set the turn angle in degrees. The left and right turn buttons choose its direction.")
+                OutlinedTextField(angle, { if (it.matches(Regex("-?[0-9]*([.,][0-9]*)?"))) angle = it }, label = { Text("Angle (degrees)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            }
+        }, confirmButton = { TextButton(enabled = value != null && value != 0.0 && value.isFinite(), onClick = {
+            turnStep = kotlin.math.abs(value!!); showExactTurn = false; ActionLog.add("set turn angle ${turnStep}°")
+        }) { Text("Set") } }, dismissButton = { TextButton(onClick = { showExactTurn = false }) { Text("Cancel") } })
     }
     lineMaterialId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
         var chosen by remember(id) { mutableStateOf(guide.materialId) }
@@ -5845,8 +5871,9 @@ internal object ActionLog {
 private fun logToast(context: Context, text: CharSequence, duration: Int): Toast { ActionLog.add("message: $text"); return Toast.makeText(context, text, duration) }
 
 /** One action in the top row: a small icon with its name under it. */
-@Composable private fun ActionIcon(label: String, icon: Int, enabled: Boolean = true, on: Boolean = false, tint: Color = Color(0xFF173C39), onClick: () -> Unit) {
-    Column(Modifier.width(54.dp).background(if (on) Color(0xFFCFE3DF) else Color.Transparent, RoundedCornerShape(8.dp)).clickable(enabled = enabled) { ActionLog.add("tap $label"); onClick() }.padding(vertical = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+@OptIn(ExperimentalFoundationApi::class)
+@Composable private fun ActionIcon(label: String, icon: Int, enabled: Boolean = true, on: Boolean = false, tint: Color = Color(0xFF173C39), onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
+    Column(Modifier.width(54.dp).background(if (on) Color(0xFFCFE3DF) else Color.Transparent, RoundedCornerShape(8.dp)).combinedClickable(enabled = enabled, onClick = { ActionLog.add("tap $label"); onClick() }, onLongClick = onLongClick?.let { long -> { ActionLog.add("hold $label"); long() } }).padding(vertical = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Icon(painterResource(icon), contentDescription = label, tint = if (enabled) tint else Color(0xFFB4BEBA), modifier = Modifier.size(22.dp))
         Text(label, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (enabled) Color(0xFF173C39) else Color(0xFFB4BEBA))
     }
@@ -6150,7 +6177,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -6289,6 +6316,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
             }
         }
         var adjustmentBlinkOn by remember { mutableStateOf(false) }
+        var lockedBlinkOn by remember { mutableStateOf(false) }
         val hasUnknown = lines.any { !it.isReference && it.value <= 0.0 }
         var unknownBlinkOn by remember { mutableStateOf(false) }
         LaunchedEffect(hasUnknown) {
@@ -6302,6 +6330,9 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 adjustmentBlinkOn = false
                 delay(140)
             }
+        }
+        LaunchedEffect(lockedFlashToken) {
+            if (lockedFlashToken > 0) repeat(4) { lockedBlinkOn = true; delay(180); lockedBlinkOn = false; delay(150) }
         }
         val touch = Modifier.pointerInput(tool, bitmap, viewW, viewH, rotation, doubleTapEnabled) {
             var previousTapAt = 0L
@@ -6788,6 +6819,13 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     val center = viewAt(point)
                     drawCircle(Color.White, 20f * strokeZoom, center, style = Stroke(7f * strokeZoom))
                     drawCircle(Color(0xFF0066BE), 20f * strokeZoom, center, style = Stroke(3f * strokeZoom))
+                }
+            }
+            if (lockedBlinkOn) lockedFlashGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
+                val item = guides.filter { sameGuideObject(it, guide) }
+                item.forEach { edge ->
+                    drawLine(Color.White, viewAt(edge.start), viewAt(edge.end), (edge.strokeWidth + 10f) * strokeZoom)
+                    drawLine(Color(0xFFFF8F00), viewAt(edge.start), viewAt(edge.end), (edge.strokeWidth + 5f) * strokeZoom)
                 }
             }
             draftStart?.let { start -> drawPoint(viewAt(start), if (tool == Tool.LINES) guideColor(guideColorIndex) else Color(0xFFFFD400)) }
