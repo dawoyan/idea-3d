@@ -2175,10 +2175,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
 
     /** Crossing lines are joined right on the canvas; every other junction keeps its dialog. */
     fun onJunction(action: JunctionAction) {
-        if (action.kind == JunctionKind.JOIN_GUIDES) {
-            guides.firstOrNull { (it.id == action.firstId || it.id == action.secondId) && it.locked }?.let { locked ->
-                flashLockedGuide(locked, "splitting or joining"); return
-            }
+        if (action.kind != JunctionKind.JOIN_MEASUREMENTS) guides.firstOrNull { (it.id == action.firstId || it.id == action.secondId) && it.locked }?.let { locked ->
+            flashLockedGuide(locked, "changing its connections"); return
         }
         if (action.kind != JunctionKind.JOIN_GUIDES && action.kind != JunctionKind.JOIN_MEASUREMENTS) { junctionAction = action; return }
         val arms = if (action.kind == JunctionKind.JOIN_MEASUREMENTS) {
@@ -2857,6 +2855,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
     }
     fun applyJunction(action: JunctionAction, chosenArms: List<JunctionArm> = emptyList(), keepRemaining: Boolean = false) {
+        if (action.kind != JunctionKind.JOIN_MEASUREMENTS) guides.firstOrNull { (it.id == action.firstId || it.id == action.secondId) && it.locked }?.let { locked ->
+            flashLockedGuide(locked, "splitting or joining"); junctionAction = null; joinPick = null; return
+        }
+        ActionLog.add("apply junction ${action.kind} guides ${action.firstId},${action.secondId}")
         pushUndo()
         when (action.kind) {
             JunctionKind.CLOSE_GUIDE_PATH -> {
@@ -3056,6 +3058,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         applyJunction(pick.action, pick.selected.sorted().map { pick.arms[it] }, pick.keepRemaining)
     }
     fun applyShapeOperation(action: JunctionAction, operation: String) {
+        guides.firstOrNull { (it.id == action.firstId || it.id == action.secondId) && it.locked }?.let { locked ->
+            flashLockedGuide(locked, "$operation operation"); return
+        }
+        ActionLog.add("shape operation $operation guides ${action.firstId},${action.secondId}")
         val shapes = closedGuideShapes(guides)
         val first = shapes.firstOrNull { shape -> shape.any { it.id == action.firstId } } ?: return
         val second = shapes.firstOrNull { shape -> shape.any { it.id == action.secondId } }
@@ -3153,6 +3159,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun translateGuideObject(id: Int, dx: Float, dy: Float) {
         val selected = guides.firstOrNull { it.id == id } ?: return
+        if (selected.locked) return
         // The shape and its holes, as they show in this view.
         val key = homeKey(selected)
         val ids = guides.filter { sameGuideObject(it, selected) }.map { it.id }.toSet() + itemGuides(key).map { if (key.first == editPlane) it.id else encodedId(key.first, it.id) }
@@ -3337,6 +3344,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
         if (tool == Tool.ADJUST || tool == Tool.LINES) activeGuideEndpoint?.let { endpoint ->
             val guide = guides.firstOrNull { it.id == endpoint.guideId } ?: return@let
+            if (guide.locked) {
+                activeGuideEndpoint = null; activeGuideVertexPoint = null
+                flashLockedGuide(guide, "moving a point"); return@let
+            }
             val vertex = activeGuideVertexPoint ?: if (endpoint.isStart) guide.start else guide.end
             guides = guides.map { item ->
                 if (sameGuideObject(item, guide)) item.copy(
@@ -3374,6 +3385,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             activeWholeLineLastPoint = point
         }
         if (tool == Tool.ADJUST) activeWholeGuideId?.let { id ->
+            val locked = guides.firstOrNull { it.id == id }?.takeIf { it.locked }
+            if (locked != null) { activeWholeGuideId = null; activeWholeGuideLastPoint = null; flashLockedGuide(locked, "moving it"); return@let }
             val previous = activeWholeGuideLastPoint ?: point
             val dx = point.x - previous.x
             val dy = point.y - previous.y
@@ -3529,6 +3542,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     /** Puts the current plane's geometry aside and edits [next]; nothing is lost and undo still covers both. */
     fun switchPlane(next: ModelPlane) {
         if (next == editPlane) return
+        ActionLog.add("view ${editPlane.label} → ${next.label}")
         // What is selected, by its own view and id, so it stays selected (with its fine-move arrows) in the next view.
         val keepGuide = (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let(::homeKey)
         val keepWhole = selectedWholeGuideId != null
@@ -6445,6 +6459,10 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val junctionRadius = junctionRadiusOnScreen.toDouble() / (baseFit * localZoom)
                         val junction = if (tapCount == 2 && tool != Tool.CROP) findJunction(rawPoint, junctionRadius, gestureLines, gestureGuides, tool) else null
                         val tripleEligible = tool == Tool.ADJUST && closestGuide(rawPoint, gestureGuides, junctionRadius * 2) != null
+                        if (tapCount >= 2) {
+                            val hit = closestGuide(rawPoint, gestureGuides, junctionRadius * 2)
+                            ActionLog.add("${if (tapCount >= 3) "triple" else "double"} tap ${tool.name.lowercase()} at ${rawPoint.x.roundToInt()},${rawPoint.y.roundToInt()}; guide=${hit?.id ?: "none"}${if (hit?.locked == true) " locked" else ""}; junction=${junction?.kind ?: "none"}")
+                        }
                         if (tapCount >= 3 && tripleEligible) {
                             pendingTap?.cancel(); tapCount = 0; previousTapAt = 0L
                             latestTripleTap.value(rawPoint, junctionRadius)
@@ -6457,7 +6475,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                                     junctionIndicator = junction.point
                                     repeat(3) { junctionIndicatorVisible = true; delay(150); junctionIndicatorVisible = false; delay(150) }
                                     junctionIndicator = null; latestJunction.value(junction)
-                                } else latestAddPoint.value(rawPoint, hitRadius)
+                                } else { ActionLog.add("double tap action: add point"); latestAddPoint.value(rawPoint, hitRadius) }
                                 tapCount = 0
                             }
                         } else if (tapCount == 2 && (junction != null || doubleTapEnabled)) {
@@ -6465,7 +6483,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                             if (junction != null) holdScope.launch {
                                 junctionIndicator = junction.point
                                 repeat(3) { junctionIndicatorVisible = true; delay(150); junctionIndicatorVisible = false; delay(150) }
-                                junctionIndicator = null; latestJunction.value(junction)
+                                junctionIndicator = null; ActionLog.add("double tap action: junction ${junction.kind}"); latestJunction.value(junction)
                             } else onDoubleTap()
                         } else {
                             previousTapAt = now
