@@ -146,6 +146,7 @@ import com.davoyans.idea3d.core.CalibrationReference
 import com.davoyans.idea3d.core.CalibrationStatus
 import com.davoyans.idea3d.core.LengthUnit
 import com.davoyans.idea3d.core.Mesh
+import com.davoyans.idea3d.core.Triangle
 import com.davoyans.idea3d.core.ModelPlane
 import com.davoyans.idea3d.core.formatLength
 import com.davoyans.idea3d.core.parseLengthMm
@@ -204,12 +205,14 @@ private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
 private data class SelectedAlignmentObject(val guideIds: Set<Int>, val lineIds: Set<Int>, val points: List<Pt>)
 private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0, val plane: ModelPlane = ModelPlane.FRONT)
+/** An editable skin between two closed drawing profiles.  The profiles, not a copied mesh, remain the source of truth. */
+private data class LoftSurface(val id: Int, val first: Pair<ModelPlane, Int>, val second: Pair<ModelPlane, Int>, val colorIndex: Int = 0)
 private enum class JunctionKind { SPLIT_MEASUREMENT, SPLIT_GUIDE, JOIN_MEASUREMENTS, JOIN_GUIDES, JOIN_MEASURE_ENDPOINTS, JOIN_GUIDE_ENDPOINTS, MERGE_SHAPE_GUIDE, CLOSE_GUIDE_PATH, SHAPE_OVERLAP, CUT_SHAPE_LINE }
 private data class JunctionAction(val kind: JunctionKind, val firstId: Int, val secondId: Int, val point: Pt)
 private data class JunctionArm(val lineId: Int, val endpoint: Pt, val color: Color)
 /** Joining two crossing lines on the canvas: the parts (arms) blink until two are chosen to keep. */
 private data class JoinPick(val action: JunctionAction, val arms: List<JunctionArm>, val selected: Set<Int> = emptySet(), val keepRemaining: Boolean = false, val paths: List<List<Pt>> = emptyList())
-private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList(), val plane: ModelPlane = ModelPlane.FRONT, val stash: Map<ModelPlane, PlaneGeometry> = emptyMap(), val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList(), val itemGroups: List<List<Pair<ModelPlane, Int>>> = emptyList(), val models: List<ImportedModel> = emptyList())
+private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList(), val plane: ModelPlane = ModelPlane.FRONT, val stash: Map<ModelPlane, PlaneGeometry> = emptyMap(), val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList(), val itemGroups: List<List<Pair<ModelPlane, Int>>> = emptyList(), val models: List<ImportedModel> = emptyList(), val lofts: List<LoftSurface> = emptyList())
 /**
  * Where a plane's canvas sits in model space: canvas pixel ([originU], [originV]) is the plane's (0, 0) and the
  * canvas is [width] x [height] pixels. Cropping or growing a canvas moves the origin with the drawing, so the
@@ -284,7 +287,7 @@ private enum class ComparisonFigure(val description: String, val sizeMm: Double,
     STANDING("Standing person", 1700.0, 0.28f), SITTING("Sitting person", 1250.0, 0.75f), TOP("Person viewed from above", 500.0, 1f)
 }
 private data class PictureOptions(val figure: ComparisonFigure? = null, val sum: Boolean = false, val legend: Boolean = false, val guess: Boolean = false, val transparency: Int = 0)
-private data class SavedProject(val id: String, val name: String, val unit: String, val lines: List<MeasureLine>, val guides: List<GuideLine> = emptyList(), val guidesDetected: Boolean = false, val capturedAt: Long, val rotation: Float = 0f, val options: PictureOptions = PictureOptions(), val extrusions: List<Extrusion> = emptyList(), val blankScene: Boolean = false, val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList(), val itemGroups: List<List<Pair<ModelPlane, Int>>> = emptyList(), val models: List<ImportedModel> = emptyList())
+private data class SavedProject(val id: String, val name: String, val unit: String, val lines: List<MeasureLine>, val guides: List<GuideLine> = emptyList(), val guidesDetected: Boolean = false, val capturedAt: Long, val rotation: Float = 0f, val options: PictureOptions = PictureOptions(), val extrusions: List<Extrusion> = emptyList(), val blankScene: Boolean = false, val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList(), val itemGroups: List<List<Pair<ModelPlane, Int>>> = emptyList(), val models: List<ImportedModel> = emptyList(), val lofts: List<LoftSurface> = emptyList())
 /** A reusable flat outline. It can be inserted into any picture, then given material and depth there. */
 private data class SketchAsset(val id: String, val name: String, val guides: List<GuideLine>)
 private object SketchAssetStore {
@@ -753,7 +756,7 @@ private object ProjectStore {
         }) }
         val extrusions = JSONArray()
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
-        File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene); put("frames", JSONObject().apply { project.frames.forEach { (plane, f) -> put(plane.name, JSONObject().apply { put("u", f.originU); put("v", f.originV); put("w", f.width); put("h", f.height) }) } }); put("solidOps", JSONArray().apply { project.solidOps.forEach { op -> put(JSONObject().apply { put("targetPlane", op.target.first.name); put("target", op.target.second); put("toolPlane", op.tool.first.name); put("tool", op.tool.second); put("join", op.join); put("keepTool", op.keepTool); put("common", op.common) }) } }); put("groups", JSONArray().apply { project.itemGroups.forEach { group -> put(JSONArray().apply { group.forEach { (plane, id) -> put(JSONObject().apply { put("plane", plane.name); put("id", id) }) } }) } })
+        File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene); put("frames", JSONObject().apply { project.frames.forEach { (plane, f) -> put(plane.name, JSONObject().apply { put("u", f.originU); put("v", f.originV); put("w", f.width); put("h", f.height) }) } }); put("solidOps", JSONArray().apply { project.solidOps.forEach { op -> put(JSONObject().apply { put("targetPlane", op.target.first.name); put("target", op.target.second); put("toolPlane", op.tool.first.name); put("tool", op.tool.second); put("join", op.join); put("keepTool", op.keepTool); put("common", op.common) }) } }); put("groups", JSONArray().apply { project.itemGroups.forEach { group -> put(JSONArray().apply { group.forEach { (plane, id) -> put(JSONObject().apply { put("plane", plane.name); put("id", id) }) } }) } }); put("lofts", JSONArray().apply { project.lofts.forEach { loft -> put(JSONObject().apply { put("id", loft.id); put("firstPlane", loft.first.first.name); put("first", loft.first.second); put("secondPlane", loft.second.first.name); put("second", loft.second.second); put("color", loft.colorIndex) }) } })
             put("models", JSONArray().apply { project.models.forEach { m -> put(JSONObject().apply { put("id", m.id); put("name", m.name); put("x", m.center.x); put("y", m.center.y); put("z", m.center.z); put("scale", m.scale); put("rx", m.rx); put("ry", m.ry); put("rz", m.rz); put("color", m.argb); put("finish", m.finish.name)
                 put("turns", JSONArray().apply { m.turns.forEach { (axis, deg) -> put(JSONArray().apply { put(axis); put(deg) }) } }) }) } }) }.toString())
     }
@@ -845,6 +848,10 @@ private object ProjectStore {
             json.optJSONArray("models")?.let { models -> (0 until models.length()).map { i -> models.getJSONObject(i).let { m ->
                 ImportedModel(m.getInt("id"), m.optString("name", "Model"), Vec3(m.optDouble("x", 0.0), m.optDouble("y", 0.0), m.optDouble("z", 0.0)), m.optDouble("scale", 1.0), m.optDouble("rx", 0.0), m.optDouble("ry", 0.0), m.optDouble("rz", 0.0), m.optInt("color", 0xFF9E9E9E.toInt()), Finish.of(m.optString("finish")),
                     m.optJSONArray("turns")?.let { t -> (0 until t.length()).map { k -> t.getJSONArray(k).let { it.getInt(0) to it.getDouble(1) } } }.orEmpty())
+            } } }.orEmpty(),
+            json.optJSONArray("lofts")?.let { lofts -> (0 until lofts.length()).mapNotNull { i -> lofts.getJSONObject(i).let { loft ->
+                val first = loft.optInt("first", Int.MIN_VALUE); val second = loft.optInt("second", Int.MIN_VALUE)
+                if (first == Int.MIN_VALUE || second == Int.MIN_VALUE) null else LoftSurface(loft.optInt("id", i + 1), ModelPlane.of(loft.optString("firstPlane")) to first, ModelPlane.of(loft.optString("secondPlane")) to second, loft.optInt("color", 0))
             } } }.orEmpty())
     }
 }
@@ -1048,6 +1055,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun planeLines(plane: ModelPlane): List<MeasureLine> = if (plane == editPlane) lines.map { it.copy(plane = plane) } else planeStash[plane]?.lines.orEmpty()
     var planeFrames by remember { mutableStateOf(emptyMap<ModelPlane, PlaneFrame>()) }
     var solidOps by remember { mutableStateOf(emptyList<SolidOp>()) }
+    // An editable skin between two closed profiles. Its 3D mesh is regenerated from their points.
+    var lofts by remember { mutableStateOf(emptyList<LoftSurface>()) }
     // Items (lines, shapes, objects) grouped together, from any view: each item by its view and one of its line ids.
     var itemGroups by remember { mutableStateOf(emptyList<List<Pair<ModelPlane, Int>>>()) }
     // Select mode: several items from any view, for group, merge, cut, arrange, move and delete.
@@ -1209,7 +1218,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
     }
     fun pushUndo(includeImage: Boolean = false) {
-        val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels)
+        val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels, lofts)
         undoHistory = undoHistory + snapshot
     }
     fun pushNudgeUndo(selection: String) {
@@ -1268,7 +1277,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     /** Remembers the editor's size for Fit. Blank canvases are drawn white across the whole view, so they never need to grow. */
     fun fitCanvasToView(viewW: Float, viewH: Float) { if (!presentation) editorViewSize = Size(viewW, viewH) }
     fun startCrop() {
-        val snapshot = UndoSnapshot(if (editPlane == ModelPlane.FRONT) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps, itemGroups)
+        val snapshot = UndoSnapshot(if (editPlane == ModelPlane.FRONT) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels, lofts)
         val canvas = planeCanvas ?: return
         cropSession = snapshot; cropFrame = CropFrame(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat()); tool = Tool.CROP; draftStart = null; pendingEnd = null
     }
@@ -1362,7 +1371,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             bitmap = BitmapFactory.decodeFile(destination.absolutePath)
             projectId = id; projectName = imageDisplayName(context, uri).ifBlank { "Picture ${library.size + 1}" }
             projectCapturedAt = imageCaptureTime(destination)
-            unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); planeFrames = emptyMap(); solidOps = emptyList(); itemGroups = emptyList(); importedModels = emptyList(); importedMeshes = emptyMap(); selectedModelId = null; selectMode = false; pickedItems = emptyList(); lines = emptyList(); guides = emptyList(); guidesDetected = false; extrusions = emptyList(); selectedExtrusionId = null; scale = null; referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
+            unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); planeFrames = emptyMap(); solidOps = emptyList(); lofts = emptyList(); itemGroups = emptyList(); importedModels = emptyList(); importedMeshes = emptyMap(); selectedModelId = null; selectMode = false; pickedItems = emptyList(); lines = emptyList(); guides = emptyList(); guidesDetected = false; extrusions = emptyList(); selectedExtrusionId = null; scale = null; referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
             tool = Tool.NONE; zoom = 1f; pan = Offset.Zero; levelRotation = 0f; undoHistory = emptyList(); selectedLineId = null; selectedEndpoint = null
             ProjectStore.save(context, SavedProject(id, imageDisplayName(context, uri).ifBlank { "Picture ${library.size + 1}" }, unit, emptyList(), emptyList(), false, projectCapturedAt, levelRotation))
             library = ProjectStore.list(context)
@@ -1372,7 +1381,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val image = Bitmap.createBitmap(2000, 2000, Bitmap.Config.ARGB_8888).apply { eraseColor(AndroidColor.WHITE) }
         ProjectStore.imageFile(context, id).outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
         blankScene = true; bitmap = image; projectId = id; projectName = "Scene ${library.count { it.blankScene } + 1}"; projectCapturedAt = System.currentTimeMillis()
-        unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); planeFrames = emptyMap(); solidOps = emptyList(); itemGroups = emptyList(); importedModels = emptyList(); importedMeshes = emptyMap(); selectedModelId = null; selectMode = false; pickedItems = emptyList(); lines = emptyList(); guides = emptyList(); guidesDetected = true; extrusions = emptyList(); selectedExtrusionId = null
+        unit = defaultUnit; editPlane = ModelPlane.FRONT; planeStash = emptyMap(); planeFrames = emptyMap(); solidOps = emptyList(); lofts = emptyList(); itemGroups = emptyList(); importedModels = emptyList(); importedMeshes = emptyMap(); selectedModelId = null; selectMode = false; pickedItems = emptyList(); lines = emptyList(); guides = emptyList(); guidesDetected = true; extrusions = emptyList(); selectedExtrusionId = null
         scale = unitFactorMm(unit); referenceCount = 0; draftStart = null; pendingEnd = null; pictureOptions = PictureOptions()
         tool = Tool.NONE; zoom = 1f; pan = Offset.Zero; levelRotation = 0f; undoHistory = emptyList(); selectedLineId = null; selectedEndpoint = null; selectedVertices = emptyList()
         selectedGuideId = null; selectedGuideEndpoint = null; selectedWholeGuideId = null; selectedWholeLineId = null; selectedCurveId = null; selectedLabelId = null
@@ -1531,10 +1540,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     LaunchedEffect(projectId, scale, unit) {
         if (projectId != null && scale != null) extrusions = extrusions.map { extrusion -> extrusion.depthMm?.let { extrusionWithDepth(extrusion, it, scale, unit) } ?: extrusion }
     }
-    LaunchedEffect(projectId, projectName, lines, guides, guidesDetected, unit, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels) {
+    LaunchedEffect(projectId, projectName, lines, guides, guidesDetected, unit, projectCapturedAt, levelRotation, pictureOptions, extrusions, blankScene, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels, lofts) {
         scale = scaleFor(lines, editPlane)
         val front = planeGeometry(ModelPlane.FRONT)
-        projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, allLines(), allGuides(), guidesDetected, projectCapturedAt, levelRotation, pictureOptions, allExtrusions(), blankScene, planeFrames, solidOps, itemGroups, importedModels)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, front.guides, front.lines) }; library = ProjectStore.list(context) }
+        projectId?.let { id -> ProjectStore.save(context, SavedProject(id, projectName, unit, allLines(), allGuides(), guidesDetected, projectCapturedAt, levelRotation, pictureOptions, allExtrusions(), blankScene, planeFrames, solidOps, itemGroups, importedModels, lofts)); bitmap?.let { ProjectStore.writeThumbnail(context, id, it, front.guides, front.lines) }; library = ProjectStore.list(context) }
     }
     /** Zooms and centers the canvas on everything in this plane, including shapes from the other planes. */
     /** How far out the view may zoom: until everything drawn fits on screen (a bit of margin), no further. */
@@ -3588,7 +3597,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             bitmap = restored
             projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { restored.compress(Bitmap.CompressFormat.PNG, 100, it) } }
         }
-        editPlane = previous.plane; planeStash = previous.stash; planeFrames = previous.frames; solidOps = previous.solidOps; itemGroups = previous.itemGroups; importedModels = previous.models
+        editPlane = previous.plane; planeStash = previous.stash; planeFrames = previous.frames; solidOps = previous.solidOps; lofts = previous.lofts; itemGroups = previous.itemGroups; importedModels = previous.models
         pickedItems = emptyList(); selectedGhostPoints = emptyList(); pickedPoints = emptyList()
         lines = recalculate(previous.lines).map { line -> previous.lines.firstOrNull { it.id == line.id && (it.lengthSource == LengthSource.MANUAL || it.lengthSource == LengthSource.MEASURED) }?.let { line.copy(value = it.value) } ?: line }; guides = previous.guides; guidesDetected = previous.guidesDetected; extrusions = previous.extrusions; selectedExtrusionId = selectedExtrusionId?.takeIf { id -> extrusions.any { it.id == id } }; levelRotation = previous.rotation; unit = previous.unit; tool = previous.tool; referenceCount = lines.count { it.isReference }
         undoHistory = undoHistory.dropLast(1)
@@ -3605,7 +3614,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         viewerElapsedSeconds = 0
         show3d = true
         val curveDetail = viewerCurveDetail.coerceIn(1, 12)
-        ActionLog.add("3D build start: ${if (scopeObject == null) "scene" else "selected object"}; guides=${allGuides().size}, extrusions=${allExtrusions().size}, materials=${materials.size}, operations=${solidOps.size}, curveDetail=$curveDetail")
+        ActionLog.add("3D build start: ${if (scopeObject == null) "scene" else "selected object"}; guides=${allGuides().size}, extrusions=${allExtrusions().size}, lofts=${lofts.size}, materials=${materials.size}, operations=${solidOps.size}, curveDetail=$curveDetail")
         val allGuideSnapshot = allGuides(); val allExtrusionSnapshot = allExtrusions()
         val scopedExtrusion = scopeObject?.let { key -> allExtrusionSnapshot.firstOrNull { it.plane == key.first && it.id == key.second } }
         // An item preview must not be blocked by a broken or unfinished object
@@ -3613,7 +3622,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val guideSnapshot = scopedExtrusion?.let { e -> extrusionGuides(e, allGuideSnapshot) + holesInside(extrusionGuides(e, allGuideSnapshot), allGuideSnapshot) } ?: allGuideSnapshot
         val extrusionSnapshot = scopedExtrusion?.let(::listOf) ?: allExtrusionSnapshot
         val placedSnapshot = if (scopeObject == null) placedModels() else emptyList()
-        val opsSnapshot = if (scopeObject == null) solidOps else emptyList(); val materialSnapshot = materials.associateBy { it.id }; val setup = modelSetup(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
+        val opsSnapshot = if (scopeObject == null) solidOps else emptyList(); val loftSnapshot = if (scopeObject == null) lofts else emptyList(); val materialSnapshot = materials.associateBy { it.id }; val setup = modelSetup(); val modelUnit = unit; val measurementSnapshot = allLines().filterNot { it.isReference }; val openedProject = projectId
         val sheetEdges = guideSnapshot.count { it.materialId?.let(materialSnapshot::get)?.isSheet == true }
         val memberEdges = guideSnapshot.count { it.materialId?.let(materialSnapshot::get)?.isSheet == false }
         ActionLog.add("3D build input: closedShapes=${closedGuideShapes(guideSnapshot).size}, sheetEdges=$sheetEdges, memberEdges=$memberEdges")
@@ -3626,7 +3635,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 // Imported models join the drawing; a project of only imported models has no shapes to build.
                 // Preview prioritizes immediate feedback. Printable/export validation
                 // (especially pairwise overlap testing) happens only for export.
-                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true, previewCurveSteps = curveDetail, showDrawings = viewerShowDrawings) }
+                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true, previewCurveSteps = curveDetail, showDrawings = viewerShowDrawings, lofts = loftSnapshot) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
                 ActionLog.add("3D build phase: meshes=${built.meshes.size}, objects=${built.objects.size}, imported=${placedSnapshot.size}")
                 val model = ModelBuild(built.meshes + placedSnapshot.map { it.second }, built.objects, built.warnings, built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish })
@@ -3670,7 +3679,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
     }
     // While the 3D view is open, every change (undo, the exact-values dialog) rebuilds it.
-    LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, solidOps, materials, unit, importedModels) { if (show3d) open3dView(viewerScope) }
+    LaunchedEffect(lines, guides, extrusions, planeStash, planeFrames, solidOps, lofts, materials, unit, importedModels) { if (show3d) open3dView(viewerScope) }
     /** The 2D plane whose normal is closest to the direction currently seen in 3D. */
     fun closest2dPlane() : ModelPlane {
         val yaw = Math.toRadians(viewerCamera.yaw.toDouble())
@@ -4028,6 +4037,29 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         selectedWholeGuideId = firstId
         shapeEditId = firstId
         logToast(context, "Face combined: choose its material and thickness", Toast.LENGTH_SHORT).show()
+    }
+    /** Creates an editable surface between two closed outlines. The outlines remain the editable controls. */
+    fun loftPicked() {
+        val profiles = distinctPicked()
+        if (profiles.size != 2 || profiles.any { !isClosedShape(it) }) {
+            logToast(context, "Pick exactly two closed shapes to make a loft surface", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (profiles.any(::itemLocked)) {
+            logToast(context, "Unlock both shapes before making a loft", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (modelSetup().mapping(profiles[0].first) == null || modelSetup().mapping(profiles[1].first) == null) {
+            logToast(context, "Calibrate both drawing views before making a loft", Toast.LENGTH_LONG).show()
+            return
+        }
+        pushUndo()
+        val id = (lofts.maxOfOrNull { it.id } ?: 0) + 1
+        val color = itemGuides(profiles.first()).firstOrNull()?.colorIndex ?: 0
+        lofts = lofts + LoftSurface(id, profiles[0], profiles[1], color)
+        pickedItems = emptyList(); pickedPoints = emptyList()
+        ActionLog.add("loft created: profile ${profiles[0].second} to ${profiles[1].second}")
+        logToast(context, "Loft surface made — move either shape's points to reshape it", Toast.LENGTH_LONG).show()
     }
     /** Cut: the second picked item is cut out of the first. */
     fun cutPicked() {
@@ -4504,7 +4536,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }, { project ->
             BitmapFactory.decodeFile(ProjectStore.imageFile(context, project.id).absolutePath)?.let { loaded ->
                 blankScene = project.blankScene; bitmap = loaded; projectId = project.id; projectName = project.name; projectCapturedAt = project.capturedAt; levelRotation = project.rotation; undoHistory = emptyList(); unit = project.unit; editPlane = ModelPlane.FRONT; planeFrames = project.frames; solidOps = project.solidOps; itemGroups = project.itemGroups; selectedModelId = null
-                importedModels = project.models
+                importedModels = project.models; lofts = project.lofts
                 importedMeshes = project.models.mapNotNull { m -> runCatching { m.id to ModelImport.read("model.stl", ProjectStore.modelFile(context, project.id, m.id).readBytes()) }.getOrNull() }.toMap(); selectMode = false; pickedItems = emptyList(); fitPending = true
                 planeStash = ModelPlane.entries.filter { it != ModelPlane.FRONT }.associateWith { plane -> PlaneGeometry(project.lines.filter { it.plane == plane }, project.guides.filter { it.plane == plane }, project.extrusions.filter { it.plane == plane }) }.filterValues { it != PlaneGeometry() }
                 lines = project.lines.filter { it.plane == ModelPlane.FRONT }; guides = project.guides.filter { it.plane == ModelPlane.FRONT }; guidesDetected = project.guidesDetected; extrusions = project.extrusions.filter { it.plane == ModelPlane.FRONT }; selectedExtrusionId = null; selectedCurveId = null; pictureOptions = project.options; referenceCount = project.lines.count { it.isReference && it.plane == ModelPlane.FRONT }; scale = recomputeScale(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit) ?: if (project.blankScene) unitFactorMm(project.unit) else null; axisScale = axisScaleOf(project.lines.filter { it.plane == ModelPlane.FRONT }, project.unit); tool = Tool.NONE; zoom = 1f; pan = Offset.Zero
@@ -4614,6 +4646,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Spread V", R.drawable.ic_even_v, enabled = total >= 3) { showDistributionConfirm = false to true }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Place on surface", R.drawable.ic_cube, enabled = n == 2) { stickPickedShapeToObject() }
+                        ActionIcon("Loft", R.drawable.ic_cube, enabled = n == 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
@@ -7874,14 +7907,68 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
 private class ModelBuild(val meshes: List<Mesh>, val objects: List<Pair<ModelPlane, Int>>, val warnings: List<MeshIssue>, val finishes: List<Finish> = emptyList())
 
 /**
+ * Builds a two-sided preview skin from two closed paths.  It deliberately keeps no independent copy of points:
+ * moving a source profile is enough to reshape the loft on the next frame.
+ */
+private fun buildLoftMeshes(lofts: List<LoftSurface>, guides: List<GuideLine>, setup: ModelSetup): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
+    fun profile(key: Pair<ModelPlane, Int>): List<Vec3>? {
+        val mapping = setup.mapping(key.first) ?: return null
+        val shape = closedGuideShapes(guides.filter { it.plane == key.first }).firstOrNull { path -> path.any { it.id == key.second } } ?: return null
+        val points = shape.flatMap { guide ->
+            val sampled = guidePoints(guide)
+            sampled.dropLast(1).mapIndexed { index, point ->
+                val t = index.toDouble() / (sampled.lastIndex.coerceAtLeast(1))
+                mapping.model(point, guide.startZMm + (guide.endZMm - guide.startZMm) * t)
+            }
+        }
+        return points.takeIf { it.size >= 3 }
+    }
+    fun resample(path: List<Vec3>, count: Int): List<Vec3> {
+        val edges = path.indices.map { i -> (path[(i + 1) % path.size] - path[i]).length }
+        val perimeter = edges.sum().takeIf { it > 1e-8 } ?: return List(count) { path.first() }
+        return List(count) { index ->
+            var distance = perimeter * index / count; var edge = 0
+            while (edge < edges.lastIndex && distance > edges[edge]) { distance -= edges[edge]; edge++ }
+            val t = (distance / edges[edge].coerceAtLeast(1e-8)).coerceIn(0.0, 1.0)
+            path[edge] * (1.0 - t) + path[(edge + 1) % path.size] * t
+        }
+    }
+    fun score(a: List<Vec3>, b: List<Vec3>): Double = a.indices.sumOf { i -> val d = a[i] - b[i]; d dot d }
+    return lofts.mapNotNull { loft ->
+        val a = profile(loft.first) ?: return@mapNotNull null
+        val initial = profile(loft.second) ?: return@mapNotNull null
+        val count = 48
+        val first = resample(a, count)
+        val secondBase = resample(initial, count)
+        var best: List<Vec3>? = null; var bestScore = Double.POSITIVE_INFINITY
+        listOf(secondBase, secondBase.reversed()).forEach { oriented ->
+            repeat(count) { shift ->
+                val candidate = List(count) { i -> oriented[(i + shift) % count] }
+                val value = score(first, candidate)
+                if (value < bestScore) { bestScore = value; best = candidate }
+            }
+        }
+        val second = best ?: return@mapNotNull null
+        val triangles = mutableListOf<Triangle>()
+        repeat(count) { i ->
+            val next = (i + 1) % count
+            // Each face is doubled with opposite winding, so it remains visible from inside and outside.
+            triangles += Triangle(i, next, count + i); triangles += Triangle(next, count + next, count + i)
+            triangles += Triangle(count + i, next, i); triangles += Triangle(count + i, count + next, next)
+        }
+        (loft.first.first to (Int.MIN_VALUE + loft.id)) to Mesh("Loft surface ${loft.id}", first + second, triangles, guideColor(loft.colorIndex).toArgb())
+    }
+}
+
+/**
  * Builds every plane's solids and applies the 3D cuts and joins. With [strict], anything that would make a bad
  * print (including objects that overlap without being joined) throws; otherwise overlaps come back as warnings.
  */
-private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap(), preview: Boolean = false, previewCurveSteps: Int? = null, showDrawings: Boolean = false): ModelBuild {
+private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, strict: Boolean, materials: Map<String, Material> = emptyMap(), preview: Boolean = false, previewCurveSteps: Int? = null, showDrawings: Boolean = false, lofts: List<LoftSurface> = emptyList()): ModelBuild {
     val objects = mutableListOf<Extrusion>()
     val members = buildMembers(guides, materials, setup, previewCurveSteps = previewCurveSteps, showDrawings = showDrawings)
     // A drawing made only of bars and pipes needs no closed shape.
-    val specs = if (members.isNotEmpty()) buildSolidSpecs(guides, extrusions, setup, objects, strict = false) else buildSolidSpecs(guides, extrusions, setup, objects)
+    val specs = if (members.isNotEmpty() || lofts.isNotEmpty()) buildSolidSpecs(guides, extrusions, setup, objects, strict = false) else buildSolidSpecs(guides, extrusions, setup, objects)
     val issues = mutableListOf<MeshIssue>()
     // Holes (shapes cut out of a shape and lying wholly inside it) are left open right through the object.
     val raw = specs.map { spec ->
@@ -7908,8 +7995,9 @@ private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops
     fun sheetOf(i: Int): Material? = objects[i].let { e -> guides.filter { it.plane == e.plane && it.id in e.guideIds }.firstNotNullOfOrNull { g -> g.materialId?.let(materials::get)?.takeIf { it.isSheet } } }
     val shapeMeshes = kept.map { i -> val mesh = combined[i]!!; sheetOf(i)?.let { mesh.copy(argb = it.argb) } ?: mesh }
     val memberFinishes = guides.filter { g -> g.materialId?.let(materials::get)?.isSheet == false }.associate { (it.plane to -(it.id + 1)) to materials.getValue(it.materialId!!).finish }
-    return ModelBuild(shapeMeshes + members.map { it.second }, kept.map { keys[it] } + members.map { it.first }, issues + overlaps,
-        kept.map { sheetOf(it)?.finish ?: Finish.PLAIN } + members.map { memberFinishes[it.first] ?: Finish.PLAIN })
+    val loftMeshes = buildLoftMeshes(lofts, guides, setup)
+    return ModelBuild(shapeMeshes + members.map { it.second } + loftMeshes.map { it.second }, kept.map { keys[it] } + members.map { it.first } + loftMeshes.map { it.first }, issues + overlaps,
+        kept.map { sheetOf(it)?.finish ?: Finish.PLAIN } + members.map { memberFinishes[it.first] ?: Finish.PLAIN } + List(loftMeshes.size) { Finish.PLAIN })
 }
 
 private fun buildMeshes(guides: List<GuideLine>, extrusions: List<Extrusion>, ops: List<SolidOp>, setup: ModelSetup, materials: Map<String, Material> = emptyMap(), imported: List<Mesh> = emptyList()): List<Mesh> {
