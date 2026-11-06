@@ -4052,37 +4052,42 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             setPlaneShapes(plane, geometry.guides.map { guide -> if (guide.id in ids) guide.copy(startZMm = levelMm, endZMm = levelMm) else guide }, geometry.extrusions)
         }
         ActionLog.add("loft level set: ${keys.size} profile(s) at ${levelMm} mm")
-        logToast(context, "Loft level set. Select the two closed profiles, then tap Loft.", Toast.LENGTH_LONG).show()
+        logToast(context, "Loft level set. Set every other profile one at a time to a different level, then select all and tap Loft.", Toast.LENGTH_LONG).show()
     }
     fun loftPicked() {
         val profiles = distinctPicked()
-        if (profiles.size != 2 || profiles.any { !isClosedShape(it) }) {
-            logToast(context, "Pick exactly two closed shapes to make a loft surface", Toast.LENGTH_LONG).show()
+        if (profiles.size < 2 || profiles.any { !isClosedShape(it) }) {
+            logToast(context, "Pick two or more closed shapes to make a loft surface", Toast.LENGTH_LONG).show()
             return
         }
         if (profiles.any(::itemLocked)) {
-            logToast(context, "Unlock both shapes before making a loft", Toast.LENGTH_SHORT).show()
+            logToast(context, "Unlock every selected shape before making a loft", Toast.LENGTH_SHORT).show()
             return
         }
-        if (modelSetup().mapping(profiles[0].first) == null || modelSetup().mapping(profiles[1].first) == null) {
-            logToast(context, "Calibrate both drawing views before making a loft", Toast.LENGTH_LONG).show()
+        if (profiles.any { modelSetup().mapping(it.first) == null }) {
+            logToast(context, "Calibrate every drawing view used by the loft", Toast.LENGTH_LONG).show()
             return
         }
-        if (profiles[0].first == profiles[1].first) {
-            fun level(key: Pair<ModelPlane, Int>) = itemGuides(key).flatMap { listOf(it.startZMm, it.endZMm) }.average()
-            if (abs(level(profiles[0]) - level(profiles[1])) < 0.01) {
-                logToast(context, "These shapes are on the same flat plane. Set different Loft levels first, then tap Loft.", Toast.LENGTH_LONG).show()
+        fun level(key: Pair<ModelPlane, Int>) = itemGuides(key).flatMap { listOf(it.startZMm, it.endZMm) }.average()
+        val ordered = if (profiles.map { it.first }.distinct().size == 1) {
+            val levels = profiles.map(::level)
+            if (levels.zipWithNext().any { abs(it.first - it.second) < 0.01 }) {
+                logToast(context, "Selected profiles share a Loft level. Set each profile separately (for example 0, 50, 100), then select all again.", Toast.LENGTH_LONG).show()
                 return
             }
-        }
+            profiles.sortedBy(::level)
+        } else profiles
+        var nextId = (lofts.maxOfOrNull { it.id } ?: 0) + 1
+        val pairs = ordered.zipWithNext().filterNot { (a, b) -> lofts.any { (it.first == a && it.second == b) || (it.first == b && it.second == a) } }
+        if (pairs.isEmpty()) { logToast(context, "Those profiles are already connected by Loft", Toast.LENGTH_SHORT).show(); return }
         pushUndo()
-        val id = (lofts.maxOfOrNull { it.id } ?: 0) + 1
-        val color = itemGuides(profiles.first()).firstOrNull()?.colorIndex ?: 0
-        val extendsExisting = lofts.any { loft -> profiles.any { it == loft.first || it == loft.second } }
-        lofts = lofts + LoftSurface(id, profiles[0], profiles[1], color)
+        val extendsExisting = lofts.any { loft -> ordered.any { it == loft.first || it == loft.second } }
+        lofts = lofts + pairs.map { (first, second) ->
+            LoftSurface(nextId++, first, second, itemGuides(first).firstOrNull()?.colorIndex ?: 0)
+        }
         pickedItems = emptyList(); pickedPoints = emptyList()
-        ActionLog.add("loft created: profile ${profiles[0].second} to ${profiles[1].second}")
-        logToast(context, if (extendsExisting) "Loft section added — the surface now continues through the shared profile" else "Loft surface made — move either shape's points to reshape it", Toast.LENGTH_LONG).show()
+        ActionLog.add("loft created: ${pairs.size} section(s), ${ordered.size} profiles")
+        logToast(context, if (pairs.size > 1) "${pairs.size} Loft sections made through ${ordered.size} profiles" else if (extendsExisting) "Loft section added — the surface now continues through the shared profile" else "Loft surface made — move either shape's points to reshape it", Toast.LENGTH_LONG).show()
     }
     /** Cut: the second picked item is cut out of the first. */
     fun cutPicked() {
@@ -4581,7 +4586,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     when {
                         pickedItems.isEmpty() && pickedPoints.isEmpty() -> "Loft: draw two closed shapes, place one at another depth with Loft level, then select both and tap Loft"
                         profiles.size == 1 && isClosedShape(profiles.first()) -> "Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
-                        profiles.size == 2 && profiles.all(::isClosedShape) -> "Loft ready: set different Loft levels if both shapes are in the same view, then tap Loft. Moving either profile reshapes the surface."
+                        profiles.size >= 2 && profiles.all(::isClosedShape) -> "Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
                         else -> "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · Loft needs two closed shapes"
                     }
                 }
@@ -4678,8 +4683,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Spread V", R.drawable.ic_even_v, enabled = total >= 3) { showDistributionConfirm = false to true }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Place on surface", R.drawable.ic_cube, enabled = n == 2) { stickPickedShapeToObject() }
-                        ActionIcon("Loft level", R.drawable.ic_move_point, enabled = n >= 1 && pickedPoints.isEmpty() && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftLevelItems = distinctPicked() }
-                        ActionIcon(if (n == 1) "Loft 1/2" else "Loft", R.drawable.ic_cube, enabled = n == 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
+                        ActionIcon("Loft level", R.drawable.ic_move_point, enabled = n == 1 && pickedPoints.isEmpty() && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftLevelItems = distinctPicked() }
+                        ActionIcon(if (n == 1) "Loft 1/2" else "Loft $n", R.drawable.ic_cube, enabled = n >= 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
                         ActionIcon("Lofts ${lofts.size}", R.drawable.ic_join, enabled = lofts.isNotEmpty()) { showLofts = true }
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
