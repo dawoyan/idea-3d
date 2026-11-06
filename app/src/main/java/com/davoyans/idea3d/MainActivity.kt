@@ -1059,6 +1059,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var solidOps by remember { mutableStateOf(emptyList<SolidOp>()) }
     // An editable skin between two closed profiles. Its 3D mesh is regenerated from their points.
     var lofts by remember { mutableStateOf(emptyList<LoftSurface>()) }
+    var showLoftGuides by remember { mutableStateOf(true) }
+    var showLofts by remember { mutableStateOf(false) }
     // Items (lines, shapes, objects) grouped together, from any view: each item by its view and one of its line ids.
     var itemGroups by remember { mutableStateOf(emptyList<List<Pair<ModelPlane, Int>>>()) }
     // Select mode: several items from any view, for group, merge, cut, arrange, move and delete.
@@ -4076,10 +4078,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         pushUndo()
         val id = (lofts.maxOfOrNull { it.id } ?: 0) + 1
         val color = itemGuides(profiles.first()).firstOrNull()?.colorIndex ?: 0
+        val extendsExisting = lofts.any { loft -> profiles.any { it == loft.first || it == loft.second } }
         lofts = lofts + LoftSurface(id, profiles[0], profiles[1], color)
         pickedItems = emptyList(); pickedPoints = emptyList()
         ActionLog.add("loft created: profile ${profiles[0].second} to ${profiles[1].second}")
-        logToast(context, "Loft surface made — move either shape's points to reshape it", Toast.LENGTH_LONG).show()
+        logToast(context, if (extendsExisting) "Loft section added — the surface now continues through the shared profile" else "Loft surface made — move either shape's points to reshape it", Toast.LENGTH_LONG).show()
     }
     /** Cut: the second picked item is cut out of the first. */
     fun cutPicked() {
@@ -4464,7 +4467,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -4640,6 +4643,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         }
                         if (!isBlankCanvas()) ActionIcon("Simplify", R.drawable.ic_idea3d, enabled = !simpleTraceRunning) { showSimpleTraceCommand = true }
                         if (bitmap != null) ActionIcon("Assets", R.drawable.ic_clone) { showSketchAssets = true }
+                        if (lofts.isNotEmpty()) ActionIcon(if (showLoftGuides) "Hide loft lines" else "Show loft lines", R.drawable.ic_join, on = showLoftGuides) { showLoftGuides = !showLoftGuides }
                     }
                 }
                 val modifying = !show3d && !selectMode && pick == null && tool == Tool.ADJUST &&
@@ -4676,6 +4680,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Place on surface", R.drawable.ic_cube, enabled = n == 2) { stickPickedShapeToObject() }
                         ActionIcon("Loft level", R.drawable.ic_move_point, enabled = n >= 1 && pickedPoints.isEmpty() && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftLevelItems = distinctPicked() }
                         ActionIcon(if (n == 1) "Loft 1/2" else "Loft", R.drawable.ic_cube, enabled = n == 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
+                        ActionIcon("Lofts ${lofts.size}", R.drawable.ic_join, enabled = lofts.isNotEmpty()) { showLofts = true }
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
@@ -4783,7 +4788,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -4897,6 +4902,12 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             loftLevelItems = null
         }
     }
+    if (showLofts) LoftManagerDialog(lofts, onDismiss = { showLofts = false }, onRemove = { loft ->
+        pushUndo()
+        lofts = lofts - loft
+        ActionLog.add("loft removed: ${loft.id}")
+        logToast(context, "Loft removed; the two editable profiles remain", Toast.LENGTH_SHORT).show()
+    })
     if (showDxfExport) {
         val viewName = if (editPlane in mirroredViews) oppositeLabel(editPlane) else editPlane.label
         DxfExportDialog(viewName, hasMeshes = importedModels.isNotEmpty(), onDismiss = { showDxfExport = false }) { includeLabels ->
@@ -6261,7 +6272,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), loftLines: List<Pair<Pt, Pt>> = emptyList(), ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -6597,6 +6608,9 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     // A line seen end-on is a single point here: mark it so it can't vanish.
                     if (chosen || pts.size >= 4 && hypot((pts[pts.size - 2] - pts[0]).toDouble(), (pts[pts.size - 1] - pts[1]).toDouble()) * fit < 6) drawCircle(if (chosen) Color(0xFF1565C0) else Color(0xFF6E7A76), if (chosen) 12f else 8f, viewAt(Pt(pts[0], pts[1])))
                 }
+                // Cyan dashed rulings are not geometry: they are the editable Loft's correspondence guides.
+                val loftStroke = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 9f))
+                loftLines.forEach { (a, b) -> drawLine(Color(0xFF00A6A6), viewAt(a), viewAt(b), strokeWidth = 2.5f, pathEffect = loftStroke) }
                 // Picked items: a wide orange band for a whole object (shape, broken line, 3D object), a thin one for a single line.
                 pickedOutlines.forEach { (pts, whole) -> pts.zipWithNext().forEach { (a, b) ->
                     val from = viewAt(Pt(a.x, a.y)); val to = viewAt(Pt(b.x, b.y))
@@ -7378,6 +7392,21 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     }, confirmButton = { TextButton(enabled = value != null, onClick = { onSave(value!!) }) { Text("Set level") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
+@Composable private fun LoftManagerDialog(lofts: List<LoftSurface>, onDismiss: () -> Unit, onRemove: (LoftSurface) -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Loft surfaces") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Cyan dashed lines in 2D show the profile correspondence. The original shapes remain the controls.")
+            lofts.forEach { loft ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Loft ${loft.id}: ${loft.first.first.label} shape ${loft.first.second} → ${loft.second.first.label} shape ${loft.second.second}", modifier = Modifier.weight(1f), fontSize = 13.sp)
+                    TextButton(onClick = { onRemove(loft) }) { Text("Remove") }
+                }
+            }
+            Text("To extend a surface: select one end profile and one new closed shape, give the new shape a Loft level, then tap Loft. It adds the next surface section.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+        }
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
+}
+
 @Composable private fun ZDirectionPicker(back: Boolean, onChange: (Boolean) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         listOf(false to DepthWords.toward, true to DepthWords.away).forEach { (direction, label) ->
@@ -8007,6 +8036,22 @@ private fun buildLoftMeshes(lofts: List<LoftSurface>, guides: List<GuideLine>, s
             triangles += Triangle(count + i, next, i); triangles += Triangle(count + i, count + next, next)
         }
         (loft.first.first to (Int.MIN_VALUE + loft.id)) to Mesh("Loft surface ${loft.id}", first + second, triangles, guideColor(loft.colorIndex).toArgb())
+    }
+}
+
+/** Sparse cyan ruling lines show, in every 2D view, which profile points a Loft connects. */
+private fun loftGuideLines(lofts: List<LoftSurface>, guides: List<GuideLine>, setup: ModelSetup, view: ModelPlane): List<Pair<Pt, Pt>> {
+    val here = setup.mapping(view) ?: return emptyList()
+    fun profile(key: Pair<ModelPlane, Int>): List<Vec3>? {
+        val mapping = setup.mapping(key.first) ?: return null
+        val shape = closedGuideShapes(guides.filter { it.plane == key.first }).firstOrNull { path -> path.any { it.id == key.second } } ?: return null
+        return shape.flatMap { guide -> listOf(mapping.model(guide.start, guide.startZMm), mapping.model(guide.end, guide.endZMm)) }.distinct().takeIf { it.size >= 3 }
+    }
+    return lofts.flatMap { loft ->
+        val a = profile(loft.first) ?: return@flatMap emptyList()
+        val b = profile(loft.second) ?: return@flatMap emptyList()
+        // Only a handful of rulings: they communicate the connection without hiding the drawing.
+        (0 until 8).map { i -> here.pixel(a[i * a.size / 8 % a.size]) to here.pixel(b[i * b.size / 8 % b.size]) }
     }
 }
 
