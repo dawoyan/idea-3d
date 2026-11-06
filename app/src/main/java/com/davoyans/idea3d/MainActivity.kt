@@ -4042,6 +4042,45 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         shapeEditId = firstId
         logToast(context, "Face combined: choose its material and thickness", Toast.LENGTH_SHORT).show()
     }
+    /**
+     * The direct selection command for making a surface.  Four loose rectangle sides are
+     * intentionally accepted: their end points become the contour of a new editable face.
+     * The original construction lines stay in place, so they can still be used as guides or
+     * deleted afterwards without damaging the new face.
+     */
+    fun makeShapeFromSelection() {
+        if (pickedPoints.size >= 3) {
+            combinePickedPoints()
+            return
+        }
+        val items = distinctPicked()
+        if (items.size < 3) {
+            logToast(context, "Select 3+ points or 3+ lines, then tap Make shape", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (items.any(::itemLocked)) {
+            logToast(context, "Unlock the selected lines before making a shape", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // A line-selection item normally contains one guide.  Do not silently turn a whole
+        // existing shape (or several shapes) into an unrelated polygon.
+        if (items.any { itemGuides(it).size != 1 }) {
+            logToast(context, "Use Select lines, or select 3+ corner points", Toast.LENGTH_LONG).show()
+            return
+        }
+        val planes = items.map { it.first }.distinct()
+        if (planes.size != 1) {
+            logToast(context, "Make a shape from lines in one view", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val selectedEnds = items.flatMap { key ->
+            itemGuides(key).flatMap { guide ->
+                listOf(Triple(key.first, guide.id, true), Triple(key.first, guide.id, false))
+            }
+        }.distinct()
+        pickedPoints = selectedEnds
+        combinePickedPoints()
+    }
     /** Creates an editable surface between two closed outlines. The outlines remain the editable controls. */
     fun setLoftLevel(keys: List<Pair<ModelPlane, Int>>, levelMm: Double) {
         if (keys.any(::itemLocked)) { logToast(context, "Unlock the profile before changing its Loft level", Toast.LENGTH_SHORT).show(); return }
@@ -4617,9 +4656,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val axesHint = if (show3d) "" else if (editPlane in mirroredViews) when (editPlane) { ModelPlane.FRONT -> "X ←  Y ↑  from behind"; ModelPlane.TOP -> "X →  Z ↑ front  from below"; ModelPlane.PROFILE -> "Z → front  Y ↑  from the left" }
                 else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
             StatusStrip(tool, drawingEnd = draftStart != null, hint = editHint, primaryAction = if (selectMode) ({
-                // Keep this out of the scrolling command row: a face starts with points,
-                // not whole items, and must be discoverable before anything is selected.
-                ActionIcon("Combine ${pickedPoints.size}/3", R.drawable.ic_join, enabled = pickedPoints.size >= 3) { combinePickedPoints() }
+                // This is deliberately always in the first command slot: it works from
+                // either selected corner points or selected loose lines.
+                val selectedLines = distinctPicked().count { itemGuides(it).size == 1 }
+                ActionIcon("Make shape", R.drawable.ic_join, enabled = pickedPoints.size >= 3 || selectedLines >= 3) { makeShapeFromSelection() }
             }) else null) {
                 val red = Color(0xFFB3261E)
                 // Always first, in the same place: fit everything in view, and show or hide sizes.
