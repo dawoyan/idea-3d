@@ -1019,6 +1019,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var ghostDragLast by remember { mutableStateOf<Pt?>(null) }
     var showPictureEdit by remember { mutableStateOf(false) }
     var showPointDepth by remember { mutableStateOf(false) }
+    // Sets the whole closed profile's position along its own viewing axis before a Loft.
+    var loftLevelItems by remember { mutableStateOf<List<Pair<ModelPlane, Int>>?>(null) }
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
     val snackbarHost = remember { SnackbarHostState() }
     var viewerObjects by remember { mutableStateOf<List<Pair<ModelPlane, Int>>>(emptyList()) }
@@ -4039,6 +4041,17 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         logToast(context, "Face combined: choose its material and thickness", Toast.LENGTH_SHORT).show()
     }
     /** Creates an editable surface between two closed outlines. The outlines remain the editable controls. */
+    fun setLoftLevel(keys: List<Pair<ModelPlane, Int>>, levelMm: Double) {
+        if (keys.any(::itemLocked)) { logToast(context, "Unlock the profile before changing its Loft level", Toast.LENGTH_SHORT).show(); return }
+        pushUndo()
+        keys.groupBy { it.first }.forEach { (plane, profiles) ->
+            val geometry = planeGeometry(plane)
+            val ids = profiles.flatMap { itemGuides(it).map { guide -> guide.id } }.toSet()
+            setPlaneShapes(plane, geometry.guides.map { guide -> if (guide.id in ids) guide.copy(startZMm = levelMm, endZMm = levelMm) else guide }, geometry.extrusions)
+        }
+        ActionLog.add("loft level set: ${keys.size} profile(s) at ${levelMm} mm")
+        logToast(context, "Loft level set. Select the two closed profiles, then tap Loft.", Toast.LENGTH_LONG).show()
+    }
     fun loftPicked() {
         val profiles = distinctPicked()
         if (profiles.size != 2 || profiles.any { !isClosedShape(it) }) {
@@ -4052,6 +4065,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         if (modelSetup().mapping(profiles[0].first) == null || modelSetup().mapping(profiles[1].first) == null) {
             logToast(context, "Calibrate both drawing views before making a loft", Toast.LENGTH_LONG).show()
             return
+        }
+        if (profiles[0].first == profiles[1].first) {
+            fun level(key: Pair<ModelPlane, Int>) = itemGuides(key).flatMap { listOf(it.startZMm, it.endZMm) }.average()
+            if (abs(level(profiles[0]) - level(profiles[1])) < 0.01) {
+                logToast(context, "These shapes are on the same flat plane. Set different Loft levels first, then tap Loft.", Toast.LENGTH_LONG).show()
+                return
+            }
         }
         pushUndo()
         val id = (lofts.maxOfOrNull { it.id } ?: 0) + 1
@@ -4553,7 +4573,15 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         })
         else Column(Modifier.padding(padding).fillMaxSize()) {
             val editHint = when {
-                selectMode -> if (pickedItems.isEmpty() && pickedPoints.isEmpty()) "Drag a box to pick whole items and loose points inside it, or tap points, lines, shapes or objects. Then Align or Space them from the top row" else "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · drag one to move all, arrows step"
+                selectMode -> {
+                    val profiles = distinctPicked()
+                    when {
+                        pickedItems.isEmpty() && pickedPoints.isEmpty() -> "Loft: draw two closed shapes, place one at another depth with Loft level, then select both and tap Loft"
+                        profiles.size == 1 && isClosedShape(profiles.first()) -> "Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
+                        profiles.size == 2 && profiles.all(::isClosedShape) -> "Loft ready: set different Loft levels if both shapes are in the same view, then tap Loft. Moving either profile reshapes the surface."
+                        else -> "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · Loft needs two closed shapes"
+                    }
+                }
                 growDrag != null -> growDrag!!.let { g -> planeGeometry(g.handle.key.first).extrusions.firstOrNull { it.id == g.extrusionId }?.depthMm?.let { "Depth ${formatMeasure(it / unitFactorMm(unit), unit)} $unit · drag along the arrow" } ?: "Drag along the arrow" }
                 ovalDrag != null -> "Let go when the size is right"
                 !show3d && tool == Tool.ADJUST && !selectMode && !growMode && ovalPieces() != null -> "Drag a square handle to resize the circle (side ones: width, top/bottom: height, for an oval), or set sizes in Properties"
@@ -4646,7 +4674,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Spread V", R.drawable.ic_even_v, enabled = total >= 3) { showDistributionConfirm = false to true }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
                         ActionIcon("Place on surface", R.drawable.ic_cube, enabled = n == 2) { stickPickedShapeToObject() }
-                        ActionIcon("Loft", R.drawable.ic_cube, enabled = n == 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
+                        ActionIcon("Loft level", R.drawable.ic_move_point, enabled = n >= 1 && pickedPoints.isEmpty() && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftLevelItems = distinctPicked() }
+                        ActionIcon(if (n == 1) "Loft 1/2" else "Loft", R.drawable.ic_cube, enabled = n == 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
@@ -4859,6 +4888,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
             showPointDepth = false
         })
+    }
+    loftLevelItems?.let { profiles ->
+        val values = profiles.flatMap { key -> itemGuides(key).flatMap { listOf(it.startZMm, it.endZMm) } }
+        val common = values.firstOrNull()?.takeIf { first -> values.all { abs(it - first) < 0.000001 } }
+        LoftLevelDialog(unit, profiles.size, common, onDismiss = { loftLevelItems = null }) { level ->
+            setLoftLevel(profiles, level)
+            loftLevelItems = null
+        }
     }
     if (showDxfExport) {
         val viewName = if (editPlane in mirroredViews) oppositeLabel(editPlane) else editPlane.label
@@ -7326,6 +7363,19 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
             Text("Changes appear in the 3D view and STL export.", fontSize = 12.sp)
         }
     }, confirmButton = { TextButton(enabled = count >= 2 && (!positionEdited || value != null && value.isFinite()) && (!thicknessEdited || thicknessValue != null && thicknessValue.isFinite() && thicknessValue > 0), onClick = { onSave(if (!positionEdited) null else if (back) -value!! else value!!, if (thicknessEdited) thicknessValue else null) }) { Text("Apply") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+/** Places an entire closed profile on a parallel plane before it is skinned by Loft. */
+@Composable private fun LoftLevelDialog(unit: String, count: Int, initialMm: Double?, onDismiss: () -> Unit, onSave: (Double) -> Unit) {
+    val lengthUnit = LengthUnit.of(unit)
+    var text by remember { mutableStateOf(initialMm?.let { formatLength(it, lengthUnit, 2, withUnit = false) } ?: "") }
+    val value = parseLengthMm(text, lengthUnit)
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Loft level") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Moves ${if (count == 1) "this profile" else "$count profiles"} as a whole along its depth axis. Two profiles in the same view need different levels before Loft can connect them.")
+            OutlinedTextField(text, { text = it }, label = { Text("Profile level (${lengthUnit.symbol})") }, supportingText = { Text("Example: bottom 0, top 400. This is not material thickness.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+        }
+    }, confirmButton = { TextButton(enabled = value != null, onClick = { onSave(value!!) }) { Text("Set level") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable private fun ZDirectionPicker(back: Boolean, onChange: (Boolean) -> Unit) {
