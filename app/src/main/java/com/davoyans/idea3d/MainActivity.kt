@@ -4547,7 +4547,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
+        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = if (selectMode && pickedItems.isEmpty() && pickedPoints.isEmpty()) "Select ${selectionMode.label.lowercase()}" else selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
             // Select first, then Modify: the selected line or shape stays selected, as a whole.
             if (it == Tool.ADJUST && selectedGuideId != null && selectedWholeGuideId == null) selectedWholeGuideId = selectedGuideId
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
@@ -4583,11 +4583,20 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val editHint = when {
                 selectMode -> {
                     val profiles = distinctPicked()
+                    val selectedKind = when {
+                        profiles.isNotEmpty() && profiles.all(::isClosedShape) -> "shape"
+                        profiles.isNotEmpty() && profiles.all { itemGuides(it).size == 1 } -> "line"
+                        profiles.isNotEmpty() -> "item"
+                        pickedPoints.isNotEmpty() -> "point"
+                        else -> "item"
+                    }
+                    val selectedCount = if (profiles.isNotEmpty()) profiles.size else pickedPoints.size
+                    val selectedSummary = if (selectedCount == 0) "" else "Selected $selectedCount $selectedKind${if (selectedCount == 1) "" else "s"} · "
                     when {
                         pickedItems.isEmpty() && pickedPoints.isEmpty() -> "Loft: draw two closed shapes, place one at another depth with Loft level, then select both and tap Loft"
-                        profiles.size == 1 && isClosedShape(profiles.first()) -> "Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
-                        profiles.size >= 2 && profiles.all(::isClosedShape) -> "Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
-                        else -> "${pickedItems.size} item${if (pickedItems.size == 1) "" else "s"}, ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"} · Loft needs two closed shapes"
+                        profiles.size == 1 && isClosedShape(profiles.first()) -> "${selectedSummary}Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
+                        profiles.size >= 2 && profiles.all(::isClosedShape) -> "${selectedSummary}Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
+                        else -> "${selectedSummary}Loft needs two closed shapes"
                     }
                 }
                 growDrag != null -> growDrag!!.let { g -> planeGeometry(g.handle.key.first).extrusions.firstOrNull { it.id == g.extrusionId }?.depthMm?.let { "Depth ${formatMeasure(it / unitFactorMm(unit), unit)} $unit · drag along the arrow" } ?: "Drag along the arrow" }
@@ -4682,7 +4691,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Spread H", R.drawable.ic_even_h, enabled = total >= 3) { showDistributionConfirm = true to true }
                         ActionIcon("Spread V", R.drawable.ic_even_v, enabled = total >= 3) { showDistributionConfirm = false to true }
                         ActionIcon(if (pickedIsGroup()) "Ungroup" else "Group", R.drawable.ic_group, enabled = n >= 2, onClick = ::groupPicked)
-                        ActionIcon("Place on surface", R.drawable.ic_cube, enabled = n == 2) { stickPickedShapeToObject() }
+                        ActionIcon(if (surfaceAttachItems != null) "Cancel stick" else "Stick selected", R.drawable.ic_cube, enabled = surfaceAttachItems != null || n >= 1 && pickedPoints.isEmpty() && !pickedItems.any(::itemLocked), on = surfaceAttachItems != null) {
+                            if (surfaceAttachItems != null) surfaceAttachItems = null else startSurfaceAttach(distinctPicked())
+                        }
                         ActionIcon("Loft level", R.drawable.ic_move_point, enabled = n == 1 && pickedPoints.isEmpty() && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftLevelItems = distinctPicked() }
                         ActionIcon(if (n == 1) "Loft 1/2" else "Loft $n", R.drawable.ic_cube, enabled = n >= 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
                         ActionIcon("Lofts ${lofts.size}", R.drawable.ic_join, enabled = lofts.isNotEmpty()) { showLofts = true }
@@ -4810,19 +4821,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 label = { Text(if (stickToVisibleSurface) "Sticking to surface" else "Stick to surface") },
                 leadingIcon = { Icon(painterResource(R.drawable.ic_cube), null, Modifier.size(18.dp)) },
                 modifier = Modifier.align(Alignment.TopEnd).padding(10.dp)
-            )
-            val attachKeys = when {
-                surfaceAttachItems != null -> surfaceAttachItems!!
-                selectMode && pickedItems.isNotEmpty() -> pickedItems
-                else -> (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id }?.let(::homeKey) }?.let(::listOf).orEmpty()
-            }
-            if (attachKeys.isNotEmpty()) AssistChip(
-                onClick = {
-                    if (surfaceAttachItems != null) surfaceAttachItems = null else startSurfaceAttach(attachKeys)
-                },
-                label = { Text(if (surfaceAttachItems != null) "Tap surface · Cancel" else "Stick selected") },
-                leadingIcon = { Icon(painterResource(R.drawable.ic_cube), null, Modifier.size(18.dp)) },
-                modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
             )
             }
             // Leveling and perspective correction work on the photo, so they belong to the front plane.
