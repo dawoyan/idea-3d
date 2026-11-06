@@ -4547,7 +4547,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = if (selectMode && pickedItems.isEmpty() && pickedPoints.isEmpty()) "Select ${selectionMode.label.lowercase()}" else selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
+        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
             // Select first, then Modify: the selected line or shape stays selected, as a whole.
             if (it == Tool.ADJUST && selectedGuideId != null && selectedWholeGuideId == null) selectedWholeGuideId = selectedGuideId
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
@@ -6189,7 +6189,14 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
             if (tool == Tool.LINES) ToolIconButton("Broken", R.drawable.ic_broken_line, lineDrawing == LineDrawing.BROKEN, { val selected = lineDrawing == LineDrawing.BROKEN; onLineDrawing(LineDrawing.BROKEN); onTool(if (selected) Tool.NONE else Tool.LINES) }, Modifier.weight(1f), description = "Broken guide line", onLongPress = { lineMenuOpen = true })
             // Picking several things, and finding anything, sit with the tools so they never move.
             Box(Modifier.weight(1f)) {
-                ToolIconButton(selectLabel, R.drawable.ic_select, selectActive, onSelect, Modifier.fillMaxWidth(), description = "Select: ${selectionMode.label}", onLongPress = { selectMenuOpen = true })
+                val selectIcon = when (selectionMode) {
+                    SelectionMode.POINTS -> R.drawable.ic_move_point
+                    SelectionMode.LINES -> R.drawable.ic_guide_line
+                    SelectionMode.SHAPES -> R.drawable.ic_outline
+                    SelectionMode.ALL -> R.drawable.ic_select_area
+                    SelectionMode.VISIBLE -> R.drawable.ic_cube
+                }
+                ToolIconButton(selectLabel, selectIcon, selectActive, onSelect, Modifier.fillMaxWidth(), description = "Select: ${selectionMode.label}", onLongPress = { selectMenuOpen = true })
                 DropdownMenu(expanded = selectMenuOpen, onDismissRequest = { selectMenuOpen = false }) {
                     Text("Select", Modifier.padding(horizontal = 16.dp, vertical = 10.dp), fontWeight = FontWeight.Bold)
                     SelectionMode.entries.forEach { mode -> DropdownMenuItem(text = { Text(if (mode == selectionMode) "${mode.label}  ✓" else mode.label) }, onClick = { selectMenuOpen = false; onSelectionMode(mode) }) }
