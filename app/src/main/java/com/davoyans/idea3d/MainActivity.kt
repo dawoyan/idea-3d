@@ -975,6 +975,12 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var draggingExtrusion by remember { mutableStateOf(false) }
     var vanishingDragLast by remember { mutableStateOf<Pt?>(null) }
     var shapeEditId by remember { mutableStateOf<Int?>(null) }
+    // When several closed faces were welded together, material is deliberately
+    // assigned face-by-face.  Keeping this separate from shapeEditId prevents a
+    // sheet choice from accidentally being copied to the open construction lines
+    // in the same weld group.
+    var materialSurfacePicker by remember { mutableStateOf<List<List<GuideLine>>?>(null) }
+    var shapeMaterialSurfaceIds by remember { mutableStateOf<Set<Int>?>(null) }
     var extrusionEditId by remember { mutableStateOf<Int?>(null) }
     var showHelp by remember { mutableStateOf(false) }
     var activePoint by remember { mutableStateOf<Endpoint?>(null) }
@@ -4475,6 +4481,16 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             setPlaneShapes(key.first, geometry.guides, geometry.extrusions + e)
         }
     }
+    /** Opens material editing for one face, or asks which welded faces should receive it. */
+    fun editShapeMaterial(guide: GuideLine) {
+        val surfaces = closedGuideShapes(guides).filter { surface -> sameGuideObject(surface.first(), guide) }
+        if (surfaces.size <= 1) {
+            shapeMaterialSurfaceIds = null
+            shapeEditId = guide.id
+        } else {
+            materialSurfacePicker = surfaces
+        }
+    }
     /** The cut face of each bar or pipe whose line points into the screen, so a post seen from above shows its tube. */
     fun memberSections(): List<Pair<Int, List<List<Pt>>>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList()
@@ -4824,11 +4840,15 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         // One picked line or shape: choose what it is made of.
                         val pickedGuide = pickedItems.singleOrNull()?.takeIf { pickedPoints.isEmpty() }?.let { (plane, id) -> guides.firstOrNull { it.id == if (plane == editPlane) id else encodedId(plane, id) } }
                         ActionIcon("Material", R.drawable.ic_save_material, enabled = pickedGuide != null && !pickedItems.any(::itemLocked)) {
-                            pickedGuide?.let { g -> if (closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), g) }) shapeEditId = g.id else lineMaterialId = g.id }
+                            pickedGuide?.let { g -> if (closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), g) }) editShapeMaterial(g) else lineMaterialId = g.id }
                         }
                         ActionIcon(if (allLocked) "Unlock" else "Lock", R.drawable.ic_select, enabled = n > 0 && pickedPoints.isEmpty()) {
                             setItemsLocked(pickedItems, !allLocked)
                         }
+                        // Cloning creates another item; it belongs with multi-item selection,
+                        // rather than with Modify's direct geometry editing tools.
+                        ActionIcon("Clone lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
+                        ActionIcon("Clone all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
                         TurnIcons()
                         ActionIcon("Align H", R.drawable.ic_align_horizontal, enabled = total >= 2) { arrangePicked(horizontal = true, distribute = false) }
                         ActionIcon("Align V", R.drawable.ic_align_vertical, enabled = total >= 2) { arrangePicked(horizontal = false, distribute = false) }
@@ -4845,17 +4865,16 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
-                        ActionIcon("Copy lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
-                        ActionIcon("Copy all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total > 0) { pickedItems = emptyList(); pickedPoints = emptyList() }
                         ViewIcons()
                     }
                     else -> {
-                        // Most used first: Material, Grow, Outline, Turn, Clone, Weld (Properties and Delete are in the title bar).
+                        // Modify contains direct edits to the selected geometry. Commands which
+                        // create another item (Clone) deliberately live in Select instead.
                         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
                             val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
                             val itemKey = homeKey(guide)
-                            ActionIcon("Material", R.drawable.ic_save_material, enabled = !itemLocked(itemKey)) { if (inShape) shapeEditId = guide.id else lineMaterialId = guide.id }
+                            ActionIcon("Material", R.drawable.ic_save_material, enabled = !itemLocked(itemKey)) { if (inShape) editShapeMaterial(guide) else lineMaterialId = guide.id }
                             ActionIcon(if (itemLocked(itemKey)) "Unlock" else "Lock", R.drawable.ic_select) { setItemsLocked(listOf(itemKey), !itemLocked(itemKey)) }
                             if (inShape) ActionIcon("Save asset", R.drawable.ic_save_material) {
                                 val outline = closedGuideShapes(guides).firstOrNull { path -> path.any { sameGuideObject(it, guide) } }.orEmpty()
@@ -4877,8 +4896,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         }
                         TurnIcons()
                         if (tool == Tool.ADJUST && selectedGuideEndpoint == null && selectedCurveId == null) selectedWholeGuideId?.let { wholeId ->
-                            ActionIcon("Clone lines", R.drawable.ic_clone) { cloneSelected(false) }
-                            ActionIcon("Clone all", R.drawable.ic_clone_filled) { cloneSelected(true) }
                             // Weld this line to every line it touches (an end on the other line, or the other's end on it).
                             ActionIcon("Weld", R.drawable.ic_merge) {
                                 guides.firstOrNull { it.id == wholeId }?.let { g ->
@@ -5077,18 +5094,31 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             pushUndo(); importedModels = importedModels.filterNot { it.id == id }; selectedModelId = null; modelDialogId = null
         }) { updated -> pushUndo(); importedModels = importedModels.map { if (it.id == id) updated else it }; modelDialogId = null }
     }
+    materialSurfacePicker?.let { surfaces ->
+        MaterialSurfacePicker(surfaces, onDismiss = { materialSurfacePicker = null }) { selected ->
+            materialSurfacePicker = null
+            shapeMaterialSurfaceIds = selected
+            shapeEditId = selected.firstOrNull()
+        }
+    }
     shapeEditId?.let { id ->
         val selected = guides.firstOrNull { it.id == id }
-        val path = selected?.let { target -> closedGuideShapes(guides).firstOrNull { group -> sameGuideObject(group.first(), target) } }
+        val path = selected?.let { target -> closedGuideShapes(guides).firstOrNull { group -> group.any { it.id == target.id } } }
         if (path != null) {
           val points = shapePoints(path)
           val left = points.minOf { it.x }; val top = points.minOf { it.y }
           val width = (points.maxOf { it.x } - left).coerceAtLeast(0.001f); val height = (points.maxOf { it.y } - top).coerceAtLeast(0.001f)
-          val shapeIds = guides.filter { sameGuideObject(it, path.first()) }.map { it.id }.toSet()
+          val shapeIds = path.map { it.id }.toSet()
+          // Material can be applied to several selected welded faces, but geometry
+          // editing remains scoped to the face that opened this editor.
+          val materialIds = shapeMaterialSurfaceIds?.let { selected ->
+              closedGuideShapes(guides).filter { it.first().id in selected }.flatten().map { it.id }.toSet()
+          } ?: shapeIds
+          val materialExtrusionIds = extrusions.filter { extrusion -> extrusion.guideIds.any { it in materialIds } }.map { it.id }.toSet()
           val shapeExtrusion = extrusions.firstOrNull { it.guideIds.any { id -> id in shapeIds } }
-          val shapeGuides = guides.filter { sameGuideObject(it, path.first()) }
+          val shapeGuides = guides.filter { it.id in shapeIds }
           val current = shapeGuides.firstNotNullOfOrNull { g -> materials.firstOrNull { it.id == g.materialId } }
-          ShapeEditDialog(path.first(), shapeExtrusion, guides, extrusions, unit, scale, width, height, materials, MadeOf(current?.id, current != null && !current.isSheet), onDismiss = { shapeEditId = null }, onSave = { color, transparency, widthValue, heightValue, widthEdited, heightEdited, depthValue, depthEdited, positionZ, made ->
+          ShapeEditDialog(path.first(), shapeExtrusion, guides, extrusions, unit, scale, width, height, materials, MadeOf(current?.id, current != null && !current.isSheet), onDismiss = { shapeEditId = null; shapeMaterialSurfaceIds = null }, onSave = { color, transparency, widthValue, heightValue, widthEdited, heightEdited, depthValue, depthEdited, positionZ, made ->
             pushUndo()
             // Choosing a material must not reapply the displayed dimensions.
             val targetWidth = if (widthEdited) widthValue?.let { value -> scale?.let { value * it } } else null
@@ -5099,7 +5129,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val round = isCircleShape(path)
             val ax = if (round) left + width / 2f else left; val ay = if (round) top + height / 2f else top
             fun resize(point: Pt) = Pt(ax + (point.x - ax) * sx, ay + (point.y - ay) * sy)
-            val ids = guides.filter { sameGuideObject(it, path.first()) }.map { it.id }.toSet()
+            val ids = shapeIds
             val changed = abs(sx - 1f) > 0.0001f || abs(sy - 1f) > 0.0001f
             guides = guides.map { guide -> if (guide.id in ids) guide.copy(start = resize(guide.start), end = resize(guide.end), curveMid = guide.curveMid?.let(::resize), colorIndex = color, fillTransparency = if (guide.pathId == path.first().pathId) (if (transparency == 100 && made.materialId != null && !made.frame) null else transparency) else guide.fillTransparency, lengthMm = if (changed) null else guide.lengthMm, shapeWidthMm = if (guide.id == path.first().id && widthEdited) widthValue?.times(unitFactorMm(unit)) else guide.shapeWidthMm, shapeHeightMm = if (guide.id == path.first().id && heightEdited) heightValue?.times(unitFactorMm(unit)) else guide.shapeHeightMm) else guide }
             extrusions = extrusions.map { extrusion -> if (extrusion.guideIds.any { it in ids }) { val resized = extrusion.copy(origin = resize(extrusion.origin), handle = resize(extrusion.handle)); resized.depthMm?.let { extrusionWithDepth(resized, it, scale, unit) } ?: resized } else extrusion }
@@ -5112,19 +5142,20 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             if (linesOnly && shapeExtrusion != null) extrusions = extrusions.filterNot { it.id == shapeExtrusion.id }
             if (!linesOnly && depthEdited && shapeExtrusion == null && depthValue != null && depthValue > 0) giveDepth(listOf(homeKey(path.first())), depthValue * unitFactorMm(unit))
             val madeOf = materials.firstOrNull { it.id == made.materialId }
-            if (made != MadeOf(current?.id, current != null && !current.isSheet)) {
-                guides = guides.map { if (it.id in ids) it.copy(materialId = madeOf?.id, materialTurnDeg = 0.0) else it }
+            if (made != MadeOf(current?.id, current != null && !current.isSheet) || shapeMaterialSurfaceIds != null) {
+                guides = guides.map { if (it.id in materialIds) it.copy(materialId = madeOf?.id, materialTurnDeg = 0.0) else it }
                 val sheetMm = madeOf?.sheetMm
                 when {
                     // A sheet is a 3D object as thick as the sheet.
-                    sheetMm != null -> if (shapeExtrusion != null) extrusions = extrusions.map { if (it.id == shapeExtrusion.id) extrusionWithDepth(it, sheetMm, scale, unit) else it }
+                    sheetMm != null -> if (materialExtrusionIds.isNotEmpty()) extrusions = extrusions.map { if (it.id in materialExtrusionIds) extrusionWithDepth(it, sheetMm, scale, unit) else it }
                         else giveDepth(listOf(homeKey(path.first())), sheetMm)
                     // A frame is only its edges.
-                    made.frame && shapeExtrusion != null -> extrusions = extrusions.filterNot { it.id == shapeExtrusion.id }
+                    made.frame && materialExtrusionIds.isNotEmpty() -> extrusions = extrusions.filterNot { it.id in materialExtrusionIds }
                 }
             }
             if (shapeExtrusion != null && positionZ != null) extrusions = extrusions.map { if (it.id == shapeExtrusion.id) it.copy(positionZMm = positionZ * unitFactorMm(unit)) else it }
             shapeEditId = null
+            shapeMaterialSurfaceIds = null
           })
         }
     }
@@ -7704,6 +7735,34 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
 /** What a closed shape is made of: nothing, a sheet that fills it, or bars or pipes along its edges (a frame). */
 private data class MadeOf(val materialId: String?, val frame: Boolean)
 
+/** Chooses the closed faces in a weld group that receive the next material choice. */
+@Composable private fun MaterialSurfacePicker(surfaces: List<List<GuideLine>>, onDismiss: () -> Unit, onApply: (Set<Int>) -> Unit) {
+    val all = surfaces.map { it.first().id }.toSet()
+    var selected by remember(surfaces) { mutableStateOf(all) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Apply material to surfaces") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("These welded faces stay independent. Choose the surfaces that should receive the same material.", fontSize = 13.sp, color = Color(0xFF4D5A57))
+                TextButton(onClick = { selected = if (selected.size == all.size) emptySet() else all }) {
+                    Text(if (selected.size == all.size) "Clear all" else "Select all")
+                }
+                surfaces.forEachIndexed { index, surface ->
+                    val id = surface.first().id
+                    val pointCount = shapePoints(surface).size
+                    Row(Modifier.fillMaxWidth().clickable { selected = if (id in selected) selected - id else selected + id }.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = id in selected, onCheckedChange = { checked -> selected = if (checked) selected + id else selected - id })
+                        Text("Surface ${index + 1} ($pointCount corners)", Modifier.padding(start = 8.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(enabled = selected.isNotEmpty(), onClick = { onApply(selected) }) { Text("Next") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
 @Composable private fun ShapeEditDialog(guide: GuideLine, extrusion: Extrusion?, guides: List<GuideLine>, extrusions: List<Extrusion>, unit: String, scale: Double?, width: Float, height: Float, materials: List<Material>, madeOf: MadeOf, onDismiss: () -> Unit, onSave: (Int, Int?, Double?, Double?, Boolean, Boolean, Double?, Boolean, Double?, MadeOf) -> Unit) {
     var made by remember(guide.id) { mutableStateOf(madeOf) }
     var color by remember(guide.id) { mutableIntStateOf(guide.colorIndex) }
@@ -8124,12 +8183,20 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
  */
 private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>? = null, previewCurveSteps: Int? = null, showDrawings: Boolean = false): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
     val counts = HashMap<String, Int>()
+    // A sheet only replaces edges that actually bound a drawable face.  Older
+    // projects and welded wireframes can have a sheet assigned before their
+    // faces are made; rendering those as nothing made the whole 3D object appear
+    // to break apart. Keep such construction edges visible as slim material bars.
+    val sheetFaceEdges = drawableGuideShapes(guides).flatten().map { it.id }.toSet()
     return guides.flatMap { guide ->
         // Sheets belong to closed shapes; only bars and pipes follow a line.
         // A thin neutral bar makes unmaterialed drawing guides visible in 3D.
         // It is preview-only and is never included in exports.
         val assigned = guide.materialId?.let(materials::get)
         val material = assigned?.takeUnless { it.isSheet }
+            ?: assigned?.takeIf { it.isSheet && guide.id !in sheetFaceEdges }?.let { sheet ->
+                Material("sheet-edge-${sheet.id}", "${sheet.name} edge", MemberProfile(ProfileKind.ROUND_BAR, 3.0, 3.0), sheet.argb, finish = sheet.finish)
+            }
             ?: if (assigned == null && showDrawings) Material("preview-drawing", "Drawing", MemberProfile(ProfileKind.ROUND_BAR, 3.0, 3.0), 0xFF2563EB.toInt()) else return@flatMap emptyList()
         val mapping = setup.mapping(guide.plane) ?: return@flatMap emptyList()
         val name = "${material.name} ${counts.merge(material.id, 1, Int::plus)}"
