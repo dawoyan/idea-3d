@@ -174,7 +174,7 @@ import com.davoyans.idea3d.core.SolidOperation
 import com.davoyans.idea3d.core.Vec3
 
 private enum class Tool { NONE, CALIBRATE, MEASURE, LINES, ADJUST, CROP }
-private enum class SelectionMode(val label: String) { POINTS("Points"), LINES("Lines"), SHAPES("Shapes"), ALL("All"), VISIBLE("Visible surface") }
+private enum class SelectionMode(val label: String) { POINTS("Points"), LINES("Lines"), SHAPES("Shapes"), OBJECTS("Objects"), ALL("All"), VISIBLE("Visible surface") }
 /**
  * An arrow for growing a shape into a 3D object (or changing its depth): [anchor] and [dir] in this view's canvas.
  * [ownView] is the single arrow in the shape's own view (drag up = deeper); otherwise [front] says which side it pulls.
@@ -2413,10 +2413,17 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 val geometry = planeGeometry(key.first); val ids = itemGuides(key).map { it.id }.toSet()
                 return closedGuideShapes(geometry.guides).any { path -> path.any { it.id == key.second || it.id in ids } }
             }
+            fun objectItem(key: Pair<ModelPlane, Int>): Pair<ModelPlane, Int>? {
+                val geometry = planeGeometry(key.first)
+                val ids = itemGuides(key).map { it.id }.toSet()
+                val extrusion = geometry.extrusions.firstOrNull { e -> e.guideIds.any { it in ids } } ?: return null
+                return extrusionGuides(extrusion, geometry.guides).firstOrNull()?.let { key.first to it.id }
+            }
             when (selectionMode) {
                 SelectionMode.POINTS -> Unit
                 SelectionMode.LINES -> item?.takeIf { !closedItem(it) }?.let(::togglePicked)
                 SelectionMode.SHAPES -> item?.takeIf(::closedItem)?.let(::togglePicked)
+                SelectionMode.OBJECTS -> item?.let(::objectItem)?.let(::togglePicked)
                 SelectionMode.ALL, SelectionMode.VISIBLE -> item?.let(::togglePicked)
             }
             item?.let { ActionLog.add("select ${selectionMode.name.lowercase()} ${it.first.label} line ${it.second}; picked items=${pickedItems.size}, points=${pickedPoints.size}") }
@@ -4714,6 +4721,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 selectMode -> {
                     val profiles = distinctPicked()
                     val selectedKind = when {
+                        profiles.isNotEmpty() && profiles.all { extrusionOf(it) != null } -> "object"
                         profiles.isNotEmpty() && profiles.all(::isClosedShape) -> "shape"
                         profiles.isNotEmpty() && profiles.all { itemGuides(it).size == 1 } -> "line"
                         profiles.isNotEmpty() -> "item"
@@ -4723,7 +4731,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     val selectedCount = if (profiles.isNotEmpty()) profiles.size else pickedPoints.size
                     val selectedSummary = if (selectedCount == 0) "" else "Selected $selectedCount $selectedKind${if (selectedCount == 1) "" else "s"} · "
                     when {
-                        pickedItems.isEmpty() && pickedPoints.isEmpty() -> "Loft: draw two closed shapes, place one at another depth with Loft level, then select both and tap Loft"
+                        pickedItems.isEmpty() && pickedPoints.isEmpty() -> "Select points, lines, shapes, or objects"
                         profiles.size == 1 && isClosedShape(profiles.first()) -> "${selectedSummary}Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
                         profiles.size >= 2 && profiles.all(::isClosedShape) -> "${selectedSummary}Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
                         else -> "${selectedSummary}Loft needs two closed shapes"
@@ -6337,6 +6345,7 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
                     SelectionMode.POINTS -> R.drawable.ic_move_point
                     SelectionMode.LINES -> R.drawable.ic_guide_line
                     SelectionMode.SHAPES -> R.drawable.ic_outline
+                    SelectionMode.OBJECTS -> R.drawable.ic_cube
                     SelectionMode.ALL -> R.drawable.ic_select_area
                     SelectionMode.VISIBLE -> R.drawable.ic_cube
                 }
@@ -6353,14 +6362,14 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
 }
 @OptIn(ExperimentalFoundationApi::class)
 @Composable private fun ToolIconButton(label: String, icon: Int, selected: Boolean, action: () -> Unit, modifier: Modifier, enabled: Boolean = true, description: String = label, onLongPress: (() -> Unit)? = null) {
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(modifier.height(62.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             Modifier.size(42.dp)
                 .background(if (selected) Color(0xFFE2ECE9) else Color.Transparent, CircleShape)
                 .combinedClickable(enabled = enabled, onClick = { ActionLog.add("tool $label"); action() }, onLongClick = onLongPress?.let { f -> { ActionLog.add("hold $label"); f() } }),
             contentAlignment = Alignment.Center
         ) { Icon(painterResource(icon), contentDescription = description, tint = Color.Unspecified, modifier = Modifier.size(26.dp)) }
-        Text(label, fontSize = 11.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, color = if (enabled) Color(0xFF173C39) else Color(0xFF8A9691))
+        Text(label, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, color = if (enabled) Color(0xFF173C39) else Color(0xFF8A9691))
     }
 }
 /** Modify (the editing tool): an icon whose border blinks orange while it is on. */
@@ -7720,8 +7729,9 @@ private data class MadeOf(val materialId: String?, val frame: Boolean)
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Shape properties") }, text = {
         Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(shapeWidth, { if (decimalInputPattern.matches(it)) { shapeWidth = it; widthEdited = true } }, label = { Text("Width ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
-                OutlinedTextField(shapeHeight, { if (decimalInputPattern.matches(it)) { shapeHeight = it; heightEdited = true } }, label = { Text("Height ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                OutlinedTextField(shapeWidth, { if (decimalInputPattern.matches(it)) { shapeWidth = it; widthEdited = true } }, label = { Text("W ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                OutlinedTextField(shapeHeight, { if (decimalInputPattern.matches(it)) { shapeHeight = it; heightEdited = true } }, label = { Text("H ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                if (extrusion != null) OutlinedTextField(depth, { if (decimalInputPattern.matches(it)) { depth = it; depthEdited = true } }, label = { Text("D ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
             }
             // A sheet fills the shape at its thickness; a frame turns each edge into a bar or pipe.
             Text("Made of", fontWeight = FontWeight.Medium)
@@ -7742,7 +7752,7 @@ private data class MadeOf(val materialId: String?, val frame: Boolean)
             materials.filterNot { it.isSheet }.forEach { Choice(MadeOf(it.id, true), it, "Frame of lines: ${it.name}") }
             if (made.frame) Text("Each edge becomes this bar or pipe; the shape itself has no body.", fontSize = 12.sp, color = Color(0xFF4D5A57))
             // Every closed shape can be a 3D object: give it a depth here (a sheet sets its own thickness).
-            if (!made.frame && materials.none { it.id == made.materialId } && transparency != 100)
+            if (extrusion == null && !made.frame && materials.none { it.id == made.materialId } && transparency != 100)
                 OutlinedTextField(depth, { if (decimalInputPattern.matches(it)) { depth = it; depthEdited = true } }, label = { Text("Depth ${DepthWords.axis} ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             if (extrusion != null) {
                 OutlinedTextField(zDistance, { if (decimalInputPattern.matches(it)) { zDistance = it; zEdited = true } }, label = { Text(if (zBack) "${DepthWords.away} by ($unit)" else "${DepthWords.toward} by ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
