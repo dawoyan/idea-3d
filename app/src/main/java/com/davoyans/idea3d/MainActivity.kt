@@ -1030,6 +1030,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var viewerModel by remember { mutableStateOf<ViewerMesh?>(null) }
     val snackbarHost = remember { SnackbarHostState() }
     var viewerObjects by remember { mutableStateOf<List<Pair<ModelPlane, Int>>>(emptyList()) }
+    // An entry is present when the matching 3D-view object came from an OBJ/STL/3MF
+    // file instead of from a drawn extrusion. Keeping this alongside viewerObjects
+    // lets the viewer open the correct properties dialog when the imported mesh is tapped.
+    var viewerImportedIds by remember { mutableStateOf<List<Int?>>(emptyList()) }
+    var openImportedModelAfterImport by remember { mutableStateOf(false) }
     // Null = full scene from the main view; a key = temporary item-only preview.
     var viewerScope by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
     // Several fast taps can start several mesh builds. Only the newest build may
@@ -1455,10 +1460,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 val upright = !fileName.lowercase().endsWith(".obj")
                 pushUndo()
                 importedMeshes = importedMeshes + (modelId to mesh)
-                importedModels = importedModels + ImportedModel(modelId, mesh.name, center, rx = if (upright) -90.0 else 0.0)
+                // Imported geometry should read as a distinct scene object, not as a
+                // neutral construction rectangle in the 2D views.
+                importedModels = importedModels + ImportedModel(modelId, mesh.name, center, rx = if (upright) -90.0 else 0.0, argb = 0xFF3F7CAC.toInt())
                 selectedModelId = modelId
                 val (low, high) = mesh.bounds; val f = java.text.DecimalFormat("0.#")
-                logToast(context, "Imported ${mesh.name}: ${mesh.triangles.size} triangles, ${f.format(high.x - low.x)} × ${f.format(high.y - low.y)} × ${f.format(high.z - low.z)} mm. Tap it twice for its size and position.", Toast.LENGTH_LONG).show()
+                ActionLog.add("3D import: ${mesh.name}; triangles=${mesh.triangles.size}; type=${fileName.substringAfterLast('.', "OBJ")}")
+                logToast(context, "Imported ${mesh.name}: ${mesh.triangles.size} triangles. Opening its 3D view — tap it there for size, position, turn and color.", Toast.LENGTH_LONG).show()
+                openImportedModelAfterImport = true
             }.onFailure { logToast(context, "Could not import: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
@@ -3729,30 +3738,41 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true, previewCurveSteps = curveDetail, showDrawings = viewerShowDrawings, lofts = loftSnapshot) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
                 ActionLog.add("3D build phase: meshes=${built.meshes.size}, objects=${built.objects.size}, imported=${placedSnapshot.size}")
-                val model = ModelBuild(built.meshes + placedSnapshot.map { it.second }, built.objects, built.warnings, built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish })
+                val importedStart = built.meshes.size
+                val model = ModelBuild(
+                    built.meshes + placedSnapshot.map { it.second },
+                    // Keep a one-to-one object slot for every imported mesh. The plane/id
+                    // placeholder is never used for editing; viewerImportedIds below owns it.
+                    built.objects + placedSnapshot.map { ModelPlane.FRONT to Int.MIN_VALUE },
+                    built.warnings,
+                    built.meshes.indices.map { built.finishes.getOrNull(it) ?: Finish.PLAIN } + placedSnapshot.map { it.first.finish }
+                )
                 val shown = scopeObject?.let { key -> model.objects.indices.filter { model.objects[it] == key } } ?: model.meshes.indices.toList()
                 if (shown.isEmpty()) throw IllegalArgumentException("That item has no 3D material or depth yet")
                 val meshes = shown.map { model.meshes[it] }
                 if (meshes.isEmpty()) throw IllegalArgumentException(if (scopeObject == null) "No valid 3D objects in this scene" else "This item has no valid 3D mesh")
                 val shownObjects = if (scopeObject == null) model.objects else shown.map { model.objects[it] }
+                val shownImportedIds = shown.map { meshIndex ->
+                    if (meshIndex >= importedStart) placedSnapshot.getOrNull(meshIndex - importedStart)?.first?.id else null
+                }
                 val warnings = model.warnings.map { it.toString() }
                 meshes.forEach { mesh -> repeat(mesh.triangles.size) { colors.add(mesh.argb) } }
                 val finishes = meshes.flatMapIndexed { i, mesh -> List(mesh.triangles.size) { model.finishes.getOrNull(shown[i]) ?: Finish.PLAIN } }
                 val stl = ModelExport.stl(meshes)
                 ActionLog.add("3D build phase: viewer mesh has ${meshes.sumOf { it.triangles.size }} triangles")
-                // Imported models can't be tapped for exact values in 3D (index -1); their dialog is in the 2D views.
-                val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { if (shown[index] < model.objects.size) index else -1 } }.toIntArray()
+                // Every displayed mesh is pickable, including imported OBJ/STL/3MF objects.
+                val triangleObjects = meshes.flatMapIndexed { index, mesh -> List(mesh.triangles.size) { index } }.toIntArray()
                 val measurements = if (scopeObject != null) emptyList() else measurementSnapshot.mapNotNull { line ->
                     val mapping = setup.mapping(line.plane) ?: return@mapNotNull null
                     val value = if (line.lengthSource == LengthSource.UNKNOWN) "?" else "${formatMeasure(line.value, modelUnit)}${if (line.hasDepth()) "*" else ""} $modelUnit"
                     val a = mapping.model(line.start, line.startZMm); val b = mapping.model(line.end, line.endZMm)
                     ViewerMeasurement(a.x.toFloat(), a.y.toFloat(), b.x.toFloat(), b.y.toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), a.z.toFloat(), b.z.toFloat())
                 }
-                ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes) to shownObjects
+                Triple(ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes), shownObjects, shownImportedIds)
             } }
             if (projectId != openedProject || request != viewerRequest) { ActionLog.add("3D build discarded: a newer request replaced it"); return@launch }
-            result.onSuccess { (mesh, ids) ->
-                viewerModel = mesh; viewerObjects = ids; viewerBuilding = false; show3d = true
+            result.onSuccess { (mesh, ids, importedIds) ->
+                viewerModel = mesh; viewerObjects = ids; viewerImportedIds = importedIds; viewerBuilding = false; show3d = true
                 ActionLog.add("3D build ready: ${ids.size} objects in ${System.currentTimeMillis() - startedAt} ms")
             }
                 .onFailure { error ->
@@ -3761,6 +3781,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     logToast(context, "3D view: $detail", Toast.LENGTH_LONG).show()
                     viewerBuilding = false; show3d = false
                 }
+        }
+    }
+    // A local function has to be declared before it can be called, so imports ask
+    // for their 3D view here, after the object was committed to Compose state.
+    LaunchedEffect(openImportedModelAfterImport) {
+        if (openImportedModelAfterImport) {
+            openImportedModelAfterImport = false
+            open3dView()
         }
     }
     LaunchedEffect(viewerBuilding, viewerBuildStartedAt) {
@@ -4951,7 +4979,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val model = viewerModel
             if (show3d && model != null) ThreeDViewerPane(
                 model, viewerCamera,
-                onEditObject = { index -> if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index },
+                onEditObject = { index ->
+                    viewerImportedIds.getOrNull(index)?.let { importedId ->
+                        selectedModelId = importedId; modelDialogId = importedId
+                    } ?: if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index
+                },
                 detail = viewerCurveDetail,
                 onDetailChange = { viewerCurveDetail = it.roundToInt() },
                 onDetailChangeFinished = { open3dView(viewerScope) },
