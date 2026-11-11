@@ -5481,7 +5481,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
     )
     }
-    if (showPictureEdit && bitmap != null) PictureEditDialog(projectName, unit, pictureOptions, scale != null, onExportImage = {
+    // This is also the project menu for a blank drawing: importing a 3D object must not
+    // require a reference photo first.
+    if (showPictureEdit) PictureEditDialog(projectName, unit, pictureOptions, scale != null, bitmap != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); logToast(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onExportDxf = { showPictureEdit = false; showDxfExport = true }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onSaveMaterial = {
         // The selected shape, or else the biggest closed shape that isn't a hole inside another one.
@@ -7490,7 +7492,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     }, confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onSave(name.trim()) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
+@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, hasPicture: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
     var name by remember { mutableStateOf(currentName) }
     var unit by remember { mutableStateOf(currentUnit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
@@ -7498,14 +7500,14 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     val precision = remember { mutableStateMapOf<String, Int>().apply { putAll(MeasurementPrecision.places) } }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Edit picture") },
+        title = { Text("Project") },
         text = {
             Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(name, { name = it }, label = { Text("Picture name") }, singleLine = true)
-                OutlinedButton(onClick = onExportImage) { Text("Export picture") }
+                OutlinedTextField(name, { name = it }, label = { Text("Project name") }, singleLine = true)
+                if (hasPicture) OutlinedButton(onClick = onExportImage) { Text("Export picture") }
                 OutlinedButton(onClick = onExport3d) { Text("Export 3D model (STL or 3MF)") }
                 OutlinedButton(onClick = onExportDxf) { Text("Export 2D drawing (DXF)") }
-                OutlinedButton(onClick = onImportModel) { Text("Import 3D model (STL, OBJ, 3MF)") }
+                OutlinedButton(onClick = onImportModel) { Text("Import 3D object (OBJ, STL, 3MF)") }
                 OutlinedButton(onClick = onSaveMaterial) { Text("Save drawing as material") }
                 OutlinedButton(onClick = onMaterialList) { Text("Materials used (lengths)") }
                 OutlinedButton(onClick = onMeasurements) { Text("Measurements") }
