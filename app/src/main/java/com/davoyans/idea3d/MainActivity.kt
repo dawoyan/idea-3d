@@ -1045,7 +1045,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var viewerElapsedSeconds by remember { mutableIntStateOf(0) }
     // Start with one straight piece per curve. The 3D viewer exposes a dragger
     // for people who need a smoother on-screen approximation.
-    var viewerCurveDetail by remember { mutableIntStateOf(1) }
+    // How many pieces a curved bar or pipe has in View 3D: 12 (smooth, as exported) unless the user chose fewer for speed.
+    var viewerCurveDetail by remember { mutableIntStateOf(preferences.getInt("curve_detail", 12).coerceIn(1, 12)) }
     // Guides are useful context while modelling, even before a material is set.
     var viewerShowDrawings by remember { mutableStateOf(true) }
     var show3d by remember { mutableStateOf(false) }
@@ -4985,7 +4986,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     } ?: if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index
                 },
                 detail = viewerCurveDetail,
-                onDetailChange = { viewerCurveDetail = it.roundToInt() },
+                onDetailChange = { viewerCurveDetail = it.roundToInt(); preferences.edit().putInt("curve_detail", viewerCurveDetail).apply() },
                 onDetailChangeFinished = { open3dView(viewerScope) },
                 showDrawings = viewerShowDrawings,
                 onShowDrawingsChange = { viewerShowDrawings = it; open3dView(viewerScope) },
@@ -5483,7 +5484,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     modelReport?.let { report ->
         val safeName = projectName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Idea3D" }
-        ModelReportDialog(report, unit, onDismiss = { modelReport = null }, onStl = { modelReport = null; stlExporter.launch("$safeName.stl") }, on3mf = { modelReport = null; threeMfExporter.launch("$safeName.3mf") })
+        ModelReportDialog(report, unit, onDismiss = { modelReport = null }, onStl = { modelReport = null; stlExporter.launch("$safeName.stl") }, on3mf = { modelReport = null; threeMfExporter.launch("$safeName.3mf") },
+            onRoomik = { modelReport = null; sendToRoomik(context, File(context.cacheDir, "pending-3d-export.3mf"), projectName.ifBlank { "Model" }) })
     }
     if (showSimpleTraceCommand) SimpleTraceCommandDialog(
         hasDetailRectangle = selectedGuideId?.let(::rectangleShape) != null,
@@ -6099,7 +6101,24 @@ private sealed class ModelReport {
     data class Ready(val meshes: List<Mesh>) : ModelReport()
 }
 
-@Composable private fun ModelReportDialog(report: ModelReport, unit: String, onDismiss: () -> Unit, onStl: () -> Unit, on3mf: () -> Unit) {
+/**
+ * Hands the 3D model (a 3MF with each object's color) to Roomik, which places it on its plan; the same name sent again
+ * replaces the model there. Says so when Roomik is not installed.
+ */
+private fun sendToRoomik(context: android.content.Context, file: File, name: String) {
+    if (!file.isFile || file.length() == 0L) { Toast.makeText(context, "The prepared model is unavailable. Please export again.", Toast.LENGTH_LONG).show(); return }
+    val shared = File(context.cacheDir, "share").apply { mkdirs() }.let { dir -> File(dir, name.replace(Regex("[^A-Za-z0-9А-Яа-яЁё ._-]"), "_") + ".3mf") }
+    file.copyTo(shared, overwrite = true)
+    val uri = androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".files", shared)
+    val intent = android.content.Intent("com.dawoyan.roomik.IMPORT_MODEL").setPackage("com.dawoyan.roomik")
+        .setDataAndType(uri, "model/3mf").putExtra("name", name)
+        .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    try { context.startActivity(intent) } catch (e: android.content.ActivityNotFoundException) {
+        Toast.makeText(context, "Roomik is not installed", Toast.LENGTH_LONG).show()
+    }
+}
+
+@Composable private fun ModelReportDialog(report: ModelReport, unit: String, onDismiss: () -> Unit, onStl: () -> Unit, on3mf: () -> Unit, onRoomik: () -> Unit = {}) {
     val lengthUnit = LengthUnit.of(unit)
     AlertDialog(onDismissRequest = onDismiss, title = { Text(when (report) { ModelReport.Checking -> "Checking model"; is ModelReport.Problems -> "Can't export yet"; is ModelReport.Ready -> "Export 3D model" }) }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -6123,7 +6142,7 @@ private sealed class ModelReport {
             }
         }
     }, confirmButton = {
-        if (report is ModelReport.Ready) Row { TextButton(onClick = onStl) { Text("STL") }; TextButton(onClick = on3mf) { Text("3MF") } }
+        if (report is ModelReport.Ready) Row { TextButton(onClick = onRoomik) { Text("→ Roomik") }; TextButton(onClick = onStl) { Text("STL") }; TextButton(onClick = on3mf) { Text("3MF") } }
     }, dismissButton = { TextButton(onClick = onDismiss) { Text(if (report is ModelReport.Ready) "Cancel" else "Close") } })
 }
 

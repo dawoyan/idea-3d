@@ -429,7 +429,8 @@ internal fun ThreeDViewerPane(
                 steps = 10,
                 modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
             )
-            Text(detail.toString(), fontSize = 12.sp, color = Color(0xFF00695C))
+            // Says what the slider does: 1 makes every curved bar or pipe one straight piece.
+            Text(if (detail <= 1) "Curves straight" else "Curves: $detail pieces", fontSize = 12.sp, color = Color(0xFF00695C), maxLines = 1)
         }
         if (mesh.warnings.isNotEmpty()) Text(mesh.warnings.joinToString("\n"), Modifier.fillMaxWidth().background(Color(0xFFFFF4D6)).padding(horizontal = 12.dp, vertical = 4.dp), fontSize = 12.sp, color = Color(0xFF5C4400))
         // A rebuilt model creates a new GL view. Figure visibility is updated in
