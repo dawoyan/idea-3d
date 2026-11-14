@@ -177,3 +177,7 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
 - **Per-axis (X only / Y only) calibration** applies to the front drawing only. Top and Profile use one uniform scale.
 - **Overlap checks across planes** compare bounding boxes and only warn, because a box can overlap where the solids don't. Look in the 3D view. Overlaps within one plane are still checked exactly and block export.
 - **Perspective correction** works as in Measure It, using reference edges in the crop tool. It is not covered by automated tests.
+
+### 0.10.61
+- Select → Lines picks the one line you tap, also a single side of a shape or one piece of a broken line (title shows "Line (part)"). Clone lines / Clone all copy just those lines as a new line you can move; Delete removes just them.
+- Modify has Clone back: Clone line(s) and Clone all, for the whole selected item or for the one selected line.

@@ -1079,6 +1079,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var selectMode by remember { mutableStateOf(false) }
     var selectionMode by remember { mutableStateOf(SelectionMode.VISIBLE) }
     var pickedItems by remember { mutableStateOf(emptyList<Pair<ModelPlane, Int>>()) }
+    // Lines mode: single lines picked out of a shape or a broken line (part of it), by their own ids.
+    var pickedSegments by remember { mutableStateOf(emptyList<Pair<ModelPlane, Int>>()) }
     // Horizontal? / pending confirmation. Distribution changes positions by
     // design, so it should never happen from an accidental toolbar tap.
     var showDistributionConfirm by remember { mutableStateOf<Pair<Boolean, Boolean>?>(null) }
@@ -2075,6 +2077,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         logToast(context, if (locked) "Locked: it cannot be changed until unlocked" else "Unlocked", Toast.LENGTH_SHORT).show()
     }
     /** An item's outline as polylines in this view's canvas pixels. */
+    /** One line as it shows in this view. */
+    fun segmentOutlineHere(key: Pair<ModelPlane, Int>): List<Pt> {
+        val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList(); val own = setup.mapping(key.first) ?: return emptyList()
+        val g = planeGeometry(key.first).guides.firstOrNull { it.id == key.second } ?: return emptyList()
+        val f = faceOffset(key.first, g.id)
+        val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1)
+        return pts.mapIndexed { i, p -> here.pixel(own.model(p, f + g.startZMm + (g.endZMm - g.startZMm) * i / n)) }
+    }
     fun itemOutlineHere(key: Pair<ModelPlane, Int>): List<List<Pt>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList(); val own = setup.mapping(key.first) ?: return emptyList()
         val f = itemGuides(key).firstOrNull()?.let { faceOffset(key.first, it.id) } ?: 0.0
@@ -2437,7 +2447,17 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
             when (selectionMode) {
                 SelectionMode.POINTS -> Unit
-                SelectionMode.LINES -> item?.takeIf { !closedItem(it) }?.let(::togglePicked)
+                SelectionMode.LINES -> {
+                    // Lines picks the one line tapped. A lone line is a whole item; a line of a shape or of a broken
+                    // line is picked on its own (a part), ready to clone or delete.
+                    val hit = closestGuide(point, guides, hitRadius * 1.7)?.let(::homeKey)
+                    if (hit != null) {
+                        if (itemGuides(hit).size <= 1 && !closedItem(hit)) togglePicked(hit)
+                        else pickedSegments = if (hit in pickedSegments) pickedSegments - hit else pickedSegments + hit
+                        ActionLog.add("select lines ${hit.first.label} line ${hit.second}; picked items=${pickedItems.size}, parts=${pickedSegments.size}")
+                    }
+                    return
+                }
                 SelectionMode.SHAPES -> item?.takeIf(::closedItem)?.let(::togglePicked)
                 SelectionMode.OBJECTS -> item?.let(::objectItem)?.let(::togglePicked)
                 SelectionMode.ALL, SelectionMode.VISIBLE -> item?.let(::togglePicked)
@@ -4363,7 +4383,17 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
     }
     fun deletePicked() {
-        if (pickedItems.isEmpty() && pickedPoints.isEmpty()) return
+        if (pickedItems.isEmpty() && pickedPoints.isEmpty() && pickedSegments.isEmpty()) return
+        if (pickedSegments.isNotEmpty() && pickedSegments.any { k -> planeGeometry(k.first).guides.any { it.id == k.second && it.locked } }) { logToast(context, "Unlock locked items before deleting", Toast.LENGTH_SHORT).show(); return }
+        if (pickedSegments.isNotEmpty()) {
+            pushUndo()
+            pickedSegments.groupBy { it.first }.forEach { (plane, keys) ->
+                val ids = keys.map { it.second }.toSet(); val geometry = planeGeometry(plane)
+                setPlaneShapes(plane, geometry.guides.filterNot { it.id in ids }, geometry.extrusions.map { it.copy(guideIds = it.guideIds.filterNot { id -> id in ids }) }.filter { it.guideIds.isNotEmpty() })
+            }
+            pickedSegments = emptyList()
+            if (pickedItems.isEmpty() && pickedPoints.isEmpty()) return
+        }
         if (pickedItems.any(::itemLocked) || pickedPoints.any(::pointLocked)) {
             logToast(context, "Unlock locked items before deleting", Toast.LENGTH_SHORT).show(); return
         }
@@ -4385,7 +4415,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         pickedItems = emptyList()
     }
     fun setSelectMode(on: Boolean) {
-        selectMode = on; pickedItems = emptyList(); pickedPoints = emptyList(); itemRectStart = null; itemRectEnd = null; selectedGhostPoints = emptyList()
+        selectMode = on; pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList(); itemRectStart = null; itemRectEnd = null; selectedGhostPoints = emptyList()
         if (on) { tool = Tool.ADJUST; clearOwnSelection(); selectedForeign = null; selectedGhostPoint = null; panOnEmptyDrag = false }
     }
     /** The bottom Select button climbs from a node to its line, shape, then 3D object. */
@@ -4468,10 +4498,41 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
         return copies
     }
+    /**
+     * Copies of single picked lines (a part of a shape or broken line), a little down and right: one new line piece
+     * per view, kept together as one path. [full] keeps a line's own bar or pipe material.
+     */
+    fun copySegments(keys: List<Pair<ModelPlane, Int>>, full: Boolean): List<Pair<ModelPlane, Int>> {
+        if (keys.isEmpty()) return emptyList()
+        val setup = modelSetup(); val here = setup.mapping(editPlane)
+        val frame = frameOf(editPlane)
+        val step = (min(frame.width, frame.height) * 0.03).coerceAtLeast(20.0)
+        val offset = here?.modelDelta(step, step)
+        val copies = mutableListOf<Pair<ModelPlane, Int>>()
+        keys.groupBy { it.first }.forEach { (plane, planeKeys) ->
+            val geometry = planeGeometry(plane); val own = setup.mapping(plane) ?: return@forEach
+            val source = planeKeys.mapNotNull { k -> geometry.guides.firstOrNull { it.id == k.second } }.distinctBy { it.id }
+            if (source.isEmpty()) return@forEach
+            val shift = offset?.let { own.pixelDelta(it) } ?: Pt(step.toFloat(), step.toFloat())
+            val dz = offset?.let { it dot plane.toward } ?: 0.0
+            fun moved(p: Pt) = Pt(p.x + shift.x, p.y + shift.y)
+            var id = (geometry.guides.maxOfOrNull { it.id } ?: 0) + 1
+            val path = if (source.size > 1) (geometry.guides.mapNotNull { it.pathId }.maxOrNull() ?: 0) + 1 else null
+            val copied = source.map { g -> g.copy(id = id++, start = moved(g.start), end = moved(g.end), curveMid = g.curveMid?.let(::moved), startZMm = g.startZMm + dz, endZMm = g.endZMm + dz,
+                pathId = path, groupId = null, manual = true, midDepthMm = null, hole = false, locked = false, lengthMm = null, shapeWidthMm = null, shapeHeightMm = null,
+                materialId = if (full) g.materialId else null, materialTurnDeg = if (full) g.materialTurnDeg else 0.0, fillTransparency = null) }
+            setPlaneShapes(plane, geometry.guides + copied, geometry.extrusions)
+            copies += copied.map { plane to it.id }
+        }
+        logToast(context, "${copies.size} line(s) copied", Toast.LENGTH_SHORT).show()
+        return copies
+    }
     fun copyPicked(full: Boolean) {
-        if (pickedItems.isEmpty()) return
+        if (pickedItems.isEmpty() && pickedSegments.isEmpty()) return
         pushUndo()
-        pickedItems = copyItems(pickedItems, full); pickedPoints = emptyList()
+        val segmentCopies = copySegments(pickedSegments, full)
+        // The copied part is a line (or broken line) of its own: picked whole, so it moves right away.
+        pickedItems = copyItems(pickedItems, full) + segmentCopies.distinctBy { it.first }; pickedPoints = emptyList(); pickedSegments = emptyList()
     }
     /**
      * Outline: the selected shape's or object's border as plain lines, in the same place (the original keeps its fill,
@@ -4602,7 +4663,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
      */
     fun selectionName(): String? {
         if (show3d) return null
-        if (selectMode) return when (val n = pickedItems.size + pickedPoints.size) { 0 -> null; 1 -> pickedItems.singleOrNull()?.let { itemName(it) } ?: "Point"; else -> "$n picked" }
+        if (selectMode) return when (val n = pickedItems.size + pickedPoints.size + pickedSegments.size) { 0 -> null; 1 -> pickedItems.singleOrNull()?.let { itemName(it) } ?: if (pickedSegments.isNotEmpty()) "Line (part)" else "Point"; else -> "$n picked" }
         selectedModelId?.let { id -> return importedModels.firstOrNull { it.id == id }?.name ?: "Model" }
         selectedForeign?.let { return objectName(it) }
         if (selectedGuideEndpoint != null || selectedEndpoint != null || selectedVertices.isNotEmpty()) return if (selectedVertices.size > 1) "${selectedVertices.size} points" else "Point"
@@ -4655,7 +4716,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
-                pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
+                pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan },
@@ -4876,8 +4937,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         }
                         // Cloning creates another item; it belongs with multi-item selection,
                         // rather than with Modify's direct geometry editing tools.
-                        ActionIcon("Clone lines", R.drawable.ic_clone, enabled = n >= 1) { copyPicked(false) }
-                        ActionIcon("Clone all", R.drawable.ic_clone_filled, enabled = n >= 1) { copyPicked(true) }
+                        val parts = pickedSegments.size
+                        ActionIcon("Clone lines", R.drawable.ic_clone, enabled = n + parts >= 1) { copyPicked(false) }
+                        ActionIcon("Clone all", R.drawable.ic_clone_filled, enabled = n + parts >= 1) { copyPicked(true) }
                         TurnIcons()
                         ActionIcon("Align H", R.drawable.ic_align_horizontal, enabled = total >= 2) { arrangePicked(horizontal = true, distribute = false) }
                         ActionIcon("Align V", R.drawable.ic_align_vertical, enabled = total >= 2) { arrangePicked(horizontal = false, distribute = false) }
@@ -4894,17 +4956,25 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
-                        ActionIcon("Unselect", R.drawable.ic_close, enabled = total > 0) { pickedItems = emptyList(); pickedPoints = emptyList() }
+                        ActionIcon("Unselect", R.drawable.ic_close, enabled = total + parts > 0) { pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList() }
                         ViewIcons()
                     }
                     else -> {
-                        // Modify contains direct edits to the selected geometry. Commands which
-                        // create another item (Clone) deliberately live in Select instead.
+                        // Modify: direct edits to the selected geometry, plus Clone of it.
                         (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->
                             val inShape = closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), guide) }
                             val itemKey = homeKey(guide)
                             ActionIcon("Material", R.drawable.ic_save_material, enabled = !itemLocked(itemKey)) { if (inShape) editShapeMaterial(guide) else lineMaterialId = guide.id }
                             ActionIcon(if (itemLocked(itemKey)) "Unlock" else "Lock", R.drawable.ic_select) { setItemsLocked(listOf(itemKey), !itemLocked(itemKey)) }
+                            // Clone: the whole item when it is selected whole, else just this one line (a part).
+                            val onePart = selectedWholeGuideId == null && itemGuides(itemKey).size > 1
+                            fun cloneHere(full: Boolean) {
+                                if (!onePart) { cloneSelected(full); return }
+                                pushUndo()
+                                copySegments(listOf(itemKey), full).firstOrNull()?.let { c -> val shown = if (c.first == editPlane) c.second else encodedId(c.first, c.second); if (guides.any { it.id == shown }) { selectedGuideEndpoint = null; selectedWholeGuideId = null; selectedGuideId = shown } }
+                            }
+                            ActionIcon(if (onePart) "Clone line" else "Clone lines", R.drawable.ic_clone) { cloneHere(false) }
+                            ActionIcon("Clone all", R.drawable.ic_clone_filled) { cloneHere(true) }
                             if (inShape) ActionIcon("Save asset", R.drawable.ic_save_material) {
                                 val outline = closedGuideShapes(guides).firstOrNull { path -> path.any { sameGuideObject(it, guide) } }.orEmpty()
                                 saveSketchAssetShape = outline + holesInside(outline, guides)
@@ -4999,7 +5069,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
                 bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
-                pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
+                pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan }, onDoubleTap = { }, doubleTapEnabled = false,
