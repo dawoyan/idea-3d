@@ -32,6 +32,57 @@ object ModelImport {
         return centered(Mesh(name, builder.vertices, builder.triangles, 0xFF9E9E9E.toInt()))
     }
 
+    /**
+     * The parts of a model, each its own mesh with its own colour, centered on its own box, with where that center was
+     * from the middle of the whole model (so the parts can be put back together). A 3MF file gives one part per object
+     * with the object's color (as Roomik and Idea 3D write them); other files give the one model.
+     */
+    fun parts(fileName: String, bytes: ByteArray): List<Pair<Mesh, Vec3>> {
+        val isZip = bytes.size > 4 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
+        if (!(fileName.lowercase().endsWith(".3mf") || isZip)) return listOf(read(fileName, bytes) to Vec3(0.0, 0.0, 0.0))
+        var xml = ""
+        ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                if (entry.name.endsWith(".model", ignoreCase = true)) { val out = ByteArrayOutputStream(); zip.copyTo(out); xml = out.toString("UTF-8") }
+                zip.closeEntry()
+            }
+        }
+        fun attr(tag: String, name: String) = Regex("\\s$name=\"([^\"]*)\"").find(tag)?.groupValues?.get(1)
+        val colors = HashMap<String, List<Int>>()
+        Regex("<basematerials([^>]*)>(.*?)</basematerials>", RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { m ->
+            val id = attr(m.groupValues[1], "id") ?: return@forEach
+            colors[id] = Regex("<base\\s[^>]*>").findAll(m.groupValues[2]).map { b ->
+                val h = attr(b.value, "displaycolor")?.removePrefix("#")?.take(6)?.toIntOrNull(16) ?: 0x9E9E9E
+                (0xFF shl 24) or h
+            }.toList()
+        }
+        val raw = Regex("<object([^>]*)>(.*?)</object>", RegexOption.DOT_MATCHES_ALL).findAll(xml).mapNotNull { o ->
+            val head = o.groupValues[1]; val body = o.groupValues[2]
+            if (!body.contains("<mesh")) return@mapNotNull null
+            val b = Builder()
+            val ids = Regex("<vertex\\s[^>]*>").findAll(body).map { v ->
+                b.vertex(Vec3((attr(v.value, "x") ?: "0").toDouble(), (attr(v.value, "y") ?: "0").toDouble(), (attr(v.value, "z") ?: "0").toDouble()))
+            }.toList()
+            Regex("<triangle\\s[^>]*>").findAll(body).forEach { t ->
+                val v = listOf("v1", "v2", "v3").mapNotNull { attr(t.value, it)?.toIntOrNull() }
+                if (v.size == 3 && v.all { it in ids.indices }) b.add(ids[v[0]], ids[v[1]], ids[v[2]])
+            }
+            if (b.triangles.isEmpty()) return@mapNotNull null
+            val color = colors[attr(head, "pid")]?.getOrNull(attr(head, "pindex")?.toIntOrNull() ?: 0) ?: 0xFF9E9E9E.toInt()
+            Mesh(attr(head, "name") ?: "Part", b.vertices, b.triangles, color)
+        }.toList()
+        require(raw.isNotEmpty()) { "No triangles found in $fileName" }
+        // the middle of the whole model, then each part about its own middle
+        val all = raw.flatMap { it.vertices }
+        val mid = Vec3((all.minOf { it.x } + all.maxOf { it.x }) / 2, (all.minOf { it.y } + all.maxOf { it.y }) / 2, (all.minOf { it.z } + all.maxOf { it.z }) / 2)
+        return raw.map { m ->
+            val (low, high) = m.bounds
+            val c = (low + high) * 0.5
+            m.copy(vertices = m.vertices.map { it - c }) to (c - mid)
+        }
+    }
+
     /** [mesh] moved so its bounding box is centered on the origin. */
     fun centered(mesh: Mesh): Mesh {
         val (low, high) = mesh.bounds

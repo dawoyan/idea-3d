@@ -184,3 +184,8 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
 
 ### 0.10.62
 - Grow for open lines: select a line, curve or broken line (Modify or Select) and tap Grow. It becomes a surface of its shape (a curve makes a bent sheet), the depth you set going into the view, plain grey 2 mm or any sheet material (its thickness and look). Tap Surface later to change or remove it.
+
+### 0.10.63
+- Surfaces grown from lines show in every 2D view, filled in their material colour; tap anywhere on one to pick it, and drag it in any view to move it.
+- Select → Objects picks surfaces and bar/pipe lines as whole objects; tapping a plain line says why nothing is picked.
+- Roomik round trip: Roomik can open a 3MF model in Idea 3D as a new scene, each part kept with its colour.

@@ -12,6 +12,12 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="image/*" />
             </intent-filter>
+            <!-- 3D models from Roomik, to change here and send back -->
+            <intent-filter>
+                <action android:name="com.davoyans.idea3d.IMPORT_MODEL" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
         <!-- 3D models handed to Roomik are shared from the cache through this -->
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.files" android:exported="false" android:grantUriPermissions="true">

@@ -860,12 +860,17 @@ private object ProjectStore {
 
 class MainActivity : ComponentActivity() {
     private var sharedImage by mutableStateOf<Uri?>(null)
+    /** A model sent from Roomik to change here: the file and its name (which says where it goes back to). */
+    private var sharedModel by mutableStateOf<Pair<Uri, String>?>(null)
+    private fun modelFromIntent(intent: android.content.Intent?): Pair<Uri, String>? =
+        if (intent?.action == "com.davoyans.idea3d.IMPORT_MODEL") intent.data?.let { it to (intent.getStringExtra("name") ?: "Model") } else null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         sharedImage = imageFromIntent(intent)
-        setContent { Idea3dTheme { Idea3dApp(sharedImage) { sharedImage = null } } }
+        sharedModel = modelFromIntent(intent)
+        setContent { Idea3dTheme { Idea3dApp(sharedImage, sharedModel, { sharedModel = null }) { sharedImage = null } } }
     }
-    override fun onNewIntent(intent: android.content.Intent) { super.onNewIntent(intent); sharedImage = imageFromIntent(intent) }
+    override fun onNewIntent(intent: android.content.Intent) { super.onNewIntent(intent); sharedImage = imageFromIntent(intent); modelFromIntent(intent)?.let { sharedModel = it } }
 }
 private fun imageFromIntent(intent: android.content.Intent?): Uri? = if (intent?.action == android.content.Intent.ACTION_SEND && intent.type?.startsWith("image/") == true) intent.getParcelableExtra(android.content.Intent.EXTRA_STREAM) else null
 
@@ -887,7 +892,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun Idea3dApp(sharedImage: Uri?, onSharedImageConsumed: () -> Unit) {
+@Composable private fun Idea3dApp(sharedImage: Uri?, sharedModel: Pair<Uri, String>? = null, onSharedModelConsumed: () -> Unit = {}, onSharedImageConsumed: () -> Unit) {
     val context = LocalContext.current
     val preferences = remember { context.getSharedPreferences("idea3d-settings", Context.MODE_PRIVATE) }
     remember { ActionLog.start(context) }
@@ -1478,6 +1483,38 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }.onFailure { logToast(context, "Could not import: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
+    /** A model of several colored parts (a 3MF from Roomik): each part a model of its own, all in place together. */
+    fun importModelParts(uri: Uri) {
+        val id = projectId ?: return
+        scope.launch {
+            val fileName = imageDisplayName(context, uri).ifBlank { "Model.3mf" }
+            val result = withContext(Dispatchers.IO) { runCatching {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Cannot open the file")
+                ModelImport.parts(fileName, bytes)
+            } }
+            result.onSuccess { parts ->
+                val frame = frameOf(editPlane)
+                val base = modelSetup().mapping(editPlane)?.model(Pt(frame.width / 2f, frame.height / 2f), 0.0) ?: Vec3(0.0, 0.0, 0.0)
+                pushUndo()
+                var next = (importedModels.maxOfOrNull { it.id } ?: 0) + 1
+                val added = ArrayList<ImportedModel>(); val meshes = HashMap<Int, Mesh>()
+                withContext(Dispatchers.IO) {
+                    for ((mesh, off) in parts) {
+                        ProjectStore.modelFile(context, id, next).writeBytes(ModelExport.stl(listOf(mesh)))
+                        // the file stands Z up: turned upright (-90° about X), its offset turns with it
+                        meshes[next] = mesh
+                        added += ImportedModel(next, mesh.name, base + Vec3(off.x, off.z, -off.y), rx = -90.0, argb = mesh.argb)
+                        next++
+                    }
+                }
+                importedMeshes = importedMeshes + meshes
+                importedModels = importedModels + added
+                ActionLog.add("Roomik import: $fileName; parts=${parts.size}")
+                logToast(context, "From Roomik: ${parts.size} parts. Change it, then Export 3D → Roomik to send it back.", Toast.LENGTH_LONG).show()
+                openImportedModelAfterImport = true
+            }.onFailure { logToast(context, "Could not import: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+        }
+    }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(::importModel) }
     /** Every imported model placed in model space, with its name and color. */
     fun placedModels(models: List<ImportedModel> = importedModels): List<Pair<ImportedModel, Mesh>> = models.mapNotNull { m ->
@@ -1557,6 +1594,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     val stlExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/stl")) { writeStagedModel(it, "stl") }
     val threeMfExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/3mf")) { writeStagedModel(it, "3mf") }
     LaunchedEffect(sharedImage) { sharedImage?.let { importPicture(it); onSharedImageConsumed() } }
+    // a model from Roomik: a new scene named after it, its parts each with their color; "→ Roomik" sends it back
+    LaunchedEffect(sharedModel) { sharedModel?.let { (uri, name) -> onSharedModelConsumed(); newScene(); projectName = name; importModelParts(uri) } }
     LaunchedEffect(tool, projectId, guidesDetected) {
         val image = bitmap
         if (tool == Tool.LINES && editPlane == ModelPlane.FRONT && image != null && !guidesDetected && !guideDetectionRunning) {
@@ -1605,7 +1644,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     // Objects from the other planes, flattened into this plane's canvas so they can be lined up with, selected and reshaped here.
     LaunchedEffect(projectId, editPlane, planeStash, planeFrames, scale, unit, bitmap, guides, materials, solidOps) {
         if (bitmap == null) return@LaunchedEffect
-        val memberGuides = allGuides().filter { it.materialId != null }; val memberSetup = modelSetup(); val memberPlane = editPlane; val materialMap = materials.associateBy { it.id }
+        val allSurfaceGuides = allGuides().filter { it.surfaceMm != null }; val memberSetup = modelSetup(); val memberPlane = editPlane; val materialMap = materials.associateBy { it.id }
         // Every line of the other views, flattened into this one, so plain lines can be found and lined up with too.
         // Lines of other views are shown here as normal lines; only 3D objects' outlines remain in their view.
         // A hole is part of its object; it is never drawn as a line of its own in other views.
@@ -1626,7 +1665,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }.getOrDefault(emptyList()) }
         memberGhosts = withContext(Dispatchers.Default) { runCatching {
             val here = memberSetup.mapping(memberPlane) ?: return@runCatching emptyList()
-            buildMembers(memberGuides, materialMap, memberSetup).map { (_, mesh) ->
+            // Surfaces grown from lines show in every view, filled in their material's color.
+            buildSurfaces(allSurfaceGuides, materialMap, memberSetup, null, 4).map { (_, mesh) ->
                 val triangles = FloatArray(mesh.triangles.size * 6)
                 mesh.triangles.forEachIndexed { t, tri -> listOf(tri.a, tri.b, tri.c).forEachIndexed { k, i -> val p = here.pixel(mesh.vertices[i]); triangles[t * 6 + k * 2] = p.x; triangles[t * 6 + k * 2 + 1] = p.y } }
                 mesh.argb to triangles
@@ -2095,10 +2135,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         fun loop(at: Double) = itemGuides(key).map { g -> val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1); pts.mapIndexed { i, p -> here.pixel(own.model(p, at + g.startZMm + (g.endZMm - g.startZMm) * i / n)) } }
         val front = loop(f)
         // A 3D object: its front and back outlines joined at the corners, so the whole object is framed in any view.
-        val depth = itemGuides(key).firstOrNull()?.let { g0 -> planeGeometry(key.first).let { geo -> geo.extrusions.firstOrNull { e -> extrusionGuides(e, geo.guides).any { it.id == g0.id } } } }?.depthMm ?: 0.0
+        val depth = itemGuides(key).firstOrNull()?.let { g0 -> planeGeometry(key.first).let { geo -> geo.extrusions.firstOrNull { e -> extrusionGuides(e, geo.guides).any { it.id == g0.id } } } }?.depthMm
+            ?: itemGuides(key).firstNotNullOfOrNull { it.surfaceMm } ?: 0.0
         if (depth <= 0.0) return front
         val back = loop(f - depth)
-        val sides = itemGuides(key).map { g -> listOf(here.pixel(own.model(g.start, f + g.startZMm)), here.pixel(own.model(g.start, f - depth + g.startZMm))) }
+        val sides = itemGuides(key).flatMap { g -> listOf(listOf(here.pixel(own.model(g.start, f + g.startZMm)), here.pixel(own.model(g.start, f - depth + g.startZMm))), listOf(here.pixel(own.model(g.end, f + g.endZMm)), here.pixel(own.model(g.end, f - depth + g.endZMm)))) }
         return front + back + sides
     }
     /** The item under [point]: one drawn here, or one from another view as it shows here. */
@@ -2111,6 +2152,18 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             .mapNotNull { key -> itemOutlineHere(key).flatMap { it.zipWithNext() }.minOfOrNull { (a, b) -> segmentDistance(a, b) }?.let { key to it } }
             .filter { it.second <= radius * 1.7 }.minByOrNull { it.second }?.let { return it.first }
         closedGuideShapes(guides).lastOrNull { pointInsidePolygon(point, shapePoints(it)) }?.let { return homeKey(it.first()) }
+        // A surface grown from a line: anywhere on it as it shows here.
+        run {
+            val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return@run
+            ModelPlane.entries.forEach { pl -> val own = setup.mapping(pl) ?: return@forEach
+                planeGeometry(pl).guides.filter { it.surfaceMm != null }.forEach { g ->
+                    val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1)
+                    fun at(i: Int, depth: Double) = here.pixel(own.model(pts[i], depth + g.startZMm + (g.endZMm - g.startZMm) * i / n))
+                    val poly = pts.indices.map { at(it, 0.0) } + pts.indices.reversed().map { at(it, -g.surfaceMm!!) }
+                    if (pointInsidePolygon(point, poly)) return pl to g.id
+                }
+            }
+        }
         foreign.lastOrNull { insideForeign(it, point) }?.let { o -> planeGeometry(o.plane).extrusions.firstOrNull { it.id == o.extrusionId }?.let { e -> extrusionGuides(e, planeGeometry(o.plane).guides).firstOrNull()?.let { return o.plane to it.id } } }
         return null
     }
@@ -2446,6 +2499,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             fun objectItem(key: Pair<ModelPlane, Int>): Pair<ModelPlane, Int>? {
                 val geometry = planeGeometry(key.first)
                 val ids = itemGuides(key).map { it.id }.toSet()
+                // A surface or a bar/pipe line is an object of its own in 3D.
+                if (itemGuides(key).any { g -> g.surfaceMm != null || g.materialId?.let { m -> materials.firstOrNull { it.id == m } }?.isSheet == false }) return key
                 val extrusion = geometry.extrusions.firstOrNull { e -> e.guideIds.any { it in ids } } ?: return null
                 return extrusionGuides(extrusion, geometry.guides).firstOrNull()?.let { key.first to it.id }
             }
@@ -2463,7 +2518,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     return
                 }
                 SelectionMode.SHAPES -> item?.takeIf(::closedItem)?.let(::togglePicked)
-                SelectionMode.OBJECTS -> item?.let(::objectItem)?.let(::togglePicked)
+                SelectionMode.OBJECTS -> item?.let { key -> objectItem(key)?.let(::togglePicked) ?: logToast(context, "Not a 3D object: a plain line or shape. Pick it with Lines, Shapes or All, or Grow it first", Toast.LENGTH_SHORT).show() }
                 SelectionMode.ALL, SelectionMode.VISIBLE -> item?.let(::togglePicked)
             }
             item?.let { ActionLog.add("select ${selectionMode.name.lowercase()} ${it.first.label} line ${it.second}; picked items=${pickedItems.size}, points=${pickedPoints.size}") }
@@ -4719,7 +4774,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -5076,7 +5131,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas }, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
