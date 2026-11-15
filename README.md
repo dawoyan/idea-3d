@@ -181,3 +181,6 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
 ### 0.10.61
 - Select → Lines picks the one line you tap, also a single side of a shape or one piece of a broken line (title shows "Line (part)"). Clone lines / Clone all copy just those lines as a new line you can move; Delete removes just them.
 - Modify has Clone back: Clone line(s) and Clone all, for the whole selected item or for the one selected line.
+
+### 0.10.62
+- Grow for open lines: select a line, curve or broken line (Modify or Select) and tap Grow. It becomes a surface of its shape (a curve makes a bent sheet), the depth you set going into the view, plain grey 2 mm or any sheet material (its thickness and look). Tap Surface later to change or remove it.

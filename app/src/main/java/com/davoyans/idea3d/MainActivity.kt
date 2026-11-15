@@ -141,6 +141,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import com.davoyans.idea3d.core.Calibration
+import com.davoyans.idea3d.core.SurfaceBuilder
 import com.davoyans.idea3d.core.CalibrationAxis
 import com.davoyans.idea3d.core.CalibrationReference
 import com.davoyans.idea3d.core.CalibrationStatus
@@ -201,7 +202,7 @@ private data class FeatureSnap(val point: Pt, val found: Boolean)
 private data class ScreenLine(val id: Int, val start: Offset, val end: Offset)
 private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "", val plane: ModelPlane = ModelPlane.FRONT)
 private fun MeasureLine.hasDepth() = abs(startZMm) > 0.000001 || abs(endZMm) > 0.000001
-private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null, val hole: Boolean = false, val locked: Boolean = false)
+private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null, val hole: Boolean = false, val locked: Boolean = false, val surfaceMm: Double? = null)
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
 private data class SelectedAlignmentObject(val guideIds: Set<Int>, val lineIds: Set<Int>, val points: List<Pt>)
 private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0, val plane: ModelPlane = ModelPlane.FRONT)
@@ -753,6 +754,7 @@ private object ProjectStore {
             if (guide.materialTurnDeg != 0.0) put("materialTurn", guide.materialTurnDeg)
             if (guide.hole) put("hole", true)
             if (guide.locked) put("locked", true)
+            guide.surfaceMm?.let { put("surfaceMm", it) }
         }) }
         val extrusions = JSONArray()
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
@@ -835,7 +837,7 @@ private object ProjectStore {
         val values = json.getJSONArray("lines")
         val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key, ModelPlane.of(line.optString("plane")))) } }
         val guideValues = json.optJSONArray("guides") ?: JSONArray()
-        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(0, 20, 50, 90, 100) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0, null, hole = guide.optBoolean("hole", false), locked = guide.optBoolean("locked", false))) } }
+        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(0, 20, 50, 90, 100) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0, null, hole = guide.optBoolean("hole", false), locked = guide.optBoolean("locked", false), surfaceMm = guide.optDouble("surfaceMm", Double.NaN).takeIf { it.isFinite() && it > 0 })) } }
         val figure = ComparisonFigure.entries.firstOrNull { it.name == json.optString("figure") } ?: if (!json.has("figure") && json.optBoolean("silhouette")) ComparisonFigure.STANDING else null
         val transparency = json.optInt("transparency", 0).takeIf { it in listOf(0, 10, 90, 100) } ?: 0
         val extrusionValues = json.optJSONArray("extrusions") ?: JSONArray()
@@ -942,6 +944,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var guideLengthEditId by remember { mutableStateOf<Int?>(null) }
     // The line whose material is being chosen (a short dialog of its own).
     var lineMaterialId by remember { mutableStateOf<Int?>(null) }
+    // Grow for an open line: the line (shown here by this id) made into a surface.
+    var surfaceEditId by remember { mutableStateOf<Int?>(null) }
     var pendingAlignment by remember { mutableStateOf<Boolean?>(null) }
     var selectedVertices by remember { mutableStateOf(emptyList<Pt>()) }
     var panOnEmptyDrag by remember { mutableStateOf(false) }
@@ -4491,7 +4495,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 // material dimensions into it made a later material assignment
                 // resize it a second time.
                 lengthMm = if (full) g.lengthMm else null, shapeWidthMm = if (full) g.shapeWidthMm else null, shapeHeightMm = if (full) g.shapeHeightMm else null,
-                materialId = if (full) g.materialId else null, materialTurnDeg = if (full) g.materialTurnDeg else 0.0, fillTransparency = if (full) g.fillTransparency else null) }
+                materialId = if (full) g.materialId else null, materialTurnDeg = if (full) g.materialTurnDeg else 0.0, fillTransparency = if (full) g.fillTransparency else null, surfaceMm = if (full) g.surfaceMm else null) }
             val extrusion = if (!full) null else extrusionOf(key)?.let { e -> e.copy(id = (geometry.extrusions.maxOfOrNull { it.id } ?: 0) + 1, guideIds = e.guideIds.mapNotNull { ids[it] }, origin = moved(e.origin), handle = moved(e.handle)) }
             setPlaneShapes(key.first, geometry.guides + copied, geometry.extrusions + listOfNotNull(extrusion))
             copies += key.first to copied.first().id
@@ -4520,7 +4524,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val path = if (source.size > 1) (geometry.guides.mapNotNull { it.pathId }.maxOrNull() ?: 0) + 1 else null
             val copied = source.map { g -> g.copy(id = id++, start = moved(g.start), end = moved(g.end), curveMid = g.curveMid?.let(::moved), startZMm = g.startZMm + dz, endZMm = g.endZMm + dz,
                 pathId = path, groupId = null, manual = true, midDepthMm = null, hole = false, locked = false, lengthMm = null, shapeWidthMm = null, shapeHeightMm = null,
-                materialId = if (full) g.materialId else null, materialTurnDeg = if (full) g.materialTurnDeg else 0.0, fillTransparency = null) }
+                materialId = if (full) g.materialId else null, materialTurnDeg = if (full) g.materialTurnDeg else 0.0, fillTransparency = null, surfaceMm = if (full) g.surfaceMm else null) }
             setPlaneShapes(plane, geometry.guides + copied, geometry.extrusions)
             copies += copied.map { plane to it.id }
         }
@@ -4932,6 +4936,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Material", R.drawable.ic_save_material, enabled = pickedGuide != null && !pickedItems.any(::itemLocked)) {
                             pickedGuide?.let { g -> if (closedGuideShapes(guides).any { path -> sameGuideObject(path.first(), g) }) editShapeMaterial(g) else lineMaterialId = g.id }
                         }
+                        val pickedOpenLine = pickedGuide?.takeIf { g -> !g.hole && closedGuideShapes(guides).none { path -> sameGuideObject(path.first(), g) } }
+                        ActionIcon(if (pickedOpenLine?.surfaceMm != null) "Surface" else "Grow", R.drawable.ic_cube, enabled = pickedOpenLine != null && !pickedItems.any(::itemLocked), on = pickedOpenLine?.surfaceMm != null) { pickedOpenLine?.let { surfaceEditId = it.id } }
                         ActionIcon(if (allLocked) "Unlock" else "Lock", R.drawable.ic_select, enabled = n > 0 && pickedPoints.isEmpty()) {
                             setItemsLocked(pickedItems, !allLocked)
                         }
@@ -4985,6 +4991,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                             if (guide.groupId != null) ActionIcon("Unweld", R.drawable.ic_close, enabled = !itemLocked(itemKey)) { unweldGuide(guide.id) }
                             // Grow: shows arrows to pull the shape into a 3D object (or change its depth).
                             if (tool == Tool.ADJUST && inShape) ActionIcon("Grow", R.drawable.ic_cube, enabled = !itemLocked(itemKey), on = growMode) { growMode = !growMode }
+                            // An open line grows into a surface of its shape.
+                            if (!inShape && !guide.hole) ActionIcon(if (guide.surfaceMm != null) "Surface" else "Grow", R.drawable.ic_cube, enabled = !itemLocked(itemKey), on = guide.surfaceMm != null) { surfaceEditId = guide.id }
                             if (inShape) ActionIcon("Outline", R.drawable.ic_outline) { outlineOf(listOf(homeKey(guide))) }
                             if (tool == Tool.ADJUST && rectangleShape(guide.id) != null) ActionIcon("Round", R.drawable.ic_point_curve, enabled = !itemLocked(itemKey)) { roundRectangle(guide.id) }
                         }
@@ -5316,6 +5324,37 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         confirmButton = { TextButton(onClick = { confirmNonCoplanarFace = false; combinePickedPoints(allowNonCoplanar = true) }) { Text("Make anyway", color = Color(0xFFB3261E)) } },
         dismissButton = { TextButton(onClick = { confirmNonCoplanarFace = false }) { Text("Cancel") } }
     )
+    surfaceEditId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
+        val f = unitFactorMm(unit); val fmt = java.text.DecimalFormat("0.##")
+        var depth by remember(id) { mutableStateOf(fmt.format((guide.surfaceMm ?: 500.0) / f)) }
+        var sheetId by remember(id) { mutableStateOf(guide.materialId?.takeIf { m -> materials.any { it.id == m && it.isSheet } }) }
+        val depthMm = depth.replace(',', '.').toDoubleOrNull()?.times(f)?.takeIf { it > 0 && it.isFinite() }
+        fun apply(value: Double?, material: String?) {
+            pushUndo()
+            guides = guides.map { if (sameGuideObject(it, guide)) it.copy(surfaceMm = value, materialId = if (value == null) it.materialId.takeUnless { m -> materials.any { x -> x.id == m && x.isSheet } } else material, fillTransparency = null) else it }
+            surfaceEditId = null
+        }
+        AlertDialog(onDismissRequest = { surfaceEditId = null }, title = { Text("Grow a surface from this line") }, text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("The line becomes a surface with its shape (a curve makes a bent sheet), going this deep into ${editPlane.label} view, away from you.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+                OutlinedTextField(depth, { if (decimalInputPattern.matches(it)) depth = it }, label = { Text("Depth ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                Text("Made of", fontWeight = FontWeight.Medium)
+                (listOf<Material?>(null) + materials.filter { it.isSheet }).forEach { material ->
+                    Row(Modifier.fillMaxWidth().clickable { sheetId = material?.id }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = sheetId == material?.id, onClick = { sheetId = material?.id })
+                        if (material != null) Box(Modifier.size(24.dp).background(Color(material.argb), RoundedCornerShape(4.dp)))
+                        Column(Modifier.padding(start = 8.dp)) {
+                            Text(material?.name ?: "Plain surface", fontSize = 14.sp)
+                            Text(material?.description ?: "Grey, 2 mm thick", fontSize = 12.sp, color = Color(0xFF4D5A57))
+                        }
+                    }
+                }
+                TextButton(onClick = { surfaceEditId = null; showMaterials = true }) { Text("Edit materials… (add a sheet: steel, wood, glass)") }
+                if (guide.surfaceMm != null) TextButton(onClick = { apply(null, null) }) { Text("Remove surface (back to a line)", color = Color(0xFFB3261E)) }
+            }
+        }, confirmButton = { TextButton(enabled = depthMm != null, onClick = { apply(depthMm, sheetId); logToast(context, "Surface made: tap View 3D to see it", Toast.LENGTH_SHORT).show() }) { Text("Grow") } },
+            dismissButton = { TextButton(onClick = { surfaceEditId = null }) { Text("Cancel") } })
+    } ?: run { surfaceEditId = null } }
     lineMaterialId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
         var chosen by remember(id) { mutableStateOf(guide.materialId) }
         var turn by remember(id) { mutableStateOf(guide.materialTurnDeg) }
@@ -8311,7 +8350,7 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
     // faces are made; rendering those as nothing made the whole 3D object appear
     // to break apart. Keep such construction edges visible as slim material bars.
     val sheetFaceEdges = drawableGuideShapes(guides).flatten().map { it.id }.toSet()
-    return guides.flatMap { guide ->
+    return buildSurfaces(guides, materials, setup, issues, previewCurveSteps) + guides.filter { it.surfaceMm == null }.flatMap { guide ->
         // Sheets belong to closed shapes; only bars and pipes follow a line.
         // A thin neutral bar makes unmaterialed drawing guides visible in 3D.
         // It is preview-only and is never included in exports.
@@ -8343,6 +8382,27 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
                 (guide.plane to -(guide.id + 1)) to MemberBuilder.build(name, points[i] - dir * extend[i], points[k] + dir * extend[k], guide.plane.toward, material.profile, material.argb, guide.materialTurnDeg)
             }
         } catch (e: MeshException) { issues?.addAll(e.issues); emptyList() }
+    }
+}
+
+/**
+ * Lines grown into surfaces: each open (broken) line with a surface depth becomes one bent sheet, as thick as its
+ * sheet material (2 mm without one), pushed into the depth of the view it was drawn in.
+ */
+private fun buildSurfaces(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>?, previewCurveSteps: Int?): List<Pair<Pair<ModelPlane, Int>, Mesh>> {
+    var count = 0
+    return guides.filter { it.surfaceMm != null }.groupBy { Triple(it.plane, it.pathId ?: -it.id, it.surfaceMm) }.flatMap { (key, segs) ->
+        val mapping = setup.mapping(key.first) ?: return@flatMap emptyList()
+        val sheet = segs.firstNotNullOfOrNull { g -> g.materialId?.let(materials::get)?.takeIf { it.isSheet } }
+        val pieces = segs.map { g ->
+            val steps = if (g.curveMid == null) 1 else previewCurveSteps?.coerceIn(1, 12) ?: 12
+            (0..steps).map { i -> val t = i.toFloat() / steps; mapping.model(guidePointAt(g, t), g.startZMm + (g.endZMm - g.startZMm) * t) }
+        }
+        SurfaceBuilder.chains(pieces).mapIndexedNotNull { i, chain ->
+            val name = "${sheet?.name ?: "Surface"} ${++count}"
+            try { (key.first to -(segs[minOf(i, segs.lastIndex)].id + 1)) to SurfaceBuilder.build(name, chain, key.first.toward, key.third!!, sheet?.sheetMm ?: 2.0, sheet?.argb ?: 0xFFB0BEC5.toInt()) }
+            catch (e: MeshException) { issues?.addAll(e.issues); null }
+        }
     }
 }
 
@@ -8453,7 +8513,7 @@ private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops
     // A shape made of a sheet takes the sheet's color and look.
     fun sheetOf(i: Int): Material? = objects[i].let { e -> guides.filter { it.plane == e.plane && it.id in e.guideIds }.firstNotNullOfOrNull { g -> g.materialId?.let(materials::get)?.takeIf { it.isSheet } } }
     val shapeMeshes = kept.map { i -> val mesh = combined[i]!!; sheetOf(i)?.let { mesh.copy(argb = it.argb) } ?: mesh }
-    val memberFinishes = guides.filter { g -> g.materialId?.let(materials::get)?.isSheet == false }.associate { (it.plane to -(it.id + 1)) to materials.getValue(it.materialId!!).finish }
+    val memberFinishes = guides.filter { g -> g.materialId?.let(materials::get)?.let { !it.isSheet || g.surfaceMm != null } == true }.associate { (it.plane to -(it.id + 1)) to materials.getValue(it.materialId!!).finish }
     val loftMeshes = buildLoftMeshes(lofts, guides, setup)
     return ModelBuild(shapeMeshes + members.map { it.second } + loftMeshes.map { it.second }, kept.map { keys[it] } + members.map { it.first } + loftMeshes.map { it.first }, issues + overlaps,
         kept.map { sheetOf(it)?.finish ?: Finish.PLAIN } + members.map { memberFinishes[it.first] ?: Finish.PLAIN } + List(loftMeshes.size) { Finish.PLAIN })
