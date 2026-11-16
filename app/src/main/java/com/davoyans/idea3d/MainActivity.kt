@@ -1099,6 +1099,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var showDistributionConfirm by remember { mutableStateOf<Pair<Boolean, Boolean>?>(null) }
     // Existing selected lines/shapes waiting for a visible 3D face to attach to.
     var surfaceAttachItems by remember { mutableStateOf<List<Pair<ModelPlane, Int>>?>(null) }
+    var pipeProfile by remember { mutableStateOf<Pair<ModelPlane, Int>?>(null) }
     var itemDragLast by remember { mutableStateOf<Pt?>(null) }
     var itemRectStart by remember { mutableStateOf<Pt?>(null) }
     var itemRectEnd by remember { mutableStateOf<Pt?>(null) }
@@ -2490,6 +2491,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     // Defined further down; tap handling reaches them through these.
     var setSelectModeLate: (Boolean) -> Unit = {}
+    // Pipe with only its profile picked waits for a tap on the path.
+    var pipeLate: (Pair<ModelPlane, Int>, List<Pair<ModelPlane, Int>>) -> Unit = { _, _ -> }
     var itemNameLate: (Pair<ModelPlane, Int>) -> String = { "Item" }
     fun closedHere(key: Pair<ModelPlane, Int>) = closedGuideShapes(planeGeometry(key.first).guides).any { path -> path.any { g -> g.id == key.second } || itemGuides(key).any { g -> path.any { it.id == g.id } } }
     /** A 3D object: a shape with depth, a surface grown from a line, or a bar or pipe. */
@@ -2530,6 +2533,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         ActionLog.add("box select (${selectionMode.label}): items=${pickedItems.size}, lines=${pickedSegments.size}, points=${pickedPoints.size}")
     }
     fun handleTap(point: Pt, hitRadius: Double) {
+        pipeProfile?.let { profile ->
+            // Any line, broken line, curve or shape in this view (drawn here or in another view) is the path.
+            val path = itemAt(point, hitRadius)?.takeIf { key -> !(key.first == profile.first && itemGuides(key).any { g -> itemGuides(profile).any { it.id == g.id } }) }
+            if (path == null) { logToast(context, "Tap the path: a line, broken line, curve or shape (not the profile). Tap Pipe again to cancel", Toast.LENGTH_LONG).show(); return }
+            pipeProfile = null
+            pipeLate(profile, listOf(path))
+            return
+        }
         surfaceAttachItems?.let { items ->
             val surface = surfacePickAt(point, ignore = items.toSet())
             if (surface == null) logToast(context, "Tap a visible line, shape, or 3D surface", Toast.LENGTH_LONG).show()
@@ -4568,12 +4579,20 @@ private fun backgroundDoneNotification(context: Context, text: String) {
      * is edited, keeps the profile square to it, and miters every corner. The profile drawing stays as it is.
      */
     fun pipePicked() {
+        if (pipeProfile != null) { pipeProfile = null; logToast(context, "Pipe cancelled", Toast.LENGTH_SHORT).show(); return }
         val picks = distinctPicked()
         val profileKey = picks.firstOrNull(::isClosedShape)
         val paths = picks.filter { it != profileKey }
-        if (profileKey == null || paths.isEmpty()) {
-            logToast(context, "Pick the profile (a closed shape) first, then the path: lines, a broken line, a curve or a shape, in any view", Toast.LENGTH_LONG).show(); return
+        if (profileKey == null) { logToast(context, "Pick the profile first: a closed shape such as a circle or rectangle", Toast.LENGTH_LONG).show(); return }
+        if (paths.isEmpty()) {
+            // Only the profile is picked: the next tap, in any view, chooses the path.
+            pipeProfile = profileKey
+            ActionLog.add("pipe: waiting for the path, profile ${profileKey.first.label} line ${profileKey.second}")
+            logToast(context, "Now tap the path: a line, broken line, curve or shape. You can switch view first", Toast.LENGTH_LONG).show(); return
         }
+        pipeLate(profileKey, paths)
+    }
+    fun pipeAlong(profileKey: Pair<ModelPlane, Int>, paths: List<Pair<ModelPlane, Int>>) {
         if (paths.any(::itemLocked)) { logToast(context, "Unlock the path first", Toast.LENGTH_SHORT).show(); return }
         val profile = profileOf(profileKey)
         if (profile == null || profile.problem() != null) { logToast(context, "The profile must be one closed outline that doesn't cross itself", Toast.LENGTH_LONG).show(); return }
@@ -4717,6 +4736,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         if (on) { tool = Tool.ADJUST; clearOwnSelection(); selectedForeign = null; selectedGhostPoint = null; panOnEmptyDrag = false }
     }
     setSelectModeLate = ::setSelectMode
+    pipeLate = ::pipeAlong
     /** The bottom Select button climbs from a node to its line, shape, then 3D object. */
     fun selectionLadderLabel(): String = when {
         selectMode && pickedItems.size == 1 && extrusionOf(pickedItems.single()) != null -> "3D"
@@ -5100,7 +5120,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { ActionLog.add("select filter ${it.label}"); selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
+        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { ActionLog.add("select filter ${it.label}"); selectionMode = it; if (!selectMode) setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
             // Select first, then Modify: the selected line or shape stays selected, as a whole.
             if (it == Tool.ADJUST && selectedGuideId != null && selectedWholeGuideId == null) selectedWholeGuideId = selectedGuideId
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; triangleBaseReady = false; triangleApex = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it; draftStart = null; pendingEnd = null; triangleBaseReady = false; triangleApex = null }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
@@ -5294,7 +5314,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
                         ActionIcon("Intersect", R.drawable.ic_cube, enabled = n >= 1 && pickedItems.all(::isClosedShape), onClick = ::intersectPicked)
-                        ActionIcon("Pipe", R.drawable.ic_broken_line, enabled = n >= 2, onClick = ::pipePicked)
+                        ActionIcon(if (pipeProfile != null) "Cancel pipe" else "Pipe", R.drawable.ic_broken_line, enabled = pipeProfile != null || n >= 1 && pickedItems.firstOrNull()?.let(::isClosedShape) == true, onClick = ::pipePicked)
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total + parts > 0) { pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList() }
                         ViewIcons()
