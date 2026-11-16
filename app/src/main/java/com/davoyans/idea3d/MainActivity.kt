@@ -4467,6 +4467,79 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         logToast(context, "Cut needs a shape and a shape or straight line in the same view, or two 3D objects", Toast.LENGTH_LONG).show()
     }
     /** Keeps only the overlap of two selected shapes (or their shared 3D volume). */
+    /** The depth range along its own view's line of sight that an extrusion fills. */
+    fun extrusionRange(e: Extrusion): Pair<Double, Double> {
+        val depth = e.depthMm ?: 0.0
+        return if (e.plane == ModelPlane.FRONT) (e.positionZMm - depth) to e.positionZMm else e.positionZMm to (e.positionZMm + depth)
+    }
+    /** Model points of a shape or 3D object: its outline, at both faces when it is already 3D. */
+    fun itemModelPoints(key: Pair<ModelPlane, Int>): List<Vec3> {
+        val mapping = modelSetup().mapping(key.first) ?: return emptyList()
+        val depths = extrusionOf(key)?.let { extrusionRange(it).toList() } ?: listOf(0.0)
+        return itemGuides(key).flatMap { g -> guidePoints(g) }.flatMap { p -> depths.map { d -> mapping.model(p, d) } }
+    }
+    fun rangeAlong(key: Pair<ModelPlane, Int>, axis: Vec3): Pair<Double, Double>? =
+        itemModelPoints(key).map { it dot axis }.takeIf { it.isNotEmpty() }?.let { it.min() to it.max() }
+    /** Makes a closed shape 3D, filling exactly [lo]..[hi] along its view's line of sight. */
+    fun setExtrusionRange(key: Pair<ModelPlane, Int>, lo: Double, hi: Double) {
+        if (extrusionOf(key) == null) {
+            val geometry = planeGeometry(key.first)
+            val pts = itemGuides(key).flatMap { listOf(it.start, it.end) }
+            val origin = Pt(pts.map { it.x }.average().toFloat(), pts.map { it.y }.average().toFloat())
+            val template = allExtrusions().firstOrNull()
+            setPlaneShapes(key.first, geometry.guides, geometry.extrusions + Extrusion((geometry.extrusions.maxOfOrNull { it.id } ?: 0) + 1, itemGuides(key).map { it.id },
+                origin, origin, template?.vanishing ?: origin, template?.sun ?: origin, depthMm = hi - lo, plane = key.first))
+        }
+        val e = extrusionOf(key) ?: return
+        val next = if (key.first == ModelPlane.FRONT) e.copy(depthMm = hi - lo, positionZMm = hi) else e.copy(depthMm = hi - lo, positionZMm = lo)
+        val geometry = planeGeometry(key.first)
+        setPlaneShapes(key.first, geometry.guides, geometry.extrusions.map { if (it.id == e.id) next else it })
+    }
+    /**
+     * Extrude → Intersect: a shape drawn in one view and a shape (or 3D object) from another view each grow through the
+     * other's whole size, and only the space inside both is kept. Picking just the new shape uses the shape or object from
+     * another view that it overlaps most. Doing it again from a third view trims the same object once more.
+     */
+    fun intersectPicked() {
+        var items = distinctPicked().filter(::isClosedShape)
+        if (items.isEmpty()) { logToast(context, "Pick a closed shape, drawn in a different view from the shape it should cut", Toast.LENGTH_LONG).show(); return }
+        if (items.any(::itemLocked)) { logToast(context, "Unlock the shapes first", Toast.LENGTH_SHORT).show(); return }
+        if (items.size == 1) {
+            val shape = items.single()
+            val shared = shape.first.right.let { r -> shape.first.up.let { u -> listOf(r, u) } }
+            fun overlap(other: Pair<ModelPlane, Int>): Double = shared.sumOf { axis ->
+                val a = rangeAlong(shape, axis) ?: return@sumOf 0.0; val b = rangeAlong(other, axis) ?: return@sumOf 0.0
+                // Only the axis both views show counts; the other one is the line of sight of one of them.
+                if (abs(axis dot other.first.toward) > 0.5) 0.0 else (min(a.second, b.second) - max(a.first, b.first)).coerceAtLeast(0.0)
+            }
+            val candidates = ModelPlane.entries.filter { it != shape.first }.flatMap { plane ->
+                closedGuideShapes(planeGeometry(plane).guides).filterNot { path -> path.all { it.hole } }.map { path -> plane to path.first().id }
+            }.distinctBy { k -> k.first to (itemGuides(k).minOfOrNull { it.id } ?: k.second) }
+            // An object already made by Intersect is the natural partner for a shape in a third view.
+            val made = solidOps.filter { it.common }.map { it.target }.toSet()
+            val partner = candidates.filter { overlap(it) > 0 }.maxWithOrNull(compareBy<Pair<ModelPlane, Int>>({ k -> extrusionOf(k)?.let { (k.first to it.id) in made } == true }, { overlap(it) }))
+            if (partner == null) { logToast(context, "Draw this shape over a shape from another view (Front, Top or Profile), then Intersect", Toast.LENGTH_LONG).show(); return }
+            items = listOf(partner, shape)
+        }
+        if (items.map { it.first }.distinct().size < 2) { logToast(context, "Intersect needs shapes from two different views", Toast.LENGTH_LONG).show(); return }
+        pushUndo()
+        val base = items.first()
+        val made = solidOps.filter { it.common }.map { it.target }.toSet()
+        // Each shape grows through everything the others take up along its line of sight, with a little to spare.
+        val ranges = items.associateWith { key ->
+            items.filter { it.first != key.first }.mapNotNull { rangeAlong(it, key.first.toward) }.let { rs -> if (rs.isEmpty()) null else (rs.minOf { it.first } - 1.0) to (rs.maxOf { it.second } + 1.0) }
+        }
+        items.forEach { key ->
+            val keep = key == base && extrusionOf(key)?.let { (key.first to it.id) in made } == true
+            if (!keep) ranges[key]?.let { (lo, hi) -> setExtrusionRange(key, lo, hi) }
+        }
+        val baseSolid = extrusionOf(base) ?: return
+        val ops = items.drop(1).mapNotNull { key -> extrusionOf(key)?.let { SolidOp(base.first to baseSolid.id, key.first to it.id, join = false, common = true) } }
+        solidOps = solidOps + ops.filterNot { it in solidOps }
+        pickedItems = emptyList()
+        ActionLog.add("intersect: base ${base.first.label} line ${base.second} with ${ops.size} shape(s); 3D objects=${allExtrusions().size}, operations=${solidOps.size}")
+        logToast(context, "Intersected: only the part inside both outlines is kept. Draw in another view and Intersect again to trim more", Toast.LENGTH_LONG).show()
+    }
     fun commonPicked() {
         val first = pickedItems.firstOrNull(); val second = first?.let { a -> pickedItems.firstOrNull { !sameItem(it, a) } }
         if (first == null || second == null) { logToast(context, "Pick two shapes: first and second", Toast.LENGTH_SHORT).show(); return }
@@ -5168,6 +5241,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
+                        ActionIcon("Intersect", R.drawable.ic_cube, enabled = n >= 1 && pickedItems.all(::isClosedShape), onClick = ::intersectPicked)
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total + parts > 0) { pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList() }
                         ViewIcons()
