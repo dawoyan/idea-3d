@@ -2167,6 +2167,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     /** The item under [point]: one drawn here, or one from another view as it shows here. */
     /** The item key of a line shown here: its own view and its id there. */
     fun homeKey(g: GuideLine): Pair<ModelPlane, Int> = if (g.plane == editPlane) editPlane to g.id else g.plane to (homeId(g.id, newIdBase(g.plane) { it.id }) ?: g.id)
+    /** Points already marked by another tool (a tapped end, a box of points), as Select picks. */
+    fun markedPoints(): List<Triple<ModelPlane, Int, Boolean>> {
+        val own = (selectedVertices + listOfNotNull(selectedGuideEndpoint?.let { e -> guides.firstOrNull { it.id == e.guideId }?.let { g -> if (e.isStart) g.start else g.end } }))
+            .flatMap { p -> guides.flatMap { g -> val k = homeKey(g); listOfNotNull(
+                Triple(k.first, k.second, true).takeIf { distance(g.start, p) < 0.6 }, Triple(k.first, k.second, false).takeIf { distance(g.end, p) < 0.6 }) }.take(1) }
+        return (selectedGhostPoints + listOfNotNull(selectedGhostPoint) + own).fold(emptyList()) { acc, sel -> if (acc.any { samePoint(it, sel) }) acc else acc + sel }
+    }
     fun itemAt(point: Pt, radius: Double): Pair<ModelPlane, Int>? {
         closestGuide(point, guides, radius * 1.7)?.let { return homeKey(it) }
         fun segmentDistance(a: Pt, b: Pt): Double { val dx = b.x - a.x; val dy = b.y - a.y; val t = (((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy).coerceAtLeast(1e-6f)).coerceIn(0f, 1f); return distance(point, Pt(a.x + dx * t, a.y + dy * t)) }
@@ -4461,11 +4468,16 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
         val here = modelSetup().mapping(editPlane) ?: return
         val itemBoxes: List<Pair<Any, FloatArray>> = distinctPicked().mapNotNull { k -> itemBox(k)?.let { k to it } }
-        val pointBoxes: List<Pair<Any, FloatArray>> = pickedPoints.filterNot { p -> pickedItems.any { it.first == p.first && itemGuides(it).any { g -> g.id == p.second } } }.mapNotNull { p -> ghostPointHere(p)?.let { at -> p to floatArrayOf(at.x, at.y, at.x, at.y) } }
+        val points = (pickedPoints + markedPoints()).fold(emptyList<Triple<ModelPlane, Int, Boolean>>()) { acc, sel -> if (acc.any { samePoint(it, sel) }) acc else acc + sel }
+        val pointBoxes: List<Pair<Any, FloatArray>> = points.filterNot { p -> pickedItems.any { it.first == p.first && itemGuides(it).any { g -> g.id == p.second } } }.mapNotNull { p -> ghostPointHere(p)?.let { at -> p to floatArrayOf(at.x, at.y, at.x, at.y) } }
         val boxes = itemBoxes + pointBoxes
         @Suppress("UNCHECKED_CAST")
         fun moveAny(k: Any, d: Vec3) = if (k is Triple<*, *, *>) moveGhostPoint(k as Triple<ModelPlane, Int, Boolean>, d) else moveItem(k as Pair<ModelPlane, Int>, d)
-        if (boxes.size < 2 || distribute && boxes.size < 3) { logToast(context, if (distribute) "Pick at least three items to space them" else "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
+        ActionLog.add("arrange: items=${itemBoxes.size}, points=${pointBoxes.size} (picked points=${pickedPoints.size}, marked=${markedPoints().size}, parts=${pickedSegments.size})")
+        if (boxes.size < 2 || distribute && boxes.size < 3) {
+            val have = "${boxes.size} picked" + if (pickedSegments.isNotEmpty()) "; single lines of a shape don't count, pick their points" else ""
+            logToast(context, if (distribute) "Pick at least three items or points to space them ($have)" else "Pick at least two items or points ($have)", Toast.LENGTH_LONG).show(); return
+        }
         fun cx(b: FloatArray) = (b[0] + b[2]) / 2.0
         fun cy(b: FloatArray) = (b[1] + b[3]) / 2.0
         // A mirrored view shows the canvas flipped, so its screen top or left is the canvas's far side.
@@ -4551,7 +4563,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         pickedItems = emptyList()
     }
     fun setSelectMode(on: Boolean) {
-        selectMode = on; selectByTap = false; pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList(); itemRectStart = null; itemRectEnd = null; selectedGhostPoints = emptyList()
+        // Points marked before Select starts stay picked, so what shows as selected is what Align and Move use.
+        val carried = if (on && !selectMode) markedPoints() else emptyList()
+        selectMode = on; selectByTap = false; pickedItems = emptyList(); pickedPoints = carried; pickedSegments = emptyList(); itemRectStart = null; itemRectEnd = null; selectedGhostPoints = emptyList()
         if (on) { tool = Tool.ADJUST; clearOwnSelection(); selectedForeign = null; selectedGhostPoint = null; panOnEmptyDrag = false }
     }
     setSelectModeLate = ::setSelectMode
@@ -7147,18 +7161,6 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 // Cyan dashed rulings are not geometry: they are the editable Loft's correspondence guides.
                 val loftStroke = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 9f))
                 loftLines.forEach { (a, b) -> drawLine(Color(0xFF00A6A6), viewAt(a), viewAt(b), strokeWidth = 2.5f, pathEffect = loftStroke) }
-                // Picked items: a wide orange band for a whole object (shape, broken line, 3D object), a thin one for a single line.
-                pickedOutlines.forEach { (pts, whole) -> pts.zipWithNext().forEach { (a, b) ->
-                    val from = viewAt(Pt(a.x, a.y)); val to = viewAt(Pt(b.x, b.y))
-                    if (whole) { drawLine(Color(0x88FF8F00), from, to, strokeWidth = 11.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round); drawLine(Color(0xFFE65100), from, to, strokeWidth = 1.5.dp.toPx()) }
-                    else drawLine(Color(0xCCFF8F00), from, to, strokeWidth = 6.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                } }
-                itemRect?.let { (a, b) ->
-                    val tl = viewAt(a).let { p -> viewAt(b).let { q -> Offset(min(p.x, q.x), min(p.y, q.y)) } }
-                    drawRect(Color(0x33FF8F00), tl, Size(abs(a.x - b.x) * fit, abs(a.y - b.y) * fit)); drawRect(Color(0xFFFF8F00), tl, Size(abs(a.x - b.x) * fit, abs(a.y - b.y) * fit), style = Stroke(3f))
-                }
-                // Picked points: a ring around each.
-                ghostPointMarks.forEach { p -> val c = viewAt(Pt(p.x, p.y)); drawCircle(Color.White, 11.dp.toPx(), c, style = Stroke(4.dp.toPx())); drawCircle(Color(0xFFE65100), 11.dp.toPx(), c, style = Stroke(2.5.dp.toPx())) }
                 ghostPointMark?.let { p -> val c = viewAt(Pt(p.x, p.y)); drawCircle(Color.White, 22f, c); drawCircle(Color(0xFFE65100), 22f, c, style = Stroke(7f)); drawCircle(Color(0xFFE65100), 8f, c) }
                 growArrows.forEach { (anchor, dir) -> growArrow(viewAt(anchor), screenDir(dir)) }
                 // A selected circle's size handles: small squares on its rim.
@@ -7430,6 +7432,19 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         vertexLabel(viewAt(line.end), names.second)
                     }
                 }
+            // Picked items, drawn over the drawing (bars and pipes included) so they always show:
+            // a wide orange band for a whole object (shape, broken line, 3D object), a thin one for a single line.
+            pickedOutlines.forEach { (pts, whole) -> pts.zipWithNext().forEach { (a, b) ->
+                val from = viewAt(Pt(a.x, a.y)); val to = viewAt(Pt(b.x, b.y))
+                if (whole) { drawLine(Color(0x99FF8F00), from, to, strokeWidth = 11.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round); drawLine(Color(0xFFE65100), from, to, strokeWidth = 2.dp.toPx()) }
+                else drawLine(Color(0xCCFF8F00), from, to, strokeWidth = 6.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            } }
+            itemRect?.let { (a, b) ->
+                val tl = viewAt(a).let { p -> viewAt(b).let { q -> Offset(min(p.x, q.x), min(p.y, q.y)) } }
+                drawRect(Color(0x33FF8F00), tl, Size(abs(a.x - b.x) * fit, abs(a.y - b.y) * fit)); drawRect(Color(0xFFFF8F00), tl, Size(abs(a.x - b.x) * fit, abs(a.y - b.y) * fit), style = Stroke(3f))
+            }
+            // Picked points: a ring around each.
+            ghostPointMarks.forEach { p -> val c = viewAt(Pt(p.x, p.y)); drawCircle(Color.White, 11.dp.toPx(), c, style = Stroke(4.dp.toPx())); drawCircle(Color(0xFFE65100), 11.dp.toPx(), c, style = Stroke(2.5.dp.toPx())) }
             if (heldLineBlink) heldLineId?.let { id -> lines.firstOrNull { it.id == id } }?.let { line ->
                 val a = viewAt(line.start); val b = viewAt(line.end)
                 drawLine(Color.White, a, b, 14f * strokeZoom)
