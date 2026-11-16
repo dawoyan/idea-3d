@@ -2535,7 +2535,12 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }.filter { distance(it.second, point) <= hitRadius }.minByOrNull { distance(it.second, point) }
             val item = if (selectionMode == SelectionMode.VISIBLE) closestGuide(point, guides, hitRadius * 1.7)?.let(::homeKey) ?: itemAt(point, hitRadius) else itemAt(point, hitRadius)
             if (selectionMode == SelectionMode.VISIBLE || selectionMode == SelectionMode.ALL) {
-                // The biggest thing first: a group, then its object (or shape, or line), then the line tapped, then its point.
+                // A tap right on a point picks that point; a tap on a line away from its points climbs from the
+                // biggest thing: a group, then its object (or shape, or line), then the line tapped.
+                if (pointPick != null && pickedSegments.isEmpty()) {
+                    togglePoint(pointPick.first)
+                    return
+                }
                 if (item == null) {
                     if (pointPick != null) togglePoint(pointPick.first)
                     else if (selectByTap) { setSelectModeLate(false); tool = Tool.NONE }
@@ -5022,7 +5027,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 show3d -> "3D: drag to orbit, two fingers to pan and zoom, tap a shape for exact sizes"
                 tool == Tool.ADJUST && selectedForeign != null -> "Drag the shape to move it · round handles resize · dots move points · tap it again for exact sizes"
                 tool == Tool.ADJUST && foreign.isNotEmpty() && selectedEndpoint == null && selectedGuideEndpoint == null && selectedWholeGuideId == null -> "Tap a shape to select it. Grey shapes were drawn in another view and can be moved and resized here"
-                tool == Tool.NONE && !selectMode && (guides.isNotEmpty() || foreign.isNotEmpty()) -> "Tap an object, shape or line to pick it whole; tap it again for one line"
+                tool == Tool.NONE && !selectMode && (guides.isNotEmpty() || foreign.isNotEmpty()) -> "Tap a point to pick it; tap a line to pick its object, again for one line"
                 else -> null
             }
             val axesHint = if (show3d) "" else if (editPlane in mirroredViews) when (editPlane) { ModelPlane.FRONT -> "X ←  Y ↑  from behind"; ModelPlane.TOP -> "X →  Z ↑ front  from below"; ModelPlane.PROFILE -> "Z → front  Y ↑  from the left" }
