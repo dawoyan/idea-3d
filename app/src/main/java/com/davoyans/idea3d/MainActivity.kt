@@ -1430,12 +1430,17 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 .onFailure { logToast(context, "Could not import project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
+    /** A file the system picker made but nothing could be written to: removed, so no empty file is left behind. */
+    fun discardEmpty(uri: Uri) { runCatching { android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri) } }
     val projectExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
-        val id = projectExportId; projectExportId = null
+        // Kept in preferences too: Android may recreate the app while its file picker is open.
+        val id = projectExportId ?: preferences.getString("pending_project_export", null); projectExportId = null
+        preferences.edit().remove("pending_project_export").apply()
+        if (uri != null && id == null) { discardEmpty(uri); logToast(context, "The export was interrupted. Please export again.", Toast.LENGTH_LONG).show() }
         if (uri != null && id != null) scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { ProjectStore.exportProject(context, id, uri) } }
             result.onSuccess { logToast(context, "Project exported", Toast.LENGTH_SHORT).show() }
-                .onFailure { logToast(context, "Could not export project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+                .onFailure { discardEmpty(uri); logToast(context, "Could not export project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
     fun writeStagedModel(uri: Uri?, extension: String) {
@@ -1450,7 +1455,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 written
             } }
             result.onSuccess { bytes -> staged.delete(); logToast(context, "${if (extension == "txt.stl") "Text STL" else extension.uppercase()} model exported (${"%,d".format(bytes)} bytes)", Toast.LENGTH_LONG).show() }
-                .onFailure { logToast(context, "3D export failed: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+                .onFailure { discardEmpty(uri); logToast(context, "3D export failed: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         } else staged.delete()
     }
     /** Reads a downloaded 3D model and places it, one solid piece, in the middle of this view. */
@@ -1586,10 +1591,20 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         return out to skipped
     }
     val dxfExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/dxf")) { uri ->
-        val (content, count, skipped) = pendingDxf ?: return@rememberLauncherForActivityResult
+        // The drawing is staged in a file: Android may recreate the app while its file picker is open.
+        val staged = File(context.cacheDir, "pending-dxf-export.dxf")
+        val count = pendingDxf?.second ?: preferences.getInt("pending_dxf_count", 0); val skipped = pendingDxf?.third ?: preferences.getInt("pending_dxf_skipped", 0)
         pendingDxf = null
-        if (uri != null) scope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { (context.contentResolver.openOutputStream(uri) ?: error("Cannot open the selected file")).use { it.write(content.toByteArray(Charsets.US_ASCII)) } } }
+        if (uri == null) { staged.delete(); return@rememberLauncherForActivityResult }
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching {
+                require(staged.isFile && staged.length() > 0) { "the prepared drawing is unavailable. Please export again." }
+                val stream = runCatching { context.contentResolver.openOutputStream(uri, "wt") }.getOrNull() ?: context.contentResolver.openOutputStream(uri) ?: error("Cannot open the selected file")
+                val written = staged.inputStream().use { input -> stream.use { output -> input.copyTo(output) } }
+                check(written == staged.length()) { "Only $written of ${staged.length()} bytes were written" }
+                staged.delete()
+            } }
+            if (result.isFailure) discardEmpty(uri)
             result.onSuccess { logToast(context, "DXF exported: $count item${if (count == 1) "" else "s"}" + if (skipped > 0) ", $skipped skipped (couldn't be written)" else "", Toast.LENGTH_LONG).show() }
                 .onFailure { logToast(context, "Could not save the DXF: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
@@ -4859,7 +4874,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; triangleBaseReady = false; triangleApex = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it; draftStart = null; pendingEnd = null; triangleBaseReady = false; triangleApex = null }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
     ) { padding ->
         if (bitmap == null) LibraryScreen(Modifier.padding(padding), library, { picker.launch("image/*") }, ::newScene, { projectPicker.launch(arrayOf("application/zip", "application/octet-stream")) }, { showSettings = true }, { showMaterials = true }, { project -> renameTarget = project }, { project ->
-            projectExportId = project.id
+            projectExportId = project.id; preferences.edit().putString("pending_project_export", project.id).apply()
             projectExporter.launch("${project.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Idea-3D" }}.zip")
         }, { project, nextUnit ->
             if (project.unit != nextUnit) {
@@ -5249,7 +5264,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             runCatching { dxfOfView(includeLabels) }.onSuccess { (entities, skipped) ->
                 if (entities.isEmpty()) logToast(context, "Nothing to export in the $viewName view" + if (skipped > 0) " ($skipped item${if (skipped == 1) "" else "s"} couldn't be written)" else "", Toast.LENGTH_LONG).show()
                 else {
-                    pendingDxf = Triple(DxfExport.write(entities), entities.size, skipped)
+                    val text = DxfExport.write(entities)
+                    File(context.cacheDir, "pending-dxf-export.dxf").writeBytes(text.toByteArray(Charsets.US_ASCII))
+                    preferences.edit().putInt("pending_dxf_count", entities.size).putInt("pending_dxf_skipped", skipped).apply()
+                    pendingDxf = Triple("", entities.size, skipped)
                     val base = projectName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Idea-3D" }
                     dxfExporter.launch("$base-$viewName.dxf")
                 }

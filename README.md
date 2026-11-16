@@ -189,3 +189,6 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
 - Surfaces grown from lines show in every 2D view, filled in their material colour; tap anywhere on one to pick it, and drag it in any view to move it.
 - Select → Objects picks surfaces and bar/pipe lines as whole objects; tapping a plain line says why nothing is picked.
 - Roomik round trip: Roomik can open a 3MF model in Idea 3D as a new scene, each part kept with its colour.
+
+### 0.10.64
+- Exports never leave an empty file: the DXF drawing and project export are prepared in a file first (like 3D models), so they survive Android pausing the app behind the Save picker; if anything fails, the empty file the picker made is removed and a message says why. DXF overwrites an existing file cleanly.
