@@ -1443,10 +1443,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         if (uri != null) scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching {
                 require(staged.isFile && staged.length() > 0) { "The prepared model is unavailable. Please export again." }
-                val stream = context.contentResolver.openOutputStream(uri) ?: error("Cannot open the selected file")
-                staged.inputStream().use { input -> stream.use { output -> input.copyTo(output) } }
+                // "wt" truncates: replacing a longer older file with plain "w" would leave its tail behind.
+                val stream = runCatching { context.contentResolver.openOutputStream(uri, "wt") }.getOrNull() ?: context.contentResolver.openOutputStream(uri) ?: error("Cannot open the selected file")
+                val written = staged.inputStream().use { input -> stream.use { output -> input.copyTo(output) } }
+                check(written == staged.length()) { "Only $written of ${staged.length()} bytes were written" }
+                written
             } }
-            result.onSuccess { staged.delete(); logToast(context, "${extension.uppercase()} model exported", Toast.LENGTH_LONG).show() }
+            result.onSuccess { bytes -> staged.delete(); logToast(context, "${if (extension == "txt.stl") "Text STL" else extension.uppercase()} model exported (${"%,d".format(bytes)} bytes)", Toast.LENGTH_LONG).show() }
                 .onFailure { logToast(context, "3D export failed: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         } else staged.delete()
     }
@@ -1593,6 +1596,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     val stlExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/stl")) { writeStagedModel(it, "stl") }
     val threeMfExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/3mf")) { writeStagedModel(it, "3mf") }
+    val stlTextExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("model/stl")) { writeStagedModel(it, "txt.stl") }
     LaunchedEffect(sharedImage) { sharedImage?.let { importPicture(it); onSharedImageConsumed() } }
     // a model from Roomik: a new scene named after it, its parts each with their color; "→ Roomik" sends it back
     LaunchedEffect(sharedModel) { sharedModel?.let { (uri, name) -> onSharedModelConsumed(); newScene(); projectName = name; importModelParts(uri) } }
@@ -5648,7 +5652,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     modelReport?.let { report ->
         val safeName = projectName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Idea3D" }
-        ModelReportDialog(report, unit, onDismiss = { modelReport = null }, onStl = { modelReport = null; stlExporter.launch("$safeName.stl") }, on3mf = { modelReport = null; threeMfExporter.launch("$safeName.3mf") },
+        ModelReportDialog(report, unit, onDismiss = { modelReport = null }, onStl = { modelReport = null; stlExporter.launch("$safeName.stl") }, on3mf = { modelReport = null; threeMfExporter.launch("$safeName.3mf") }, onStlText = { modelReport = null; stlTextExporter.launch("$safeName-text.stl") },
             onRoomik = { modelReport = null; sendToRoomik(context, File(context.cacheDir, "pending-3d-export.3mf"), projectName.ifBlank { "Model" }) })
     }
     if (showSimpleTraceCommand) SimpleTraceCommandDialog(
@@ -5700,6 +5704,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 val meshes = buildMeshes(exportGuidesSnapshot, exportExtrusionsSnapshot, exportOps, exportSetup, exportMaterials, exportModels)
                 File(context.cacheDir, "pending-3d-export.stl").writeBytes(ModelExport.stl(meshes))
                 File(context.cacheDir, "pending-3d-export.3mf").writeBytes(ModelExport.threeMf(meshes))
+                File(context.cacheDir, "pending-3d-export.txt.stl").writeText(ModelExport.stlAscii(meshes), Charsets.US_ASCII)
                 meshes
             } }
             modelReport = result.fold(
@@ -6282,7 +6287,7 @@ private fun sendToRoomik(context: android.content.Context, file: File, name: Str
     }
 }
 
-@Composable private fun ModelReportDialog(report: ModelReport, unit: String, onDismiss: () -> Unit, onStl: () -> Unit, on3mf: () -> Unit, onRoomik: () -> Unit = {}) {
+@Composable private fun ModelReportDialog(report: ModelReport, unit: String, onDismiss: () -> Unit, onStl: () -> Unit, on3mf: () -> Unit, onRoomik: () -> Unit = {}, onStlText: () -> Unit = {}) {
     val lengthUnit = LengthUnit.of(unit)
     AlertDialog(onDismissRequest = onDismiss, title = { Text(when (report) { ModelReport.Checking -> "Checking model"; is ModelReport.Problems -> "Can't export yet"; is ModelReport.Ready -> "Export 3D model" }) }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -6302,6 +6307,8 @@ private fun sendToRoomik(context: android.content.Context, file: File, name: Str
                     }
                     Text("Checked: closed surfaces, outward normals, positive thickness and no overlapping objects. Files are written in millimeters. Only 3D objects are included, not the photo, guides or measurements.", fontSize = 12.sp, color = Color(0xFF4D5A57))
                     Text("STL stores geometry only. 3MF also keeps each object's color. Open the file in your slicer and check it before printing.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+                    // Plain-text STL for chat assistants and tools that can't read binary files.
+                    OutlinedButton(onClick = onStlText) { Text("STL as text (for ChatGPT and other tools)") }
                 }
             }
         }

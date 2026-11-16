@@ -243,6 +243,15 @@ class MeshTest {
 class ExportTest {
     private val box = MeshBuilder.extrude(SolidSpec("Box <1>", listOf(OutlinePoint(0.0, 0.0, 0.0, 10.0), OutlinePoint(40.0, 0.0, 0.0, 10.0), OutlinePoint(40.0, 20.0, 0.0, 10.0), OutlinePoint(0.0, 20.0, 0.0, 10.0)), 0xFF0066BE.toInt()))
 
+    @Test fun asciiStlIsReadableText() {
+        val text = ModelExport.stlAscii(listOf(box))
+        assertTrue(text.startsWith("solid Box__1_\n"))
+        assertEquals(12, Regex("facet normal").findAll(text).count())
+        assertEquals(36, Regex("vertex ").findAll(text).count())
+        assertTrue(text.contains("vertex 4.000000e+01 2.000000e+01 0.000000e+00"))
+        assertTrue(text.trimEnd().endsWith("endsolid Box__1_"))
+    }
+
     @Test fun stlIsBinaryWithMillimeterCoordinates() {
         val bytes = ModelExport.stl(listOf(box))
         val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)

@@ -26,6 +26,24 @@ object ModelExport {
         return buffer.array()
     }
 
+    /** ASCII STL: larger, but readable by tools that only accept text. One solid per object. */
+    fun stlAscii(meshes: List<Mesh>): String {
+        fun num(v: Double) = String.format(Locale.US, "%.6e", v)
+        val sb = StringBuilder()
+        meshes.forEach { mesh ->
+            val name = mesh.name.replace(Regex("[^A-Za-z0-9_.-]"), "_").ifBlank { "object" }
+            sb.append("solid ").append(name).append('\n')
+            mesh.triangles.forEach { t ->
+                val n = mesh.normal(t)
+                sb.append("  facet normal ").append(num(n.x)).append(' ').append(num(n.y)).append(' ').append(num(n.z)).append("\n    outer loop\n")
+                listOf(t.a, t.b, t.c).forEach { i -> val v = mesh.vertices[i]; sb.append("      vertex ").append(num(v.x)).append(' ').append(num(v.y)).append(' ').append(num(v.z)).append('\n') }
+                sb.append("    endloop\n  endfacet\n")
+            }
+            sb.append("endsolid ").append(name).append('\n')
+        }
+        return sb.toString()
+    }
+
     /** Minimal 3MF package (core spec) with millimeter units and one base material per object color. */
     fun threeMf(meshes: List<Mesh>): ByteArray {
         val out = ByteArrayOutputStream()
