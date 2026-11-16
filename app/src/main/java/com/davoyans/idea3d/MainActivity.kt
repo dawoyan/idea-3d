@@ -4025,10 +4025,16 @@ private fun backgroundDoneNotification(context: Context, text: String) {
      * (counterclockwise on screen for positive [deg]). A shape that ends up lying flat in another view moves to that
      * view, with its 3D depth, groups, cuts and joins, so it stays a proper shape there.
      */
-    fun turnItems(keys: List<Pair<ModelPlane, Int>>, points: List<Triple<ModelPlane, Int, Boolean>>, deg: Double) {
+    fun turnItems(keys: List<Pair<ModelPlane, Int>>, points: List<Triple<ModelPlane, Int, Boolean>>, requestedDeg: Double) {
         if (keys.any(::itemLocked) || points.any(::pointLocked)) {
             logToast(context, "Unlock the selected item before turning it", Toast.LENGTH_SHORT).show(); return
         }
+        // A shape drawn in another view is seen edge-on here: a small turn would tilt it out of every view and bend its
+        // curves. It turns a whole quarter instead, so it stands flat in another view and keeps its shape.
+        val fromOtherView = keys.any { it.first != editPlane }
+        val deg = if (fromOtherView && abs(requestedDeg % 90.0) > 1e-6) 90.0 * kotlin.math.sign(requestedDeg) else requestedDeg
+        if (deg != requestedDeg) logToast(context, "A shape from another view turns a quarter at a time here, so it keeps its shape. To turn it a little, do it in its own view", Toast.LENGTH_LONG).show()
+        ActionLog.add("turn ${keys.size} item(s), ${points.size} point(s) by ${deg.toInt()}° in ${editPlane.label}${if (fromOtherView) " (from another view)" else ""}")
         val setup = modelSetup(); val axis = editPlane.toward
         fun pointModel(sel: Triple<ModelPlane, Int, Boolean>): Vec3? {
             val g = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
@@ -4519,7 +4525,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             // An object already made by Intersect is the natural partner for a shape in a third view.
             val made = solidOps.filter { it.common }.map { it.target }.toSet()
             val partner = candidates.filter { overlap(it) > 0 }.maxWithOrNull(compareBy<Pair<ModelPlane, Int>>({ k -> extrusionOf(k)?.let { (k.first to it.id) in made } == true }, { overlap(it) }))
-            if (partner == null) { logToast(context, "Draw this shape over a shape from another view (Front, Top or Profile), then Intersect", Toast.LENGTH_LONG).show(); return }
+            if (partner == null) { logToast(context, "Nothing to intersect with: no closed shape from another view (Front, Top or Profile) overlaps this one. Draw one over it there, or pick both shapes", Toast.LENGTH_LONG).show(); return }
             items = listOf(partner, shape)
         }
         if (items.map { it.first }.distinct().size < 2) { logToast(context, "Intersect needs shapes from two different views", Toast.LENGTH_LONG).show(); return }
