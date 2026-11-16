@@ -115,6 +115,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.async
 import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.io.File
@@ -1122,6 +1124,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var modelDragLast by remember { mutableStateOf<Pt?>(null) }
     // A rectangle or circle being dragged out (draftStart to pendingEnd).
     var shapeDragging by remember { mutableStateOf(false) }
+    // Dragging the end of a line being drawn shows its length and angles live.
+    var lineDragging by remember { mutableStateOf(false) }
+    var firstSizeLine by remember { mutableStateOf<Pair<Pt, Pt>?>(null) }
+    var firstSizeAsked by remember(projectId) { mutableStateOf(emptySet<ModelPlane>()) }
+    var lineDragRadius by remember { mutableStateOf(10.0) }
     // A triangle is built as a base followed by its top corner.  Keeping the base as a
     // draft lets both three taps and the two-gesture drag workflow create the same shape.
     var triangleBaseReady by remember { mutableStateOf(false) }
@@ -2532,6 +2539,45 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
         ActionLog.add("box select (${selectionMode.label}): items=${pickedItems.size}, lines=${pickedSegments.size}, points=${pickedPoints.size}")
     }
+    /** The first line drawn in a view without a calibration asks for its real size, which then sets the scale. */
+    fun askFirstSize(a: Pt, b: Pt) {
+        if (firstSizeAsked.contains(editPlane) || guides.any { it.plane == editPlane } || lines.any { it.isReference && it.isScaleReference }) return
+        firstSizeAsked = firstSizeAsked + editPlane
+        firstSizeLine = a to b
+    }
+    /** Real length of a canvas segment in this view, in millimeters, or null without a scale. */
+    fun lengthHereMm(a: Pt, b: Pt): Double? = modelSetup().mapping(editPlane)?.let { m -> (m.model(b, 0.0) - m.model(a, 0.0)).length }
+    fun lengthText(mm: Double) = formatLength(mm, LengthUnit.of(unit), MeasurementPrecision.places[unit] ?: 2)
+    /** While a line is being drawn: its length, its angle from horizontal and from the line it starts on. */
+    fun drawingHint(): String {
+        val a = draftStart ?: return "Tap the start point"
+        val b = pendingEnd
+        if (b == null || distance(a, b) < 2.0) return "Tap the end point, or drag to it: length and angles show here"
+        val dx = (b.x - a.x).toDouble(); val dy = (a.y - b.y).toDouble()
+        val fromHorizontal = Math.toDegrees(kotlin.math.atan2(abs(dy), abs(dx)))
+        val f = java.text.DecimalFormat("0.#")
+        val parts = mutableListOf<String>()
+        lengthHereMm(a, b)?.let { parts += lengthText(it) }
+        parts += "${f.format(fromHorizontal)}° from horizontal"
+        // The line it starts on: one ending there (the angle between the two), or one it starts in the middle of.
+        val base = guides.firstOrNull { g -> g.curveMid == null && distance(g.start, g.end) > 1.0 && (distance(g.start, a) < 0.6 || distance(g.end, a) < 0.6 || distanceToGuide(a, g) < 0.6) }
+        base?.let { g ->
+            val far = if (distance(g.start, a) < 0.6) g.end else if (distance(g.end, a) < 0.6) g.start else null
+            val ux = (far ?: g.end).x - a.x; val uy = a.y - (far ?: g.end).y
+            val cos = ((dx * ux + dy * uy) / (hypot(dx, dy) * hypot(ux.toDouble(), uy.toDouble()))).coerceIn(-1.0, 1.0)
+            var angle = Math.toDegrees(kotlin.math.acos(cos))
+            if (far == null && angle > 90) angle = 180 - angle
+            parts += "${f.format(angle)}° from the line"
+        }
+        return parts.joinToString(" · ")
+    }
+    /** The selected line's real length, shown on top. */
+    fun selectedLineHint(): String? {
+        val g = (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } } ?: return null
+        val pts = guidePoints(g)
+        val mm = pts.zipWithNext().sumOf { (p, q) -> lengthHereMm(p, q) ?: return null }
+        return "${if (g.curveMid != null) "Curve" else "Line"}: ${lengthText(mm)}"
+    }
     fun handleTap(point: Pt, hitRadius: Double) {
         pipeProfile?.let { profile ->
             // Any line, broken line, curve or shape in this view (drawn here or in another view) is the path.
@@ -2732,7 +2778,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 if (distance(draftStart!!, point) > 4.0) {
                     val pathId = activeMeasurePathId ?: return
                     val index = lines.count { it.pathId == pathId } + 1
-                    if (unknownSize || pictureOptions.guess && scale != null) {
+                    if (unknownSize || scale != null) {
                         val segment = MeasureLine(nextId(lines), draftStart!!, point, 0.0, false, "", pathId = pathId, segmentIndex = index, lengthSource = if (unknownSize) LengthSource.UNKNOWN else LengthSource.CALCULATED)
                         pushUndo()
                         lines = recalculate(lines + segment)
@@ -2754,7 +2800,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 }
             } else {
                 pendingEnd = point
-                if (unknownSize || pictureOptions.guess && scale != null) {
+                if (unknownSize || scale != null) {
                     val line = MeasureLine(nextId(lines), draftStart!!, point, if (unknownSize) 0.0 else frontLength(draftStart!!, point, scale!!, axisScale), false, "", defaultColor, lengthSource = if (unknownSize) LengthSource.UNKNOWN else LengthSource.CALCULATED)
                     pushUndo()
                     lines = lines + line
@@ -2786,6 +2832,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     draftStart = point
                 } else if (distance(draftStart!!, point) > 4.0) {
                     pushUndo()
+                    askFirstSize(draftStart!!, point)
                     guides = guides + GuideLine(nextGuideId(guides), draftStart!!, point, manual = true, plane = editPlane, pathId = activePolylineId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth)
                     draftStart = point
                 }
@@ -2820,6 +2867,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 else if (distance(draftStart!!, point) > 4.0) {
                     pushUndo()
                     val start = draftStart!!
+                    if (lineDrawing == LineDrawing.STRAIGHT) askFirstSize(start, point)
                     val guide = GuideLine(nextGuideId(guides), start, point, manual = true, plane = editPlane, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, curveMid = if (lineDrawing == LineDrawing.CURVE) Pt((start.x + point.x) / 2f, (start.y + point.y) / 2f) else null)
                     guides = guides + guide
                     selectedGuideId = if (lineDrawing == LineDrawing.CURVE) guide.id else null
@@ -3023,6 +3071,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var growStart: ((Pt, Double) -> Boolean)? = null
     var growMove: ((Pt) -> Unit)? = null
     fun handleDragStart(sourcePoint: Pt, hitRadius: Double) {
+        if (!selectMode && tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE)) {
+            lineDragging = true; lineDragRadius = hitRadius; pendingEnd = sourcePoint
+            return
+        }
         if (selectMode) {
             // Dragging a picked item moves all of them; dragging elsewhere draws a box to pick items.
             val hit = itemAt(sourcePoint, hitRadius)
@@ -3556,6 +3608,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             return
         }
         if (growDrag != null) { growMove?.invoke(point); return }
+        if (lineDragging) { pendingEnd = point; return }
         if (shapeDragging) {
             if (lineDrawing == LineDrawing.TRIANGLE && triangleBaseReady) triangleApex = point
             else pendingEnd = draftStart?.let { s -> if (lineDrawing == LineDrawing.RECTANGLE) squareEnd(s, point).first else point } ?: point
@@ -3690,6 +3743,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
     }
     fun handleDragEnd() {
+        if (lineDragging) {
+            // The line ends where the finger lifts, as if tapped there.
+            lineDragging = false
+            val end = pendingEnd; pendingEnd = null
+            if (end != null) handleTap(end, lineDragRadius)
+            return
+        }
         if (ovalDrag != null) { ovalDrag = null; return }
         if (growDrag != null) { growDrag = null; return }
         if (shapeDragging) {
@@ -3919,15 +3979,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val memberEdges = guideSnapshot.count { it.materialId?.let(materialSnapshot::get)?.isSheet == false }
         ActionLog.add("3D build input: closedShapes=${closedGuideShapes(guideSnapshot).size}, sheetEdges=$sheetEdges, memberEdges=$memberEdges")
         val frame = viewerModel?.frame
-        scope.launch {
-            val result = withContext(Dispatchers.Default) { runCatching {
-                ActionLog.add("3D build phase: collecting meshes")
+        fun buildViewer(detail: Int) = runCatching {
+                ActionLog.add("3D build phase: collecting meshes (curve detail $detail)")
                 val colors = mutableListOf<Int>()
                 // Intersecting objects are shown with a warning so they can be moved apart or joined; export still refuses them.
                 // Imported models join the drawing; a project of only imported models has no shapes to build.
                 // Preview prioritizes immediate feedback. Printable/export validation
                 // (especially pairwise overlap testing) happens only for export.
-                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true, previewCurveSteps = curveDetail, showDrawings = viewerShowDrawings, lofts = loftSnapshot) }
+                val built = try { buildModel(guideSnapshot, extrusionSnapshot, opsSnapshot, setup, strict = false, materials = materialSnapshot, preview = true, previewCurveSteps = detail, showDrawings = viewerShowDrawings, lofts = loftSnapshot) }
                     catch (e: IllegalStateException) { if (e is MeshException || placedSnapshot.isEmpty()) throw e; ModelBuild(emptyList(), emptyList(), emptyList()) }
                 ActionLog.add("3D build phase: meshes=${built.meshes.size}, objects=${built.objects.size}, imported=${placedSnapshot.size}")
                 val importedStart = built.meshes.size
@@ -3961,7 +4020,21 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     ViewerMeasurement(a.x.toFloat(), a.y.toFloat(), b.x.toFloat(), b.y.toFloat(), listOf(line.label, value).filter { it.isNotBlank() }.joinToString(": "), measurementColor(line).toArgb(), a.z.toFloat(), b.z.toFloat())
                 }
                 Triple(ViewerMesh.fromStl(stl, colors, measurements, triangleObjects, meshes.map { it.name }, warnings, frame, finishes), shownObjects, shownImportedIds)
-            } }
+        }
+        scope.launch {
+            // A slow build (many curves, cuts and joins) first shows a quick, low-detail preview after 10 seconds;
+            // the full one replaces it when it is ready.
+            val full = async(Dispatchers.Default) { buildViewer(curveDetail) }
+            var result = withTimeoutOrNull(10_000) { full.await() }
+            if (result == null && curveDetail > 1) {
+                ActionLog.add("3D build slow: showing a quick preview while the full one finishes")
+                val quick = withContext(Dispatchers.Default) { buildViewer(1) }
+                if (projectId == openedProject && request == viewerRequest) quick.onSuccess { (mesh, ids, importedIds) ->
+                    viewerModel = mesh; viewerObjects = ids; viewerImportedIds = importedIds; viewerBuilding = false; show3d = true
+                    logToast(context, "Quick preview with simple curves. The full detail appears when it is ready", Toast.LENGTH_LONG).show()
+                }
+            }
+            if (result == null) result = full.await()
             if (projectId != openedProject || request != viewerRequest) { ActionLog.add("3D build discarded: a newer request replaced it"); return@launch }
             result.onSuccess { (mesh, ids, importedIds) ->
                 viewerModel = mesh; viewerObjects = ids; viewerImportedIds = importedIds; viewerBuilding = false; show3d = true
@@ -4040,11 +4113,12 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         if (keys.any(::itemLocked) || points.any(::pointLocked)) {
             logToast(context, "Unlock the selected item before turning it", Toast.LENGTH_SHORT).show(); return
         }
-        // A shape drawn in another view is seen edge-on here: a small turn would tilt it out of every view and bend its
-        // curves. It turns a whole quarter instead, so it stands flat in another view and keeps its shape.
+        // Turns use the chosen step. The one exception: a curved shape drawn in another view, seen edge-on here, would be
+        // tilted out of its view and its curves can't follow a tilt exactly, so it turns a whole quarter and stays true.
         val fromOtherView = keys.any { it.first != editPlane }
-        val deg = if (fromOtherView && abs(requestedDeg % 90.0) > 1e-6) 90.0 * kotlin.math.sign(requestedDeg) else requestedDeg
-        if (deg != requestedDeg) logToast(context, "A shape from another view turns a quarter at a time here, so it keeps its shape. To turn it a little, do it in its own view", Toast.LENGTH_LONG).show()
+        val curvedEdgeOn = keys.any { k -> k.first != editPlane && itemGuides(k).any { it.curveMid != null } }
+        val deg = if (curvedEdgeOn && abs(requestedDeg % 90.0) > 1e-6) 90.0 * kotlin.math.sign(requestedDeg) else requestedDeg
+        if (deg != requestedDeg) logToast(context, "Curved shapes from another view turn a quarter at a time here, so they keep their shape. To turn by ${requestedDeg.toInt().let(::abs)}°, do it in the view it was drawn in", Toast.LENGTH_LONG).show()
         ActionLog.add("turn ${keys.size} item(s), ${points.size} point(s) by ${deg.toInt()}° in ${editPlane.label}${if (fromOtherView) " (from another view)" else ""}")
         val setup = modelSetup(); val axis = editPlane.toward
         fun pointModel(sel: Triple<ModelPlane, Int, Boolean>): Vec3? {
@@ -5045,10 +5119,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
-                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
+                selectedEndpoint = selectedEndpoint, magnifierPoint = (if (lineDragging || shapeDragging) triangleApex.takeIf { lineDrawing == LineDrawing.TRIANGLE && triangleBaseReady } ?: pendingEnd else null) ?: selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan },
                 onDoubleTap = { setPresentation(false) }, doubleTapEnabled = true,
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
@@ -5177,6 +5251,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 ovalDrag != null -> "Let go when the size is right"
                 !show3d && tool == Tool.ADJUST && !selectMode && !growMode && ovalPieces() != null -> "Drag a square handle to resize the circle (side ones: width, top/bottom: height, for an oval), or set sizes in Properties"
                 tool == Tool.ADJUST && !selectMode && (growHandles().isNotEmpty() || growMode && selectedForeign != null) -> "Drag a blinking orange arrow to grow it. Tap Grow again to finish"
+                tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE) -> drawingHint()
                 tool == Tool.LINES && lineDrawing == LineDrawing.CIRCLE -> if (draftStart == null) "Circle: drag from its center, or tap the center" else "Tap a point on the circle (sets the radius)"
                 tool == Tool.LINES && lineDrawing == LineDrawing.RECTANGLE -> if (draftStart != null && pendingEnd != null && squareEnd(draftStart!!, pendingEnd!!).second) "Square" else if (draftStart == null) "Rectangle: drag corner to corner, or tap two corners. It blinks when square" else "Tap the opposite corner"
                 tool == Tool.LINES && lineDrawing == LineDrawing.TRIANGLE -> when {
@@ -5190,8 +5265,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 show3d -> "3D: drag to orbit, two fingers to pan and zoom, tap a shape for exact sizes"
                 tool == Tool.ADJUST && selectedForeign != null -> "Drag the shape to move it · round handles resize · dots move points · tap it again for exact sizes"
                 tool == Tool.ADJUST && foreign.isNotEmpty() && selectedEndpoint == null && selectedGuideEndpoint == null && selectedWholeGuideId == null -> "Tap a shape to select it. Grey shapes were drawn in another view and can be moved and resized here"
-                tool == Tool.NONE && !selectMode && (guides.isNotEmpty() || foreign.isNotEmpty()) -> "Tap a point to pick it; tap a line to pick its object, again for one line"
-                else -> null
+                tool == Tool.NONE && !selectMode && (guides.isNotEmpty() || foreign.isNotEmpty()) && selectedLineHint() == null -> "Tap a point to pick it; tap a line to pick its object, again for one line"
+                else -> selectedLineHint()
             }
             val axesHint = if (show3d) "" else if (editPlane in mirroredViews) when (editPlane) { ModelPlane.FRONT -> "X ←  Y ↑  from behind"; ModelPlane.TOP -> "X →  Z ↑ front  from below"; ModelPlane.PROFILE -> "Z → front  Y ↑  from the left" }
                 else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
@@ -5430,10 +5505,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
-                selectedEndpoint = selectedEndpoint, magnifierPoint = selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
+                selectedEndpoint = selectedEndpoint, magnifierPoint = (if (lineDragging || shapeDragging) triangleApex.takeIf { lineDrawing == LineDrawing.TRIANGLE && triangleBaseReady } ?: pendingEnd else null) ?: selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
                 onTransform = { nextZoom, nextPan -> zoom = nextZoom; pan = nextPan }, onDoubleTap = { }, doubleTapEnabled = false,
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
                 selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null || selectedForeign != null || selectedModelId != null), onNudge = ::nudgeSelected
@@ -5477,6 +5552,15 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         library = ProjectStore.list(context)
         renameTarget = null
     }) }
+    firstSizeLine?.let { (a, b) ->
+        FirstSizeDialog(unit, onDismiss = { firstSizeLine = null }) { entered ->
+            pushUndo()
+            val reference = MeasureLine(nextId(lines), a, b, entered, true, "", isScaleReference = true, lengthSource = LengthSource.MANUAL, plane = editPlane)
+            lines = recalculate(lines + reference); referenceCount++
+            ActionLog.add("first line sized: ${formatMeasure(entered, unit)} $unit")
+            firstSizeLine = null
+        }
+    }
     if (showDistanceEntry && draftStart != null && pendingEnd != null) DistanceDialog(
         isReference = tool == Tool.CALIBRATE, referenceCount = referenceCount, unit = unit, unknownSize = unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() },
         onDismiss = { showDistanceEntry = false; pendingEnd = null; if (!pendingBrokenSegment) draftStart = null; pendingBrokenSegment = false },
@@ -5989,7 +6073,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     // require a reference photo first.
     if (showPictureEdit) PictureEditDialog(projectName, unit, pictureOptions, scale != null, bitmap != null, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); logToast(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
-    }, onExportDxf = { showPictureEdit = false; showDxfExport = true }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onSaveMaterial = {
+    }, onExportDxf = { showPictureEdit = false; showDxfExport = true }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onCalibrate = { showPictureEdit = false; tool = Tool.CALIBRATE; logToast(context, "Tap two points of a known distance", Toast.LENGTH_LONG).show() }, onSaveMaterial = {
         // The selected shape, or else the biggest closed shape that isn't a hole inside another one.
         val shapes = closedGuideShapes(guides)
         val chosen = selectedGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { g -> shapes.firstOrNull { path -> sameGuideObject(path.first(), g) } }
@@ -6137,35 +6221,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 Triple(material, plane, abs(pts.indices.sumOf { i -> val a = pts[i]; val b = pts[(i + 1) % pts.size]; a.x * b.y - b.x * a.y }) / 2)
             }
         }
-        AlertDialog(onDismissRequest = { showMaterialList = false }, title = { Text("Materials used") }, text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (pieces.isEmpty() && sheets.isEmpty()) Text("Nothing has a material yet. Select a line or shape, then Material.")
-                sheets.groupBy { it.first.id }.values.forEach { group ->
-                    val material = group.first().first
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        ProfilePreview(material, Modifier.size(36.dp))
-                        Column(Modifier.weight(1f)) { Text(material.name, fontWeight = FontWeight.Bold); Text(material.description, fontSize = 12.sp, color = Color(0xFF4D5A57)) }
-                    }
-                    val area = { mm2: Double -> "${java.text.DecimalFormat("0.###").format(mm2 / 1e6)} m²" }
-                    group.sortedByDescending { it.third }.forEachIndexed { i, (_, plane, a) -> Text("  ${i + 1}.  ${area(a)}${if (plane != ModelPlane.FRONT) "  (${plane.label})" else ""}", fontSize = 14.sp) }
-                    Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${area(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                }
-                pieces.groupBy { it.first.id }.values.forEach { group ->
-                    val material = group.first().first
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        ProfilePreview(material, Modifier.size(36.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(material.name, fontWeight = FontWeight.Bold)
-                            Text(material.description, fontSize = 12.sp, color = Color(0xFF4D5A57))
-                        }
-                    }
-                    group.sortedByDescending { it.third }.forEachIndexed { i, (_, plane, length) ->
-                        Text("  ${i + 1}.  ${format(length)}${if (plane != ModelPlane.FRONT) "  (${plane.label})" else ""}", fontSize = 14.sp)
-                    }
-                    Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${format(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                }
-            }
-        }, confirmButton = { TextButton(onClick = { showMaterialList = false }) { Text("Done") } })
+        MaterialListDialog(pieces, sheets, format) { showMaterialList = false }
     }
     saveMaterialShape?.let { shape ->
         /** The selected shape as a cross-section in millimeters, centered, with the closed shapes inside it as holes. */
@@ -6181,49 +6237,12 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             fun centered(points: List<Vec2>) = points.map { Vec2(it.x - cx, it.y - cy) }
             MemberProfile(ProfileKind.DRAWN, outline.maxOf { it.x } - outline.minOf { it.x }, outline.maxOf { it.y } - outline.minOf { it.y }, outline = centered(outline), holes = holes.map { centered(mm(it)) })
         }.getOrNull() }
-        val f = java.text.DecimalFormat("0.#")
-        var name by remember(shape) { mutableStateOf(profile?.let { "Shape ${f.format(it.widthMm)}×${f.format(it.heightMm)}" } ?: "") }
-        // The real width of the cross-section; the drawing is scaled to it, keeping its proportions and holes.
-        var realWidth by remember(shape) { mutableStateOf(profile?.let { f.format(it.widthMm) } ?: "") }
-        val realWidthMm = parseLengthMm(realWidth, LengthUnit.MM)
-        // Saved as a bar or pipe with this cross-section, or as a sheet (steel plate, plywood, glass) of some thickness.
-        var asSheet by remember(shape) { mutableStateOf(false) }
-        var sheetThickness by remember(shape) { mutableStateOf("3") }
-        val sheetMm = parseLengthMm(sheetThickness, LengthUnit.MM)
-        var finish by remember(shape) { mutableStateOf(Finish.METAL) }
-        val scaled = profile?.let { p ->
-            val k = (realWidthMm ?: p.widthMm) / p.widthMm
-            fun scale(points: List<Vec2>) = points.map { Vec2(it.x * k, it.y * k) }
-            p.copy(widthMm = p.widthMm * k, heightMm = p.heightMm * k, outline = scale(p.outline), holes = p.holes.map(::scale))
+        SaveMaterialDialog(profile, shape.first().colorIndex, onDismiss = { saveMaterialShape = null }) { material ->
+            materials = materials + material
+            MaterialStore.save(context, materials)
+            logToast(context, "Saved \"${material.name}\" to Materials", Toast.LENGTH_SHORT).show()
+            saveMaterialShape = null
         }
-        AlertDialog(onDismissRequest = { saveMaterialShape = null }, title = { Text("Save as material") }, text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (scaled == null) Text("This shape can't be used as a cross-section. Close its outline and make sure it doesn't cross itself.")
-                else {
-                    val preview = Material("preview", name, scaled, guideColor(shape.first().colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it })
-                    ProfilePreview(preview, Modifier.fillMaxWidth().height(110.dp))
-                    Text("${preview.description}. Closed shapes inside it become holes. The material is shared by all projects: pick it in a line's details and the line becomes this shape along its length.", fontSize = 13.sp, color = Color(0xFF4D5A57))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterChip(selected = !asSheet, onClick = { asSheet = false }, label = { Text("Bar or pipe", fontSize = 13.sp) })
-                        FilterChip(selected = asSheet, onClick = { asSheet = true; if (name.startsWith("Shape ")) name = "Steel sheet" }, label = { Text("Sheet", fontSize = 13.sp) })
-                    }
-                    OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text(if (asSheet) "Steel sheet 3 mm" else "Tube 4*4") }, singleLine = true)
-                    if (asSheet) OutlinedTextField(sheetThickness, { sheetThickness = it }, label = { Text("Thickness (mm)") }, supportingText = { Text("Shapes made of this sheet get this thickness.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                    FinishPicker(finish) { finish = it }
-                    if (!asSheet) OutlinedTextField(realWidth, { realWidth = it }, label = { Text("Real width (mm)") }, supportingText = { Text("The drawing is scaled to this width; height and holes follow.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                }
-            }
-        }, confirmButton = {
-            TextButton(enabled = name.isNotBlank() && if (asSheet) sheetMm != null && sheetMm > 0 else scaled != null && realWidthMm != null && realWidthMm > 0, onClick = {
-                val drawnColor = guideColor(shape.first().colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it }
-                // Plain black drawings take a color that suits the look.
-                val color = if (drawnColor != 0xFF5F6B6D.toInt()) drawnColor else when (finish) { Finish.WOOD -> 0xFFC89B6A.toInt(); Finish.GLASS -> 0xFF9CC9E0.toInt(); Finish.STONE -> 0xFF9E9A94.toInt(); Finish.METAL -> 0xFF8A9497.toInt(); Finish.PLAIN -> drawnColor }
-                materials = materials + if (asSheet) Material(UUID.randomUUID().toString(), name.trim(), sheetProfile, color, sheetMm, finish) else Material(UUID.randomUUID().toString(), name.trim(), scaled!!, color, finish = finish)
-                MaterialStore.save(context, materials)
-                logToast(context, "Saved \"${name.trim()}\" to Materials", Toast.LENGTH_SHORT).show()
-                saveMaterialShape = null
-            }) { Text("Save") }
-        }, dismissButton = { TextButton(onClick = { saveMaterialShape = null }) { Text("Cancel") } })
     }
     pendingCut?.let { op ->
         val tool = objectName(op.tool); val target = objectName(op.target)
@@ -6563,6 +6582,96 @@ private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -
     }
 }
 
+/** Saves a drawn cross-section as a bar/pipe or sheet material. */
+@Composable private fun SaveMaterialDialog(profile: MemberProfile?, colorIndex: Int, onDismiss: () -> Unit, onSave: (Material) -> Unit) {
+    val f = java.text.DecimalFormat("0.#")
+    var name by remember { mutableStateOf(profile?.let { "Shape ${f.format(it.widthMm)}×${f.format(it.heightMm)}" } ?: "") }
+    // The real width of the cross-section; the drawing is scaled to it, keeping its proportions and holes.
+    var realWidth by remember { mutableStateOf(profile?.let { f.format(it.widthMm) } ?: "") }
+    val realWidthMm = parseLengthMm(realWidth, LengthUnit.MM)
+    // Saved as a bar or pipe with this cross-section, or as a sheet (steel plate, plywood, glass) of some thickness.
+    var asSheet by remember { mutableStateOf(false) }
+    var sheetThickness by remember { mutableStateOf("3") }
+    val sheetMm = parseLengthMm(sheetThickness, LengthUnit.MM)
+    var finish by remember { mutableStateOf(Finish.METAL) }
+    val scaled = profile?.let { p ->
+        val k = (realWidthMm ?: p.widthMm) / p.widthMm
+        fun scale(points: List<Vec2>) = points.map { Vec2(it.x * k, it.y * k) }
+        p.copy(widthMm = p.widthMm * k, heightMm = p.heightMm * k, outline = scale(p.outline), holes = p.holes.map(::scale))
+    }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Save as material") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (scaled == null) Text("This shape can't be used as a cross-section. Close its outline and make sure it doesn't cross itself.")
+            else {
+                val preview = Material("preview", name, scaled, guideColor(colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it })
+                ProfilePreview(preview, Modifier.fillMaxWidth().height(110.dp))
+                Text("${preview.description}. Closed shapes inside it become holes. The material is shared by all projects: pick it in a line's details and the line becomes this shape along its length.", fontSize = 13.sp, color = Color(0xFF4D5A57))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = !asSheet, onClick = { asSheet = false }, label = { Text("Bar or pipe", fontSize = 13.sp) })
+                    FilterChip(selected = asSheet, onClick = { asSheet = true; if (name.startsWith("Shape ")) name = "Steel sheet" }, label = { Text("Sheet", fontSize = 13.sp) })
+                }
+                OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text(if (asSheet) "Steel sheet 3 mm" else "Tube 4*4") }, singleLine = true)
+                if (asSheet) OutlinedTextField(sheetThickness, { sheetThickness = it }, label = { Text("Thickness (mm)") }, supportingText = { Text("Shapes made of this sheet get this thickness.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                FinishPicker(finish) { finish = it }
+                if (!asSheet) OutlinedTextField(realWidth, { realWidth = it }, label = { Text("Real width (mm)") }, supportingText = { Text("The drawing is scaled to this width; height and holes follow.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            }
+        }
+    }, confirmButton = {
+        TextButton(enabled = name.isNotBlank() && if (asSheet) sheetMm != null && sheetMm > 0 else scaled != null && realWidthMm != null && realWidthMm > 0, onClick = {
+            val drawnColor = guideColor(colorIndex).toArgb().let { if (it == AndroidColor.BLACK) 0xFF5F6B6D.toInt() else it }
+            // Plain black drawings take a color that suits the look.
+            val color = if (drawnColor != 0xFF5F6B6D.toInt()) drawnColor else when (finish) { Finish.WOOD -> 0xFFC89B6A.toInt(); Finish.GLASS -> 0xFF9CC9E0.toInt(); Finish.STONE -> 0xFF9E9A94.toInt(); Finish.METAL -> 0xFF8A9497.toInt(); Finish.PLAIN -> drawnColor }
+            onSave(if (asSheet) Material(UUID.randomUUID().toString(), name.trim(), sheetProfile, color, sheetMm, finish) else Material(UUID.randomUUID().toString(), name.trim(), scaled!!, color, finish = finish))
+
+        }) { Text("Save") }
+    }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+/** Materials used: bars and pipes by cut length, sheets by area, grouped by material. */
+@Composable private fun MaterialListDialog(pieces: List<Triple<Material, ModelPlane, Double>>, sheets: List<Triple<Material, ModelPlane, Double>>, format: (Double) -> String, onDismiss: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Materials used") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (pieces.isEmpty() && sheets.isEmpty()) Text("Nothing has a material yet. Select a line or shape, then Material.")
+            sheets.groupBy { it.first.id }.values.forEach { group ->
+                val material = group.first().first
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ProfilePreview(material, Modifier.size(36.dp))
+                    Column(Modifier.weight(1f)) { Text(material.name, fontWeight = FontWeight.Bold); Text(material.description, fontSize = 12.sp, color = Color(0xFF4D5A57)) }
+                }
+                val area = { mm2: Double -> "${java.text.DecimalFormat("0.###").format(mm2 / 1e6)} m²" }
+                group.sortedByDescending { it.third }.forEachIndexed { i, (_, plane, a) -> Text("  ${i + 1}.  ${area(a)}${if (plane != ModelPlane.FRONT) "  (${plane.label})" else ""}", fontSize = 14.sp) }
+                Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${area(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            }
+            pieces.groupBy { it.first.id }.values.forEach { group ->
+                val material = group.first().first
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ProfilePreview(material, Modifier.size(36.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(material.name, fontWeight = FontWeight.Bold)
+                        Text(material.description, fontSize = 12.sp, color = Color(0xFF4D5A57))
+                    }
+                }
+                group.sortedByDescending { it.third }.forEachIndexed { i, (_, plane, length) ->
+                    Text("  ${i + 1}.  ${format(length)}${if (plane != ModelPlane.FRONT) "  (${plane.label})" else ""}", fontSize = 14.sp)
+                }
+                Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${format(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            }
+        }
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
+}
+
+/** Asks for the real length of the first line drawn; it becomes the drawing's scale. */
+@Composable private fun FirstSizeDialog(unit: String, onDismiss: () -> Unit, onSize: (Double) -> Unit) {
+    var value by remember { mutableStateOf("") }
+    val entered = value.replace(',', '.').toDoubleOrNull()?.takeIf { it > 0 && it.isFinite() }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("How long is this line?") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Its real size sets the scale of this drawing. After that, every line shows its length and angles while you draw.", fontSize = 13.sp, color = Color(0xFF4D5A57))
+            OutlinedTextField(value, { if (decimalInputPattern.matches(it.replace(',', '.'))) value = it }, label = { Text("Length ($unit)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+        }
+    }, confirmButton = { TextButton(enabled = entered != null, onClick = { onSize(entered!!) }) { Text("Set size") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Skip") } })
+}
+
 @Composable private fun CalibrationBanner(calibration: Calibration) {
     val warning = calibration.status is CalibrationStatus.Contradictory || calibration.status is CalibrationStatus.Incomplete
     if (!warning && calibration.status !is CalibrationStatus.PerAxis) return
@@ -6861,7 +6970,8 @@ private fun measurementPointNames(lines: List<MeasureLine>): Map<Int, Pair<Strin
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-            ToolIconButton("Calibrate", R.drawable.ic_calibrate_level, tool == Tool.CALIBRATE, { onTool(if (tool == Tool.CALIBRATE) Tool.NONE else Tool.CALIBRATE) }, Modifier.weight(1f))
+            // Calibrate has no button: the first line drawn asks for its size, and the project menu can set the scale again.
+            if (tool == Tool.CALIBRATE) ToolIconButton("Calibrate", R.drawable.ic_calibrate_level, true, { onTool(Tool.NONE) }, Modifier.weight(1f))
             Box(Modifier.weight(1f)) {
                 ToolIconButton("Measure", R.drawable.ic_measure_straight, tool == Tool.MEASURE && measureDrawing == LineDrawing.STRAIGHT, { val selected = tool == Tool.MEASURE && measureDrawing == LineDrawing.STRAIGHT; onMeasureDrawing(LineDrawing.STRAIGHT); onTool(if (selected) Tool.NONE else Tool.MEASURE) }, Modifier.fillMaxWidth(), description = "Straight measurement", onLongPress = { measureMenuOpen = true })
                 DropdownMenu(expanded = measureMenuOpen, onDismissRequest = { measureMenuOpen = false }) {
@@ -6995,7 +7105,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, draftShape: LineDrawing? = null, triangleApex: Pt? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), memberBands: Map<Int, Pair<Int, Float>> = emptyMap(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), loftLines: List<Pair<Pt, Pt>> = emptyList(), ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, lineDraftDrag: Boolean = false, draftShape: LineDrawing? = null, triangleApex: Pt? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), memberBands: Map<Int, Pair<Int, Float>> = emptyMap(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), loftLines: List<Pair<Pt, Pt>> = emptyList(), ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -7038,6 +7148,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
         val latestPan = rememberUpdatedState(pan)
         val latestDragStart = rememberUpdatedState(onDragStart)
         val latestDragToDraw = rememberUpdatedState(dragToDraw)
+        val latestLineDraft = rememberUpdatedState(lineDraftDrag)
         // Grow arrows blink orange.
         var growBlink by remember { mutableStateOf(true) }
         val anyGrow = growArrows.isNotEmpty() || growOn && foreignOverlay != null
@@ -7219,7 +7330,9 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         // A slow drag on an end point in Lines or Measure moves only a few pixels per event, so it needs the low threshold too.
                 val endpointGrab = (tool == Tool.LINES || tool == Tool.MEASURE) && noDraft && nearEndpoint(sourceAt(down.position, localZoom, localPan), localZoom, gestureGuides, gestureLines)
                 val dragThreshold = if (adjusting && (tool == Tool.ADJUST || endpointGrab)) 0.0 else if (tool == Tool.ADJUST || tool == Tool.CROP || endpointGrab) 1.0 else 8.0
-                        if (hypot(delta.x.toDouble(), delta.y.toDouble()) > dragThreshold) {
+                        // Dragging a line's end while drawing counts total movement, so a slow, careful drag still draws.
+                        val draftDrag = tool == Tool.LINES && latestLineDraft.value && !transformed && (adjusting || (change.position - down.position).getDistance() > 8f)
+                        if (hypot(delta.x.toDouble(), delta.y.toDouble()) > dragThreshold || draftDrag) {
                             holdJob?.cancel(); heldLineId = null; heldGuideId = null
                             if (tool == Tool.ADJUST && !transformed) {
                                 if (latestPanOnEmptyDrag.value) {
@@ -7231,7 +7344,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                             } else if (tool == Tool.CROP) {
                                 if (!adjusting) { onCropStart(sourceAt(change.previousPosition, localZoom, localPan), 28.0 / (baseFit * localZoom)); adjusting = true }
                                 onCropDrag(sourceAt(change.position, localZoom, localPan))
-                            } else if ((tool == Tool.LINES || tool == Tool.MEASURE) && !transformed && (tool == Tool.LINES && latestDragToDraw.value && noDraft || gestureGuides.any { it.id == latestSelectedGuideId.value && it.curveMid?.let { mid -> distance(sourceAt(down.position, localZoom, localPan), mid) < 42.0 / (baseFit * localZoom) } == true } ||
+                            } else if ((tool == Tool.LINES || tool == Tool.MEASURE) && !transformed && (tool == Tool.LINES && latestDragToDraw.value && (noDraft || latestLineDraft.value) || gestureGuides.any { it.id == latestSelectedGuideId.value && it.curveMid?.let { mid -> distance(sourceAt(down.position, localZoom, localPan), mid) < 42.0 / (baseFit * localZoom) } == true } ||
                                     noDraft && nearEndpoint(sourceAt(down.position, localZoom, localPan), localZoom, gestureGuides, gestureLines))) {
                                 if (!adjusting) { latestDragStart.value(sourceAt(down.position, localZoom, localPan), 28.0 / (baseFit * localZoom)); adjusting = true }
                                 latestDrag.value(sourceAt(change.position, localZoom, localPan), false)
@@ -7307,6 +7420,24 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 // A mirrored view shows the picture mirrored too.
                 withTransform({ scale(if (mirrorX) -1f else 1f, if (mirrorY) -1f else 1f, Offset(left + imageW / 2f, top + imageH / 2f)) }) {
                     drawImage(bitmap.asImageBitmap(), dstOffset = androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()), dstSize = androidx.compose.ui.unit.IntSize(imageW.toInt(), imageH.toInt()), alpha = 1f - pictureOptions.transparency / 100f)
+                }
+                // A light grid in real units once the size is known, so sizes and zoom can be judged at a glance.
+                // Its step is 1, 2 or 5 × a power of ten, at least about 28 dp apart on screen; every fifth line is darker.
+                if (showSizes && drawingScale != null && drawingScale > 0) {
+                    val screenPerUnit = drawingScale * fit
+                    val minGap = 28.dp.toPx()
+                    val step = (-3..7).flatMap { e -> listOf(1.0, 2.0, 5.0).map { it * Math.pow(10.0, e.toDouble()) } }.firstOrNull { it * screenPerUnit >= minGap } ?: 1e7
+                    val stepPx = step * drawingScale
+                    val count = (bitmap.width / stepPx).toInt() + (bitmap.height / stepPx).toInt()
+                    if (count in 1..600) {
+                        val light = Color(0x14000000); val dark = Color(0x26000000)
+                        var k = 0; var x = 0.0
+                        while (x <= bitmap.width) { val a = viewAt(Pt(x.toFloat(), 0f)); val b = viewAt(Pt(x.toFloat(), bitmap.height.toFloat())); drawLine(if (k % 5 == 0) dark else light, a, b, 1f); x += stepPx; k++ }
+                        k = 0; var y = 0.0
+                        while (y <= bitmap.height) { val a = viewAt(Pt(0f, y.toFloat())); val b = viewAt(Pt(bitmap.width.toFloat(), y.toFloat())); drawLine(if (k % 5 == 0) dark else light, a, b, 1f); y += stepPx; k++ }
+                        val label = "Grid ${java.text.DecimalFormat("0.###").format(step)} $unit"
+                        drawContext.canvas.nativeCanvas.drawText(label, 12.dp.toPx(), size.height - 10.dp.toPx(), android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { textSize = 12.sp.toPx(); color = 0x99000000.toInt() })
+                    }
                 }
                 if (ghosts.isNotEmpty()) drawIntoCanvas { canvas ->
                     // Drawn opaque into a translucent layer so overlapping faces don't darken.
@@ -7747,7 +7878,13 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 drawCircle(Color(0xFF00823B), 18.dp.toPx(), center, style = Stroke(3.dp.toPx()))
             }
             }
-            magnifierPoint?.let { point -> drawMagnifier(bitmap, point, Offset(viewW - 100f, 100f)) }
+            magnifierPoint?.let { point ->
+                // The loupe sits in a top corner, away from the finger, and shows the drawing under it three times larger.
+                val r = 78.dp.toPx(); val finger = viewAt(point)
+                val leftCorner = Offset(r + 12.dp.toPx(), r + 12.dp.toPx()); val rightCorner = Offset(viewW - r - 12.dp.toPx(), r + 12.dp.toPx())
+                val center = if ((finger - leftCorner).getDistance() < r * 2.2f) rightCorner else leftCorner
+                drawLoupe(bitmap, point, center, r, fit * 3f, mirrorX, mirrorY, guides, draftStart, pendingEnd)
+            }
         }
         if (showFineControls) {
             val position = when {
@@ -7855,6 +7992,33 @@ private fun segmentsIntersect(a: Offset, b: Offset, c: Offset, d: Offset): Boole
     val third = cross(c, d, a)
     val fourth = cross(c, d, b)
     return (first > 0f) != (second > 0f) && (third > 0f) != (fourth > 0f)
+}
+
+/** A round loupe at [center]: the picture and lines around [p] (picture pixels), [k] screen pixels per picture pixel. */
+private fun DrawScope.drawLoupe(bitmap: Bitmap, p: Pt, center: Offset, r: Float, k: Float, mirrorX: Boolean, mirrorY: Boolean, guides: List<GuideLine>, draftStart: Pt?, pendingEnd: Pt?) {
+    fun at(q: Pt) = center + Offset((if (mirrorX) p.x - q.x else q.x - p.x) * k, (if (mirrorY) p.y - q.y else q.y - p.y) * k)
+    drawCircle(Color(0x55000000), r + 5f, center + Offset(0f, 3f)); drawCircle(Color.White, r + 3f, center)
+    clipPath(androidx.compose.ui.graphics.Path().apply { addOval(androidx.compose.ui.geometry.Rect(center - Offset(r, r), center + Offset(r, r))) }) {
+        drawCircle(Color.White, r, center)
+        val half = r / k
+        val src = android.graphics.Rect((p.x - half).toInt().coerceAtLeast(0), (p.y - half).toInt().coerceAtLeast(0), (p.x + half).toInt().coerceAtMost(bitmap.width), (p.y + half).toInt().coerceAtMost(bitmap.height))
+        if (src.width() > 0 && src.height() > 0 && !mirrorX && !mirrorY) {
+            val tl = at(Pt(src.left.toFloat(), src.top.toFloat()))
+            drawImage(bitmap.asImageBitmap(), srcOffset = androidx.compose.ui.unit.IntOffset(src.left, src.top), srcSize = androidx.compose.ui.unit.IntSize(src.width(), src.height()),
+                dstOffset = androidx.compose.ui.unit.IntOffset(tl.x.toInt(), tl.y.toInt()), dstSize = androidx.compose.ui.unit.IntSize((src.width() * k).toInt(), (src.height() * k).toInt()))
+        }
+        val near = r / k * 1.5f
+        guides.forEach { g ->
+            val pts = guidePoints(g)
+            if (pts.none { abs(it.x - p.x) < near * 4 && abs(it.y - p.y) < near * 4 } && distanceToGuide(p, g) > near) return@forEach
+            val color = guideColor(g.colorIndex)
+            pts.zipWithNext().forEach { (a, b) -> drawLine(color, at(a), at(b), 3f) }
+            drawCircle(color, 5f, at(g.start)); drawCircle(color, 5f, at(g.end))
+        }
+        if (draftStart != null && pendingEnd != null) drawLine(Color(0xFF0066BE), at(draftStart), at(pendingEnd), 3f)
+        drawLine(Color(0xFFE65100), center - Offset(14f, 0f), center + Offset(14f, 0f), 2.5f); drawLine(Color(0xFFE65100), center - Offset(0f, 14f), center + Offset(0f, 14f), 2.5f)
+    }
+    drawCircle(Color(0xFF18201E), r, center, style = Stroke(2f))
 }
 
 private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
@@ -8034,7 +8198,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     }, confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onSave(name.trim()) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, hasPicture: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
+@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, hasPicture: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onCalibrate: () -> Unit = {}, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
     var name by remember { mutableStateOf(currentName) }
     var unit by remember { mutableStateOf(currentUnit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
@@ -8053,6 +8217,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
                 OutlinedButton(onClick = onSaveMaterial) { Text("Save drawing as material") }
                 OutlinedButton(onClick = onMaterialList) { Text("Materials used (lengths)") }
                 OutlinedButton(onClick = onMeasurements) { Text("Measurements") }
+                OutlinedButton(onClick = onCalibrate) { Text(if (hasScale) "Change the scale (calibrate)" else "Set the scale (calibrate)") }
                 Text("Measurement unit", fontWeight = FontWeight.Medium)
                 Box {
                     OutlinedButton(onClick = { unitMenuOpen = true }) { Text(unit) }
@@ -9643,6 +9808,13 @@ private fun frontLength(start: Pt, end: Pt, scale: Double, axes: Pair<Double, Do
 
 private fun nextId(lines: List<MeasureLine>) = (lines.maxOfOrNull { it.id } ?: 0) + 1
 private fun closestEndpoint(point: Pt, lines: List<MeasureLine>, maxDistance: Double): Endpoint? = lines.flatMap { listOf(Endpoint(it.id, true) to it.start, Endpoint(it.id, false) to it.end) }.minByOrNull { distance(point, it.second) }?.takeIf { distance(point, it.second) <= maxDistance }?.first
+/** Distance from [point] to a straight guide's segment. */
+private fun distanceToGuide(point: Pt, g: GuideLine): Double {
+    val dx = (g.end.x - g.start.x).toDouble(); val dy = (g.end.y - g.start.y).toDouble(); val l2 = dx * dx + dy * dy
+    if (l2 < 1e-9) return distance(point, g.start)
+    val t = (((point.x - g.start.x) * dx + (point.y - g.start.y) * dy) / l2).coerceIn(0.0, 1.0)
+    return hypot(point.x - (g.start.x + dx * t), point.y - (g.start.y + dy * t))
+}
 private fun distanceToLine(point: Pt, line: MeasureLine): Double {
     val dx = line.end.x - line.start.x
     val dy = line.end.y - line.start.y
