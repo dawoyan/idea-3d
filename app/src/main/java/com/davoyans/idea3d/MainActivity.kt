@@ -5973,9 +5973,12 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val material = materials.firstOrNull { it.id == g.materialId && !it.isSheet } ?: return@mapNotNull null
             val mapping = setup.mapping(g.plane) ?: return@mapNotNull null
             val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1)
-            val length = pts.withIndex().zipWithNext().sumOf { (a, b) ->
+            val drawn = pts.withIndex().zipWithNext().sumOf { (a, b) ->
                 (mapping.model(b.value, g.startZMm + (g.endZMm - g.startZMm) * b.index / n) - mapping.model(a.value, g.startZMm + (g.endZMm - g.startZMm) * a.index / n)).length
             }
+            // Cut length: welded bars are fitted face to face, as in 3D.
+            val all = allGuides(); val byId = materials.associateBy { it.id }
+            val length = drawn + weldEndAdjust(g, true, all, byId, mapping) + weldEndAdjust(g, false, all, byId, mapping)
             Triple(material, g.plane, length)
         }
         // Sheets are counted by area: every closed shape made of one, in every view.
@@ -8630,6 +8633,10 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
         // lengthened past the bends instead, which closes the gaps on the outside of a bend.
         val half = max(material.profile.widthMm, material.profile.heightMm) / 2
         val extend = DoubleArray(points.size)
+        // Welded bars meet face to face: an end on another bar's side stops at its face, and at a shared corner
+        // the older bar runs through while the newer one stops at it, so nothing overlaps and nothing falls short.
+        extend[0] += weldEndAdjust(guide, true, guides, materials, mapping)
+        extend[points.lastIndex] += weldEndAdjust(guide, false, guides, materials, mapping)
         for (j in 1 until points.lastIndex) {
             val d1 = (points[j] - points[j - 1]).normalized(); val d2 = (points[j + 1] - points[j]).normalized()
             val turn = kotlin.math.acos((d1 dot d2).coerceIn(-1.0, 1.0))
@@ -8642,6 +8649,64 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
             }
         } catch (e: MeshException) { issues?.addAll(e.issues); emptyList() }
     }
+}
+
+/** Half the size of a bar across its line within the drawing, allowing for a turned profile. */
+private fun halfAcross(profile: MemberProfile, turnDeg: Double): Double {
+    val t = Math.toRadians(turnDeg)
+    return (abs(profile.widthMm * kotlin.math.cos(t)) + abs(profile.heightMm * kotlin.math.sin(t))) / 2
+}
+
+/**
+ * How far a welded bar's end moves along its own line (positive: longer, negative: shorter) so it meets the bars it is
+ * welded to exactly. At a joint, bars that continue each other form one through run and keep their ends; a bar ending
+ * on a run stops at its face. Where bars only meet at a corner, the oldest runs through to the outer face and the others
+ * stop at it. Only bars welded together or drawn as one line or shape are fitted; other lines keep their drawn ends.
+ */
+private fun weldEndAdjust(guide: GuideLine, atStart: Boolean, guides: List<GuideLine>, materials: Map<String, Material>, mapping: PlaneMapping): Double {
+    if (guide.groupId == null && guide.pathId == null) return 0.0
+    if (guide.curveMid != null) return 0.0
+    // Bars joined by Weld, or drawn as one broken line or shape, are one frame.
+    fun joined(g: GuideLine) = guide.groupId != null && g.groupId == guide.groupId || guide.pathId != null && g.pathId == guide.pathId
+    fun memberOf(g: GuideLine) = g.materialId?.let(materials::get)?.takeIf { !it.isSheet && g.surfaceMm == null && g.curveMid == null }
+    memberOf(guide) ?: return 0.0
+    val p = if (atStart) guide.start else guide.end
+    fun dirFrom(g: GuideLine, from: Pt): Pair<Double, Double>? {
+        val far = if (distance(g.start, from) < distance(g.end, from)) g.end else g.start
+        val l = distance(far, from); if (l < 1e-3) return null
+        return (far.x - from.x) / l to (far.y - from.y) / l
+    }
+    val own = dirFrom(guide, p) ?: return 0.0
+    fun sinBetween(a: Pair<Double, Double>, b: Pair<Double, Double>) = abs(a.first * b.second - a.second * b.first)
+    fun half(g: GuideLine) = halfAcross(memberOf(g)!!.profile, g.materialTurnDeg)
+    // Bars of the group at this joint: ending here, or passing through it.
+    val ending = mutableListOf<GuideLine>(); val passing = mutableListOf<GuideLine>()
+    for (g in guides) {
+        if (g.id == guide.id || g.plane != guide.plane || !joined(g) || memberOf(g) == null) continue
+        if (distance(g.start, p) < 0.6 || distance(g.end, p) < 0.6) { ending += g; continue }
+        val len = distance(g.start, g.end); if (len < 1e-3) continue
+        val ux = (g.end.x - g.start.x) / len; val uy = (g.end.y - g.start.y) / len
+        val t = (p.x - g.start.x) * ux + (p.y - g.start.y) * uy
+        if (t in 0.0..len.toDouble() && hypot(g.start.x + ux * t - p.x, g.start.y + uy * t - p.y) < 0.6) passing += g
+    }
+    if (ending.isEmpty() && passing.isEmpty()) return 0.0
+    fun continues(a: Pair<Double, Double>, b: Pair<Double, Double>) = sinBetween(a, b) < 0.05 && a.first * b.first + a.second * b.second < 0
+    // This bar continues another one through the joint: it is part of the run and keeps its end.
+    if (ending.any { g -> dirFrom(g, p)?.let { continues(own, it) } == true }) return 0.0
+    val through = passing.firstOrNull() ?: ending.firstOrNull { a -> ending.any { b -> b !== a && dirFrom(a, p)?.let { da -> dirFrom(b, p)?.let { continues(da, it) } } == true } }
+    val adjust = if (through != null) {
+        val sin = dirFrom(through, p)?.let { sinBetween(own, it) } ?: 0.0
+        if (sin < 0.05) 0.0 else -half(through) / sin
+    } else {
+        // A plain corner: the oldest bar runs through, the others stop at it.
+        val oldest = (ending + guide).minByOrNull { it.id }!!
+        if (oldest.id == guide.id) ending.maxOfOrNull { g -> dirFrom(g, p)?.let { sinBetween(own, it) }?.takeIf { it >= 0.05 }?.let { half(g) / it } ?: 0.0 } ?: 0.0
+        else dirFrom(oldest, p)?.let { sinBetween(own, it) }?.takeIf { it >= 0.05 }?.let { -half(oldest) / it } ?: 0.0
+    }
+    if (adjust == 0.0) return 0.0
+    // Never trim a bar to nothing.
+    val ownMm = (mapping.model(guide.end, guide.endZMm) - mapping.model(guide.start, guide.startZMm)).length
+    return adjust.coerceAtLeast(-ownMm * 0.45)
 }
 
 /**
