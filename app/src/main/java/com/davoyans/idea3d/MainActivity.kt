@@ -2264,22 +2264,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         // Points of items already moved above stay where the item took them.
         pickedPoints.filterNot { p -> pickedItems.any { it.first == p.first && itemGuides(it).any { g -> g.id == p.second } } }.forEach { moveGhostPoint(it, delta) }
     }
-    /** Picks every item lying fully inside the box from [a] to [b]. */
-    fun pickInRect(a: Pt, b: Pt) {
-        val x1 = min(a.x, b.x); val x2 = max(a.x, b.x); val y1 = min(a.y, b.y); val y2 = max(a.y, b.y)
-        val seen = mutableListOf<Pair<ModelPlane, Int>>()
-        ModelPlane.entries.forEach { plane -> planeGeometry(plane).guides.forEach { g ->
-            val key = plane to g.id
-            if (seen.any { sameItem(it, key) }) return@forEach
-            val pts = itemOutlineHere(key).flatten()
-            if (pts.isNotEmpty() && pts.all { it.x in x1..x2 && it.y in y1..y2 }) seen += key
-        } }
-        // Anything fully inside the box is picked whole, so Align and Even move it without changing its size.
-        seen.forEach { key -> if (pickedItems.none { sameItem(key, it) }) togglePicked(key) }
-        // Only points of items that stick out of the box are picked one by one.
-        allPointsHere().filter { (sel, at) -> at.x in x1..x2 && at.y in y1..y2 && pickedItems.none { it.first == sel.first && itemGuides(it).any { g -> g.id == sel.second } } }
-            .forEach { (sel, _) -> if (pickedPoints.none { samePoint(it, sel) }) pickedPoints = pickedPoints + sel }
-    }
     /** End points of other views' lines inside a box, for multi-point selection. */
     fun ghostPointsInRect(a: Pt, b: Pt): List<Triple<ModelPlane, Int, Boolean>> {
         val x1 = min(a.x, b.x); val x2 = max(a.x, b.x); val y1 = min(a.y, b.y); val y2 = max(a.y, b.y)
@@ -2510,6 +2494,40 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     /** A 3D object: a shape with depth, a surface grown from a line, or a bar or pipe. */
     fun isObjectItem(key: Pair<ModelPlane, Int>): Boolean = closedHere(key) && planeGeometry(key.first).extrusions.any { e -> itemGuides(key).any { it.id in e.guideIds } } ||
         itemGuides(key).any { g -> g.surfaceMm != null || g.materialId?.let { m -> materials.firstOrNull { it.id == m } }?.isSheet == false }
+    /** Picks every item lying fully inside the box from [a] to [b]. */
+    fun pickInRect(a: Pt, b: Pt) {
+        val x1 = min(a.x, b.x); val x2 = max(a.x, b.x); val y1 = min(a.y, b.y); val y2 = max(a.y, b.y)
+        val seen = mutableListOf<Pair<ModelPlane, Int>>()
+        ModelPlane.entries.forEach { plane -> planeGeometry(plane).guides.forEach { g ->
+            val key = plane to g.id
+            if (seen.any { sameItem(it, key) }) return@forEach
+            val pts = itemOutlineHere(key).flatten()
+            if (pts.isNotEmpty() && pts.all { it.x in x1..x2 && it.y in y1..y2 }) seen += key
+        } }
+        fun inBox(p: Pt) = p.x in x1..x2 && p.y in y1..y2
+        fun addPoints(filter: (Triple<ModelPlane, Int, Boolean>) -> Boolean) = allPointsHere().filter { (sel, at) -> inBox(at) && filter(sel) }
+            .forEach { (sel, _) -> if (pickedPoints.none { samePoint(it, sel) }) pickedPoints = pickedPoints + sel }
+        when (selectionMode) {
+            // The Select filter decides what a box picks, just as it does for a tap.
+            SelectionMode.POINTS -> addPoints { true }
+            SelectionMode.LINES -> ModelPlane.entries.forEach { plane -> planeGeometry(plane).guides.forEach { g ->
+                val key = plane to g.id
+                val a = ghostPointHere(Triple(plane, g.id, true)); val b = ghostPointHere(Triple(plane, g.id, false))
+                if (a == null || b == null || !inBox(a) || !inBox(b)) return@forEach
+                if (itemGuides(key).size <= 1 && !closedHere(key)) { if (pickedItems.none { sameItem(key, it) }) togglePicked(key) }
+                else if (key !in pickedSegments) pickedSegments = pickedSegments + key
+            } }
+            SelectionMode.SHAPES -> seen.filter(::closedHere).forEach { key -> if (pickedItems.none { sameItem(key, it) }) togglePicked(key) }
+            SelectionMode.OBJECTS -> seen.filter { key -> isObjectItem(key) }.forEach { key -> if (pickedItems.none { sameItem(key, it) }) togglePicked(key) }
+            SelectionMode.ALL, SelectionMode.VISIBLE -> {
+                // Anything fully inside the box is picked whole, so Align and Even move it without changing its size.
+                seen.forEach { key -> if (pickedItems.none { sameItem(key, it) }) togglePicked(key) }
+                // Only points of items that stick out of the box are picked one by one.
+                addPoints { sel -> pickedItems.none { it.first == sel.first && itemGuides(it).any { g -> g.id == sel.second } } }
+            }
+        }
+        ActionLog.add("box select (${selectionMode.label}): items=${pickedItems.size}, lines=${pickedSegments.size}, points=${pickedPoints.size}")
+    }
     fun handleTap(point: Pt, hitRadius: Double) {
         surfaceAttachItems?.let { items ->
             val surface = surfacePickAt(point, ignore = items.toSet())
@@ -4957,7 +4975,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
         }) },
         bottomBar = { if (bitmap != null && tool == Tool.CROP) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), horizontalArrangement = Arrangement.Center) { OutlinedButton(onClick = { showCanvasSize = true }) { Text("Canvas size") } }
-        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
+        else if (bitmap != null && !show3d) BottomControls(tool, lineDrawing, measureDrawing, (activePolylineId != null || activeMeasurePathId != null) && draftStart != null, guideColorIndex, guideStrokeWidth, unknownSize, onUnknownSize = { unknownSize = it; preferences.edit().putBoolean("unknown-size", it).apply() }, selectActive = selectMode, selectLabel = selectionLadderLabel(), selectionMode = selectionMode, onSelect = ::promoteSelection, onSelectionMode = { ActionLog.add("select filter ${it.label}"); selectionMode = it; setSelectMode(true) }, onFind = { showFinder = true }, onTool = { if (selectMode) setSelectMode(false)
             // Select first, then Modify: the selected line or shape stays selected, as a whole.
             if (it == Tool.ADJUST && selectedGuideId != null && selectedWholeGuideId == null) selectedWholeGuideId = selectedGuideId
             panOnEmptyDrag = false; selectedVertices = emptyList(); selectedCurveId = null; tool = it; draftStart = null; pendingEnd = null; triangleBaseReady = false; triangleApex = null; activePolylineId = null; activeMeasurePathId = null; deleteCandidateId = null; guideDeleteCandidateId = null }, onFinishBroken = ::finishBrokenGuide, onLineDrawing = { lineDrawing = it; draftStart = null; pendingEnd = null; triangleBaseReady = false; triangleApex = null }, onMeasureDrawing = { measureDrawing = it }, onGuideStyle = { color, width -> guideColorIndex = color; guideStrokeWidth = width }) }
