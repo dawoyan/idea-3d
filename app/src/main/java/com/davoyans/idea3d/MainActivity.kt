@@ -147,6 +147,7 @@ import com.davoyans.idea3d.core.CalibrationReference
 import com.davoyans.idea3d.core.CalibrationStatus
 import com.davoyans.idea3d.core.LengthUnit
 import com.davoyans.idea3d.core.Mesh
+import com.davoyans.idea3d.core.SweepBuilder
 import com.davoyans.idea3d.core.Triangle
 import com.davoyans.idea3d.core.ModelPlane
 import com.davoyans.idea3d.core.formatLength
@@ -4540,6 +4541,51 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         ActionLog.add("intersect: base ${base.first.label} line ${base.second} with ${ops.size} shape(s); 3D objects=${allExtrusions().size}, operations=${solidOps.size}")
         logToast(context, "Intersected: only the part inside both outlines is kept. Draw in another view and Intersect again to trim more", Toast.LENGTH_LONG).show()
     }
+    /** A closed shape as a cross-section in millimeters, centered, with the closed shapes inside it as holes. */
+    fun profileOf(key: Pair<ModelPlane, Int>): MemberProfile? = runCatching {
+        val geometry = planeGeometry(key.first)
+        val mapping = modelSetup().mapping(key.first) ?: return@runCatching null
+        val shape = closedGuideShapes(geometry.guides).firstOrNull { path -> path.any { g -> itemGuides(key).any { it.id == g.id } } } ?: return@runCatching null
+        fun ring(path: List<GuideLine>) = editableContours(shapePath(path))?.singleOrNull()
+        val outer = ring(shape) ?: return@runCatching null
+        val holes = closedGuideShapes(geometry.guides).filter { it !== shape && it.none { g -> shape.any { s -> s.id == g.id } } }
+            .mapNotNull(::ring).filter { hole -> hole.all { pointInsidePolygon(it, outer) } }
+        fun mm(points: List<Pt>) = points.map { Vec2(mapping.right(it), mapping.up(it)) }
+        val outline = mm(outer)
+        val cx = (outline.minOf { it.x } + outline.maxOf { it.x }) / 2; val cy = (outline.minOf { it.y } + outline.maxOf { it.y }) / 2
+        fun centered(points: List<Vec2>) = points.map { Vec2(it.x - cx, it.y - cy) }
+        MemberProfile(ProfileKind.DRAWN, outline.maxOf { it.x } - outline.minOf { it.x }, outline.maxOf { it.y } - outline.minOf { it.y }, outline = centered(outline), holes = holes.map { centered(mm(it)) })
+    }.getOrNull()
+    /**
+     * Additive pipe (as in FreeCAD): the first picked closed shape is the profile; the other picked lines, broken lines
+     * or shapes are the path. The profile becomes a material and the path takes it, so the pipe follows the path when it
+     * is edited, keeps the profile square to it, and miters every corner. The profile drawing stays as it is.
+     */
+    fun pipePicked() {
+        val picks = distinctPicked()
+        val profileKey = picks.firstOrNull(::isClosedShape)
+        val paths = picks.filter { it != profileKey }
+        if (profileKey == null || paths.isEmpty()) {
+            logToast(context, "Pick the profile (a closed shape) first, then the path: lines, a broken line, a curve or a shape, in any view", Toast.LENGTH_LONG).show(); return
+        }
+        if (paths.any(::itemLocked)) { logToast(context, "Unlock the path first", Toast.LENGTH_SHORT).show(); return }
+        val profile = profileOf(profileKey)
+        if (profile == null || profile.problem() != null) { logToast(context, "The profile must be one closed outline that doesn't cross itself", Toast.LENGTH_LONG).show(); return }
+        pushUndo()
+        val f = java.text.DecimalFormat("0.#")
+        val color = guideColor(itemGuides(profileKey).firstOrNull()?.colorIndex ?: 0).toArgb().let { if (it == AndroidColor.BLACK) 0xFF8A9497.toInt() else it }
+        val material = Material(UUID.randomUUID().toString(), "Pipe ${f.format(profile.widthMm)}×${f.format(profile.heightMm)}", profile, color, finish = Finish.METAL)
+        materials = materials + material
+        MaterialStore.save(context, materials)
+        paths.groupBy { it.first }.forEach { (plane, keys) ->
+            val ids = keys.flatMap { k -> itemGuides(k).map { it.id } }.toSet()
+            val geometry = planeGeometry(plane)
+            setPlaneShapes(plane, geometry.guides.map { if (it.id in ids) it.copy(materialId = material.id, surfaceMm = null) else it }, geometry.extrusions)
+        }
+        pickedItems = emptyList()
+        ActionLog.add("pipe: profile ${profileKey.first.label} line ${profileKey.second} along ${paths.size} path item(s); ${f.format(profile.widthMm)}×${f.format(profile.heightMm)} mm")
+        logToast(context, "Pipe made: the profile runs along the path. Turn it in the line's Properties; edit the path and the pipe follows", Toast.LENGTH_LONG).show()
+    }
     fun commonPicked() {
         val first = pickedItems.firstOrNull(); val second = first?.let { a -> pickedItems.firstOrNull { !sameItem(it, a) } }
         if (first == null || second == null) { logToast(context, "Pick two shapes: first and second", Toast.LENGTH_SHORT).show(); return }
@@ -5242,6 +5288,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
                         ActionIcon("Intersect", R.drawable.ic_cube, enabled = n >= 1 && pickedItems.all(::isClosedShape), onClick = ::intersectPicked)
+                        ActionIcon("Pipe", R.drawable.ic_broken_line, enabled = n >= 2, onClick = ::pipePicked)
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total + parts > 0) { pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList() }
                         ViewIcons()
@@ -8686,7 +8733,9 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
     // faces are made; rendering those as nothing made the whole 3D object appear
     // to break apart. Keep such construction edges visible as slim material bars.
     val sheetFaceEdges = drawableGuideShapes(guides).flatten().map { it.id }.toSet()
-    return buildSurfaces(guides, materials, setup, issues, previewCurveSteps) + guides.filter { it.surfaceMm == null }.flatMap { guide ->
+    val pipes = buildPipes(guides, materials, setup, issues, previewCurveSteps, counts)
+    val swept = pipes.flatMap { it.first }.toSet()
+    return buildSurfaces(guides, materials, setup, issues, previewCurveSteps) + pipes.map { it.second } + guides.filter { it.surfaceMm == null && (it.plane to it.id) !in swept }.flatMap { guide ->
         // Sheets belong to closed shapes; only bars and pipes follow a line.
         // A thin neutral bar makes unmaterialed drawing guides visible in 3D.
         // It is preview-only and is never included in exports.
@@ -8725,6 +8774,47 @@ private fun buildMembers(guides: List<GuideLine>, materials: Map<String, Materia
     }
 }
 
+/**
+ * Additive pipes: the lines of one broken line or shape that share a bar or pipe material become one swept solid,
+ * the cross-section carried along the whole path with mitered corners (closed paths have no ends). Returns the lines
+ * used, so they aren't also built one by one. Branching paths are left to the single-line builder.
+ */
+private fun buildPipes(guides: List<GuideLine>, materials: Map<String, Material>, setup: ModelSetup, issues: MutableList<MeshIssue>?, previewCurveSteps: Int?, counts: HashMap<String, Int>): List<Pair<List<Pair<ModelPlane, Int>>, Pair<Pair<ModelPlane, Int>, Mesh>>> {
+    fun barOf(g: GuideLine) = g.materialId?.let(materials::get)?.takeIf { !it.isSheet && g.surfaceMm == null }
+    return guides.filter { it.pathId != null && barOf(it) != null }.groupBy { Triple(it.plane, it.pathId, it.materialId) }.values.filter { it.size >= 2 }.mapNotNull { lines ->
+        val mapping = setup.mapping(lines.first().plane) ?: return@mapNotNull null
+        fun near(a: Pt, b: Pt) = distance(a, b) < 0.6
+        // Every joint joins exactly two lines (or one at an open end); otherwise it branches and is not one pipe.
+        val ends = lines.flatMap { listOf(it.start, it.end) }
+        if (ends.any { p -> ends.count { near(it, p) } > 2 }) return@mapNotNull null
+        val start = lines.firstOrNull { g -> listOf(g.start, g.end).any { p -> ends.count { near(it, p) } == 1 } }
+        val closed = start == null
+        val first = start ?: lines.first()
+        var at = if (start != null && ends.count { near(it, first.start) } == 1) first.start else if (start != null) first.end else first.start
+        val ordered = mutableListOf<Pair<GuideLine, Boolean>>() // line, walked forward
+        val left = lines.toMutableList()
+        while (left.isNotEmpty()) {
+            val next = left.firstOrNull { near(it.start, at) || near(it.end, at) } ?: break
+            val forward = near(next.start, at)
+            ordered += next to forward; left.remove(next); at = if (forward) next.end else next.start
+        }
+        if (left.isNotEmpty()) return@mapNotNull null
+        val points = mutableListOf<Vec3>()
+        ordered.forEach { (g, forward) ->
+            val steps = if (g.curveMid == null) 1 else previewCurveSteps?.coerceIn(1, 12) ?: 12
+            val pts = (0..steps).map { i -> val t = i.toFloat() / steps; mapping.model(guidePointAt(g, t), g.startZMm + (g.endZMm - g.startZMm) * t) }
+            val run = if (forward) pts else pts.reversed()
+            points += if (points.isEmpty()) run else run.drop(1)
+        }
+        val material = barOf(lines.first())!!
+        val name = "${material.name} ${counts.merge(material.id, 1, Int::plus)}"
+        val head = ordered.first().first
+        try {
+            lines.map { it.plane to it.id } to ((head.plane to -(head.id + 1)) to SweepBuilder.build(name, points, closed, head.plane.toward, material.profile, material.argb, head.materialTurnDeg))
+        } catch (e: MeshException) { issues?.addAll(e.issues); null }
+    }
+}
+
 /** Half the size of a bar across its line within the drawing, allowing for a turned profile. */
 private fun halfAcross(profile: MemberProfile, turnDeg: Double): Double {
     val t = Math.toRadians(turnDeg)
@@ -8735,13 +8825,13 @@ private fun halfAcross(profile: MemberProfile, turnDeg: Double): Double {
  * How far a welded bar's end moves along its own line (positive: longer, negative: shorter) so it meets the bars it is
  * welded to exactly. At a joint, bars that continue each other form one through run and keep their ends; a bar ending
  * on a run stops at its face. Where bars only meet at a corner, the oldest runs through to the outer face and the others
- * stop at it. Only bars welded together or drawn as one line or shape are fitted; other lines keep their drawn ends.
+ * stop at it. Only bars welded together are fitted; other lines keep their drawn ends.
  */
 private fun weldEndAdjust(guide: GuideLine, atStart: Boolean, guides: List<GuideLine>, materials: Map<String, Material>, mapping: PlaneMapping): Double {
-    if (guide.groupId == null && guide.pathId == null) return 0.0
+    if (guide.groupId == null) return 0.0
     if (guide.curveMid != null) return 0.0
-    // Bars joined by Weld, or drawn as one broken line or shape, are one frame.
-    fun joined(g: GuideLine) = guide.groupId != null && g.groupId == guide.groupId || guide.pathId != null && g.pathId == guide.pathId
+    // Bars joined by Weld are fitted here; a broken line or shape of one bar material is swept as one pipe instead.
+    fun joined(g: GuideLine) = g.groupId == guide.groupId && !(guide.pathId != null && g.pathId == guide.pathId && g.materialId == guide.materialId)
     fun memberOf(g: GuideLine) = g.materialId?.let(materials::get)?.takeIf { !it.isSheet && g.surfaceMm == null && g.curveMid == null }
     memberOf(guide) ?: return 0.0
     val p = if (atStart) guide.start else guide.end

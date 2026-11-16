@@ -12,6 +12,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.zip.ZipInputStream
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -557,3 +558,60 @@ class DxfExportTest {
     }
 }
 
+
+class SweepTest {
+    private val square = MemberProfile(ProfileKind.RECT_BAR, 10.0, 10.0)
+    private val up = Vec3(0.0, 0.0, 1.0)
+
+    private fun assertSolid(mesh: Mesh) {
+        assertEquals(emptyList<MeshIssue>(), MeshBuilder.validate(mesh))
+        assertTrue(mesh.signedVolume > 0)
+    }
+
+    @Test fun straightSweepIsAPrism() {
+        val mesh = SweepBuilder.build("Pipe", listOf(Vec3(0.0, 0.0, 0.0), Vec3(100.0, 0.0, 0.0)), false, up, square, 0)
+        assertSolid(mesh)
+        assertEquals(10000.0, mesh.signedVolume, 1e-6)
+    }
+
+    @Test fun miteredCornerKeepsCenterlineVolume() {
+        // An L path 100 + 100 long: a mitered square pipe holds area × centerline length.
+        val mesh = SweepBuilder.build("Pipe", listOf(Vec3(0.0, 0.0, 0.0), Vec3(100.0, 0.0, 0.0), Vec3(100.0, 100.0, 0.0)), false, up, square, 0)
+        assertSolid(mesh)
+        assertEquals(100.0 * 200.0, mesh.signedVolume, 1e-6)
+        val (min, max) = mesh.bounds
+        assertEquals(0.0, min.x, 1e-9); assertEquals(105.0, max.x, 1e-9) // the outer corner reaches the face exactly
+        assertEquals(-5.0, min.y, 1e-9); assertEquals(100.0, max.y, 1e-9)
+    }
+
+    @Test fun closedFrameHasNoEnds() {
+        val square100 = listOf(Vec3(0.0, 0.0, 0.0), Vec3(100.0, 0.0, 0.0), Vec3(100.0, 100.0, 0.0), Vec3(0.0, 100.0, 0.0))
+        val mesh = SweepBuilder.build("Frame", square100, true, up, square, 0)
+        assertSolid(mesh)
+        assertEquals(100.0 * 400.0, mesh.signedVolume, 1e-6)
+        assertEquals(110.0, mesh.bounds.second.x - mesh.bounds.first.x, 1e-9)
+    }
+
+    @Test fun drawnProfileWithHoleAlongACurve() {
+        val outline = (0 until 16).map { i -> val a = 2 * PI * i / 16; Vec2(8 * cos(a), 8 * sin(a)) }
+        val hole = (0 until 16).map { i -> val a = 2 * PI * i / 16; Vec2(5 * cos(a), 5 * sin(a)) }
+        val tube = MemberProfile(ProfileKind.DRAWN, 16.0, 16.0, outline = outline, holes = listOf(hole))
+        val arc = (0..12).map { i -> val a = PI / 2 * i / 12; Vec3(100 * cos(a), 100 * sin(a), 0.0) }
+        val mesh = SweepBuilder.build("Tube", arc, false, up, tube, 0)
+        assertSolid(mesh)
+        val area = abs(Polygon.signedArea(outline)) - abs(Polygon.signedArea(hole))
+        val length = arc.zipWithNext().sumOf { (a, b) -> (b - a).length }
+        assertEquals(area * length, mesh.signedVolume, area * length * 0.01)
+    }
+
+    @Test fun pathOutOfTheDrawingPlaneWorks() {
+        val mesh = SweepBuilder.build("Pipe", listOf(Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 50.0), Vec3(50.0, 0.0, 50.0)), false, up, square, 0)
+        assertSolid(mesh)
+        assertEquals(100.0 * 100.0, mesh.signedVolume, 1e-6)
+    }
+
+    @Test fun uTurnIsRejected() {
+        try { SweepBuilder.build("Pipe", listOf(Vec3(0.0, 0.0, 0.0), Vec3(100.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)), false, up, square, 0); fail() }
+        catch (e: MeshException) { assertTrue(e.issues.single().message.contains("sharply")) }
+    }
+}

@@ -96,7 +96,7 @@ object MemberBuilder {
     }
 
     /** Cross-section corners as (across, up) pairs. */
-    private fun ring(round: Boolean, width: Double, height: Double): List<Pair<Double, Double>> =
+    internal fun ring(round: Boolean, width: Double, height: Double): List<Pair<Double, Double>> =
         if (round) (0 until ROUND_SEGMENTS).map { i -> val t = 2 * PI * i / ROUND_SEGMENTS; width / 2 * cos(t) to width / 2 * sin(t) }
         else listOf(-width / 2 to -height / 2, width / 2 to -height / 2, width / 2 to height / 2, -width / 2 to height / 2)
 
