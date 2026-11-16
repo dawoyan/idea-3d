@@ -192,3 +192,10 @@ The editor has one row: **Front | Top | Profile | 3D**. Every plane has the same
 
 ### 0.10.64
 - Exports never leave an empty file: the DXF drawing and project export are prepared in a file first (like 3D models), so they survive Android pausing the app behind the Save picker; if anything fails, the empty file the picker made is removed and a message says why. DXF overwrites an existing file cleanly.
+
+### 0.10.65
+- A plain tap picks the biggest thing first: a whole 3D object (or shape, or line) with its group, and opens Select. Tap it again for one line of it, again for a point; tap empty space to close Select.
+- Picked 3D objects lead with their own actions: Size, Align, View it 3D, Cut by, Join with.
+- Align menu for 2+ picked things: Top / Middle / Bottom, Left / Center / Right (by their edges as seen on screen).
+- Shape and line Properties have "Change by": enter an amount, then − / + beside W, H, D (or Length); Save applies it.
+- 2D views draw bars and pipes as wide as their profile, in their material's colour; plain lines are solid black.
