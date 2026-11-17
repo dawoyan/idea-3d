@@ -8853,7 +8853,7 @@ private class PlaneMapping(val plane: ModelPlane, private val originU: Double, p
     fun up(p: Pt) = (originV - p.y) * mmPerPixelUp
     fun pixel(right: Double, up: Double) = Pt((originU + right / mmPerPixelRight).toFloat(), (originV - up / mmPerPixelUp).toFloat())
     /** Model point of a canvas pixel at [depthMm] along the plane's viewing direction. */
-    fun model(p: Pt, depthMm: Double) = plane.toModel(right(p), up(p), normalOffsetMm + depthMm)
+    fun model(p: Pt, depthMm: Double) = plane.toModel(right(p), up(p), depthMm)
     /** Canvas pixel of a model point (its depth is dropped). */
     fun pixel(model: Vec3) = pixel(model dot plane.right, model dot plane.up)
     /** Model-space movement of a canvas drag (it has no depth component). */
