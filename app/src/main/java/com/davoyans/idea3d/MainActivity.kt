@@ -222,7 +222,21 @@ private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>
  * canvas is [width] x [height] pixels. Cropping or growing a canvas moves the origin with the drawing, so the
  * model stays where it is.
  */
-private data class PlaneFrame(val originU: Double, val originV: Double, val width: Int, val height: Int)
+private data class PlaneFrame(val originU: Double, val originV: Double, val width: Int, val height: Int, val normalOffsetMm: Double = 0.0)
+/** The visible intersection of one other drawing plane with the current 2D view. */
+private data class ViewpointLine(val target: ModelPlane, val vertical: Boolean, val position: Float)
+private fun viewpointLinesFor(plane: ModelPlane, frames: Map<ModelPlane, PlaneFrame>, setup: ModelSetup): List<ViewpointLine> {
+    val here = setup.mapping(plane) ?: return emptyList()
+    return ModelPlane.entries.filter { it != plane }.map { target ->
+        val point = here.pixel(target.toward * (frames[target]?.normalOffsetMm ?: 0.0))
+        val vertical = kotlin.math.abs(plane.right dot target.toward) > 0.5
+        ViewpointLine(target, vertical, if (vertical) point.x else point.y)
+    }
+}
+private fun viewpointTargetAt(lines: List<ViewpointLine>, point: Pt, radius: Double): ModelPlane? =
+    lines.minByOrNull { kotlin.math.abs((if (it.vertical) point.x else point.y) - it.position) }
+        ?.takeIf { kotlin.math.abs((if (it.vertical) point.x else point.y) - it.position) <= radius * 1.25 }
+        ?.target
 private fun defaultFrame(plane: ModelPlane, width: Int, height: Int) = when (plane) {
     ModelPlane.FRONT -> PlaneFrame(0.0, height.toDouble(), width, height)
     ModelPlane.TOP -> PlaneFrame(0.0, height / 2.0, width, height)
@@ -761,7 +775,7 @@ private object ProjectStore {
         }) }
         val extrusions = JSONArray()
         project.extrusions.forEach { e -> extrusions.put(JSONObject().apply { put("id", e.id); put("guides", JSONArray(e.guideIds)); put("ox", e.origin.x); put("oy", e.origin.y); put("hx", e.handle.x); put("hy", e.handle.y); put("vx", e.vanishing.x); put("vy", e.vanishing.y); put("sunX", e.sun.x); put("sunY", e.sun.y); e.depthMm?.let { put("depthMm", it) }; put("positionZMm", e.positionZMm); if (e.plane != ModelPlane.FRONT) put("plane", e.plane.name) }) }
-        File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene); put("frames", JSONObject().apply { project.frames.forEach { (plane, f) -> put(plane.name, JSONObject().apply { put("u", f.originU); put("v", f.originV); put("w", f.width); put("h", f.height) }) } }); put("solidOps", JSONArray().apply { project.solidOps.forEach { op -> put(JSONObject().apply { put("targetPlane", op.target.first.name); put("target", op.target.second); put("toolPlane", op.tool.first.name); put("tool", op.tool.second); put("join", op.join); put("keepTool", op.keepTool); put("common", op.common) }) } }); put("groups", JSONArray().apply { project.itemGroups.forEach { group -> put(JSONArray().apply { group.forEach { (plane, id) -> put(JSONObject().apply { put("plane", plane.name); put("id", id) }) } }) } }); put("lofts", JSONArray().apply { project.lofts.forEach { loft -> put(JSONObject().apply { put("id", loft.id); put("firstPlane", loft.first.first.name); put("first", loft.first.second); put("secondPlane", loft.second.first.name); put("second", loft.second.second); put("color", loft.colorIndex) }) } })
+        File(directory(context), "${project.id}.json").writeText(JSONObject().apply { put("id", project.id); put("name", project.name); put("unit", project.unit); put("capturedAt", project.capturedAt); put("rotation", project.rotation); put("lines", values); put("guides", guides); put("guidesDetected", project.guidesDetected); put("extrusions", extrusions); put("figure", project.options.figure?.name ?: ""); put("sum", project.options.sum); put("legend", project.options.legend); put("guess", project.options.guess); put("transparency", project.options.transparency); put("blankScene", project.blankScene); put("frames", JSONObject().apply { project.frames.forEach { (plane, f) -> put(plane.name, JSONObject().apply { put("u", f.originU); put("v", f.originV); put("w", f.width); put("h", f.height); put("normal", f.normalOffsetMm) }) } }); put("solidOps", JSONArray().apply { project.solidOps.forEach { op -> put(JSONObject().apply { put("targetPlane", op.target.first.name); put("target", op.target.second); put("toolPlane", op.tool.first.name); put("tool", op.tool.second); put("join", op.join); put("keepTool", op.keepTool); put("common", op.common) }) } }); put("groups", JSONArray().apply { project.itemGroups.forEach { group -> put(JSONArray().apply { group.forEach { (plane, id) -> put(JSONObject().apply { put("plane", plane.name); put("id", id) }) } }) } }); put("lofts", JSONArray().apply { project.lofts.forEach { loft -> put(JSONObject().apply { put("id", loft.id); put("firstPlane", loft.first.first.name); put("first", loft.first.second); put("secondPlane", loft.second.first.name); put("second", loft.second.second); put("color", loft.colorIndex) }) } })
             put("models", JSONArray().apply { project.models.forEach { m -> put(JSONObject().apply { put("id", m.id); put("name", m.name); put("x", m.center.x); put("y", m.center.y); put("z", m.center.z); put("scale", m.scale); put("rx", m.rx); put("ry", m.ry); put("rz", m.rz); put("color", m.argb); put("finish", m.finish.name)
                 put("turns", JSONArray().apply { m.turns.forEach { (axis, deg) -> put(JSONArray().apply { put(axis); put(deg) }) } }) }) } }) }.toString())
     }
@@ -846,7 +860,7 @@ private object ProjectStore {
         val extrusionValues = json.optJSONArray("extrusions") ?: JSONArray()
         val extrusions = buildList { for (index in 0 until extrusionValues.length()) { val item = extrusionValues.getJSONObject(index); val ids = item.getJSONArray("guides"); add(Extrusion(item.getInt("id"), (0 until ids.length()).map { ids.getInt(it) }, Pt(item.getDouble("ox").toFloat(), item.getDouble("oy").toFloat()), Pt(item.getDouble("hx").toFloat(), item.getDouble("hy").toFloat()), Pt(item.getDouble("vx").toFloat(), item.getDouble("vy").toFloat()), Pt(item.optDouble("sunX", item.getDouble("vx") * 0.3).toFloat(), item.optDouble("sunY", item.getDouble("vy")).toFloat()), item.takeIf { it.has("depthMm") }?.optDouble("depthMm")?.takeIf { it.isFinite() && it >= 0 }, item.optDouble("positionZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, ModelPlane.of(item.optString("plane")))) } }
         return SavedProject(json.getString("id"), json.getString("name"), json.optString("unit", "mm"), lines, guides, json.optBoolean("guidesDetected", false), json.optLong("capturedAt", fallbackTime), json.optDouble("rotation", 0.0).toFloat(), PictureOptions(figure, json.optBoolean("sum"), json.optBoolean("legend"), json.optBoolean("guess"), transparency), extrusions, json.optBoolean("blankScene", false), json.optJSONObject("frames")?.let { frames ->
-            ModelPlane.entries.mapNotNull { plane -> frames.optJSONObject(plane.name)?.let { f -> plane to PlaneFrame(f.getDouble("u"), f.getDouble("v"), f.getInt("w"), f.getInt("h")) } }.toMap()
+            ModelPlane.entries.mapNotNull { plane -> frames.optJSONObject(plane.name)?.let { f -> plane to PlaneFrame(f.getDouble("u"), f.getDouble("v"), f.getInt("w"), f.getInt("h"), f.optDouble("normal", 0.0).takeIf { it.isFinite() } ?: 0.0) } }.toMap()
         }.orEmpty(), json.optJSONArray("solidOps")?.let { ops -> (0 until ops.length()).map { i -> ops.getJSONObject(i).let { o ->
             SolidOp(ModelPlane.of(o.optString("targetPlane")) to o.getInt("target"), ModelPlane.of(o.optString("toolPlane")) to o.getInt("tool"), o.optBoolean("join"), o.optBoolean("keepTool"), o.optBoolean("common")) } } }.orEmpty(),
             json.optJSONArray("groups")?.let { groups -> (0 until groups.length()).map { i -> groups.getJSONArray(i).let { g -> (0 until g.length()).map { k -> g.getJSONObject(k).let { ModelPlane.of(it.optString("plane")) to it.getInt("id") } } } } }.orEmpty(),
@@ -1151,7 +1165,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         ?: if (blankScene) unitFactorMm(unit) else null
     fun frontAxes() = axisScaleOf(planeLines(ModelPlane.FRONT), unit)
     fun modelSetup() = ModelSetup(ModelPlane.entries.associateWith { frameOf(it) }, ModelPlane.entries.associateWith { scaleFor(planeLines(it), it) }, frontAxes(), unit)
-
     /*
      * Every view edits all lines, from every view, as its own. Lines drawn in another view are projected into this
      * one: they keep that view in [GuideLine.plane], get negative ids (and path and group ids), and their depth
@@ -1265,6 +1278,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels, lofts)
         undoHistory = undoHistory + snapshot
     }
+    var draggingViewpointPlane by remember { mutableStateOf<ModelPlane?>(null) }
     fun pushNudgeUndo(selection: String) {
         val now = System.currentTimeMillis()
         if (now > nudgeUndoDeadline) {
@@ -5505,7 +5519,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), viewpointLines = viewpointLinesFor(editPlane, planeFrames, modelSetup()), onViewpointDragStart = { point, radius -> viewpointTargetAt(viewpointLinesFor(editPlane, planeFrames, modelSetup()), point, radius)?.let { target -> pushUndo(); draggingViewpointPlane = target; ActionLog.add("viewpoint drag start: ${target.label} plane from ${editPlane.label}"); true } ?: false }, onViewpointDrag = { point -> draggingViewpointPlane?.let { target -> modelSetup().mapping(editPlane)?.let { map -> planeFrames = planeFrames + (target to frameOf(target).copy(normalOffsetMm = map.model(point, 0.0) dot target.toward)) } } }, onViewpointDragEnd = { draggingViewpointPlane?.let { target -> ActionLog.add("viewpoint moved: ${target.label} plane") }; draggingViewpointPlane = null }, ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (selectedGhostPoints + if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = (if (lineDragging || shapeDragging) triangleApex.takeIf { lineDrawing == LineDrawing.TRIANGLE && triangleBaseReady } ?: pendingEnd else null) ?: selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -7105,7 +7119,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, lineDraftDrag: Boolean = false, draftShape: LineDrawing? = null, triangleApex: Pt? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), memberBands: Map<Int, Pair<Int, Float>> = emptyMap(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), loftLines: List<Pair<Pt, Pt>> = emptyList(), ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, lineDraftDrag: Boolean = false, draftShape: LineDrawing? = null, triangleApex: Pt? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), memberBands: Map<Int, Pair<Int, Float>> = emptyMap(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), loftLines: List<Pair<Pt, Pt>> = emptyList(), viewpointLines: List<ViewpointLine> = emptyList(), onViewpointDragStart: (Pt, Double) -> Boolean = { _, _ -> false }, onViewpointDrag: (Pt) -> Unit = {}, onViewpointDragEnd: () -> Unit = {}, ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     fun selectionFeedback() { if (!vibrateSelection(context)) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -7176,6 +7190,9 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
         val latestDrag = rememberUpdatedState(onDrag)
         val latestDragEnd = rememberUpdatedState(onDragEnd)
         val latestDragCancel = rememberUpdatedState(onDragCancel)
+        val latestViewpointDragStart = rememberUpdatedState(onViewpointDragStart)
+        val latestViewpointDrag = rememberUpdatedState(onViewpointDrag)
+        val latestViewpointDragEnd = rememberUpdatedState(onViewpointDragEnd)
         val latestLines = rememberUpdatedState(lines)
         val latestGuides = rememberUpdatedState(guides)
         val latestDraftStart = rememberUpdatedState(draftStart)
@@ -7290,6 +7307,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 var moved = false
                 var transformed = false
                 var adjusting = false
+                var viewpointDragging = false
                 val holdJob = if (tool != Tool.ADJUST && tool != Tool.CROP && latestDraftStart.value == null) holdScope.launch {
                     delay(450)
                     val point = sourceAt(down.position, localZoom, localPan)
@@ -7334,7 +7352,10 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val draftDrag = tool == Tool.LINES && latestLineDraft.value && !transformed && (adjusting || (change.position - down.position).getDistance() > 8f)
                         if (hypot(delta.x.toDouble(), delta.y.toDouble()) > dragThreshold || draftDrag) {
                             holdJob?.cancel(); heldLineId = null; heldGuideId = null
-                            if (tool == Tool.ADJUST && !transformed) {
+                            if (!transformed && (viewpointDragging || latestViewpointDragStart.value(sourceAt(down.position, localZoom, localPan), 28.0 / (baseFit * localZoom)))) {
+                                viewpointDragging = true
+                                latestViewpointDrag.value(sourceAt(change.position, localZoom, localPan))
+                            } else if (tool == Tool.ADJUST && !transformed) {
                                 if (latestPanOnEmptyDrag.value) {
                                     localPan += delta; onTransform(localZoom, localPan)
                                 } else {
@@ -7361,7 +7382,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 holdJob?.cancel()
                 heldLineId = null
                 heldGuideId = null
-                if (adjusting) { if (tool == Tool.CROP) onCropEnd() else latestDragEnd.value() }
+                if (viewpointDragging) latestViewpointDragEnd.value()
+                else if (adjusting) { if (tool == Tool.CROP) onCropEnd() else latestDragEnd.value() }
                 if (!moved && !transformed && !adjusting) {
                     val now = System.currentTimeMillis()
                     val rawPoint = sourceAt(down.position, localZoom, localPan)
@@ -7438,6 +7460,13 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val label = "Grid ${java.text.DecimalFormat("0.###").format(step)} $unit"
                         drawContext.canvas.nativeCanvas.drawText(label, 12.dp.toPx(), size.height - 10.dp.toPx(), android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { textSize = 12.sp.toPx(); color = 0x99000000.toInt() })
                     }
+                }
+                // Other-view planes sit behind the drawing: thin electric-blue intersection
+                // lines. Drag either line to move that plane nearer or farther in 3D.
+                val viewpointBlue = Color(0xFF00AEEF)
+                viewpointLines.forEach { line ->
+                    if (line.vertical) drawLine(viewpointBlue, viewAt(Pt(line.position, 0f)), viewAt(Pt(line.position, bitmap.height.toFloat())), strokeWidth = 1.25.dp.toPx())
+                    else drawLine(viewpointBlue, viewAt(Pt(0f, line.position)), viewAt(Pt(bitmap.width.toFloat(), line.position)), strokeWidth = 1.25.dp.toPx())
                 }
                 if (ghosts.isNotEmpty()) drawIntoCanvas { canvas ->
                     // Drawn opaque into a translucent layer so overlapping faces don't darken.
@@ -8819,12 +8848,12 @@ private fun shapePoints(path: List<GuideLine>): List<Pt> = path.flatMap { guideP
 // thickness extends away from the viewer.
 
 /** Converts a plane's canvas pixels to millimeters in that plane's (right, up) coordinates and back. */
-private class PlaneMapping(val plane: ModelPlane, private val originU: Double, private val originV: Double, private val mmPerPixelRight: Double, private val mmPerPixelUp: Double) {
+private class PlaneMapping(val plane: ModelPlane, private val originU: Double, private val originV: Double, private val mmPerPixelRight: Double, private val mmPerPixelUp: Double, private val normalOffsetMm: Double) {
     fun right(p: Pt) = (p.x - originU) * mmPerPixelRight
     fun up(p: Pt) = (originV - p.y) * mmPerPixelUp
     fun pixel(right: Double, up: Double) = Pt((originU + right / mmPerPixelRight).toFloat(), (originV - up / mmPerPixelUp).toFloat())
     /** Model point of a canvas pixel at [depthMm] along the plane's viewing direction. */
-    fun model(p: Pt, depthMm: Double) = plane.toModel(right(p), up(p), depthMm)
+    fun model(p: Pt, depthMm: Double) = plane.toModel(right(p), up(p), normalOffsetMm + depthMm)
     /** Canvas pixel of a model point (its depth is dropped). */
     fun pixel(model: Vec3) = pixel(model dot plane.right, model dot plane.up)
     /** Model-space movement of a canvas drag (it has no depth component). */
@@ -8837,7 +8866,7 @@ private fun planeMapping(plane: ModelPlane, frame: PlaneFrame, scale: Double?, u
     val pixelsPerUnit = scale?.takeIf { it.isFinite() && it > 0 } ?: return null
     val uniform = unitFactorMm(unit) / pixelsPerUnit
     // Only the front photo can be calibrated per axis; its X runs along the canvas width and Y up it.
-    return PlaneMapping(plane, frame.originU, frame.originV, axisScale?.first?.let { unitFactorMm(unit) / it } ?: uniform, axisScale?.second?.let { unitFactorMm(unit) / it } ?: uniform)
+    return PlaneMapping(plane, frame.originU, frame.originV, axisScale?.first?.let { unitFactorMm(unit) / it } ?: uniform, axisScale?.second?.let { unitFactorMm(unit) / it } ?: uniform, frame.normalOffsetMm)
 }
 
 /**
