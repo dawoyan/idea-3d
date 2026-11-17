@@ -2359,7 +2359,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val pathId = nextGuidePathId(guides); val firstId = nextGuideId(guides)
         fun at(angle: Double) = Pt((center.x + radius * cos(angle)).toFloat(), (center.y + radius * sin(angle)).toFloat())
         val pieces = (0 until 8).map { i -> val a = 2 * PI * i / 8; val b = 2 * PI * (i + 1) / 8
-            GuideLine(firstId + i, at(a), if (i == 7) at(0.0) else at(b), manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, curveMid = at((a + b) / 2)) }
+            GuideLine(firstId + i, at(a), if (i == 7) at(0.0) else at(b), manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, curveMid = at((a + b) / 2), startZMm = frameOf(editPlane).normalOffsetMm, endZMm = frameOf(editPlane).normalOffsetMm) }
         guides = guides + pieces
         // One circle per use: the tool switches off and the circle stays selected (for Material, Grow or Modify),
         // so a tap on it can't start another circle.
@@ -2372,7 +2372,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         pushUndo()
         val pathId = nextGuidePathId(guides); val firstId = nextGuideId(guides)
         val pts = listOf(corner, Pt(end.x, corner.y), end, Pt(corner.x, end.y))
-        guides = guides + pts.indices.map { i -> GuideLine(firstId + i, pts[i], pts[(i + 1) % 4], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth) }
+        guides = guides + pts.indices.map { i -> GuideLine(firstId + i, pts[i], pts[(i + 1) % 4], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, startZMm = frameOf(editPlane).normalOffsetMm, endZMm = frameOf(editPlane).normalOffsetMm) }
         tool = Tool.NONE; selectedGuideId = firstId; selectedWholeGuideId = null; guideDeleteCandidateId = firstId
         if (choosingSimplifyArea) {
             choosingSimplifyArea = false
@@ -2392,7 +2392,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val pathId = nextGuidePathId(guides); val firstId = nextGuideId(guides)
         val points = listOf(first, second, third)
         guides = guides + points.indices.map { i ->
-            GuideLine(firstId + i, points[i], points[(i + 1) % points.size], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth)
+            GuideLine(firstId + i, points[i], points[(i + 1) % points.size], manual = true, plane = editPlane, pathId = pathId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, startZMm = frameOf(editPlane).normalOffsetMm, endZMm = frameOf(editPlane).normalOffsetMm)
         }
         tool = Tool.NONE
         selectedGuideId = firstId
@@ -2847,7 +2847,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 } else if (distance(draftStart!!, point) > 4.0) {
                     pushUndo()
                     askFirstSize(draftStart!!, point)
-                    guides = guides + GuideLine(nextGuideId(guides), draftStart!!, point, manual = true, plane = editPlane, pathId = activePolylineId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth)
+                    guides = guides + GuideLine(nextGuideId(guides), draftStart!!, point, manual = true, plane = editPlane, pathId = activePolylineId, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, startZMm = frameOf(editPlane).normalOffsetMm, endZMm = frameOf(editPlane).normalOffsetMm)
                     draftStart = point
                 }
             } else if (draftStart == null) {
@@ -2882,7 +2882,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     pushUndo()
                     val start = draftStart!!
                     if (lineDrawing == LineDrawing.STRAIGHT) askFirstSize(start, point)
-                    val guide = GuideLine(nextGuideId(guides), start, point, manual = true, plane = editPlane, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, curveMid = if (lineDrawing == LineDrawing.CURVE) Pt((start.x + point.x) / 2f, (start.y + point.y) / 2f) else null)
+                    val guide = GuideLine(nextGuideId(guides), start, point, manual = true, plane = editPlane, colorIndex = guideColorIndex, strokeWidth = guideStrokeWidth, curveMid = if (lineDrawing == LineDrawing.CURVE) Pt((start.x + point.x) / 2f, (start.y + point.y) / 2f) else null, startZMm = frameOf(editPlane).normalOffsetMm, endZMm = frameOf(editPlane).normalOffsetMm)
                     guides = guides + guide
                     selectedGuideId = if (lineDrawing == LineDrawing.CURVE) guide.id else null
                 }
