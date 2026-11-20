@@ -6657,8 +6657,11 @@ private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -
                 Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${area(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 val stockArea = material.stockWidthMm?.let { w -> material.stockHeightMm?.let { h -> w * h } }
                 if (stockArea != null) {
-                    val count = kotlin.math.ceil(group.sumOf { it.third } / stockArea).toInt().coerceAtLeast(1)
-                    Text("  Buy: at least $count × ${format(material.stockWidthMm!!)} × ${format(material.stockHeightMm!!)} sheet${if (count == 1) "" else "s"} (area only — check the cut layout)", color = Color(0xFF00695C), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    val used = group.sumOf { it.third }
+                    val count = kotlin.math.ceil(used / stockArea).toInt().coerceAtLeast(1)
+                    val waste = count * stockArea - used
+                    Text("  Buy: at least $count × ${format(material.stockWidthMm!!)} × ${format(material.stockHeightMm!!)} sheet${if (count == 1) "" else "s"}", color = Color(0xFF00695C), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text("  Used: ${area(used)} · Waste: ${area(waste)} (by area; final waste can be higher after nesting)", color = Color(0xFF00695C), fontSize = 13.sp)
                 }
             }
             pieces.groupBy { it.first.id }.values.forEach { group ->
@@ -6682,7 +6685,11 @@ private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -
                         val bin = remaining.indexOfFirst { it + 0.01 >= cut }
                         if (bin >= 0) remaining[bin] -= cut else remaining += stock - cut
                     }
-                    if (remaining.isNotEmpty()) Text("  Buy: ${remaining.size} × ${format(stock)} stick${if (remaining.size == 1) "" else "s"}; offcuts ${format(remaining.sum())}", color = Color(0xFF00695C), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    if (remaining.isNotEmpty()) {
+                        val used = group.filter { it.third <= stock + 0.01 }.sumOf { it.third }
+                        Text("  Buy: ${remaining.size} × ${format(stock)} stick${if (remaining.size == 1) "" else "s"}", color = Color(0xFF00695C), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("  Used: ${format(used)} · Waste / offcuts: ${format(remaining.sum())}", color = Color(0xFF00695C), fontSize = 13.sp)
+                    }
                     tooLong.forEach { (_, _, length) -> Text("  Cannot cut ${format(length)} from a ${format(stock)} stick", color = Color(0xFFB3261E), fontSize = 13.sp) }
                 }
             }
