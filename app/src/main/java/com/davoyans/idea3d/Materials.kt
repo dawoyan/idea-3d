@@ -64,10 +64,15 @@ internal enum class Finish(val label: String) {
  * What lines and shapes can be made of, shared by every project: a bar or pipe ([profile]) that a line becomes, or a
  * sheet [sheetMm] thick that a closed shape becomes. [finish] sets how it looks in 3D.
  */
-internal data class Material(val id: String, val name: String, val profile: MemberProfile, val argb: Int, val sheetMm: Double? = null, val finish: Finish = Finish.PLAIN) {
+internal data class Material(val id: String, val name: String, val profile: MemberProfile, val argb: Int, val sheetMm: Double? = null, val finish: Finish = Finish.PLAIN, val stockLengthMm: Double? = null, val stockWidthMm: Double? = null, val stockHeightMm: Double? = null) {
     val isSheet: Boolean get() = sheetMm != null
     /** For example "Rectangular tube 40 × 20 × 2 mm · Metal" or "Sheet 3 mm · Metal". */
     val description: String get() = shape + if (finish != Finish.PLAIN) " · ${finish.label}" else ""
+    val stockDescription: String? get() = when {
+        isSheet && stockWidthMm != null && stockHeightMm != null -> "Stock ${formatStock(stockWidthMm)} × ${formatStock(stockHeightMm)}"
+        !isSheet && stockLengthMm != null -> "Stock ${formatStock(stockLengthMm)}"
+        else -> null
+    }
     private val shape: String get() {
         val f = DecimalFormat("0.##")
         sheetMm?.let { return "Sheet ${f.format(it)} mm" }
@@ -75,6 +80,7 @@ internal data class Material(val id: String, val name: String, val profile: Memb
         val size = if (profile.kind.round) "Ø${f.format(profile.widthMm)}" else "${f.format(profile.widthMm)} × ${f.format(profile.heightMm)}"
         return "${profile.kind.label} $size${if (profile.kind.hollow) " × ${f.format(profile.wallMm)}" else ""} mm"
     }
+    private fun formatStock(mm: Double): String = if (mm >= 1000.0 && kotlin.math.abs(mm % 1000.0) < 0.001) "${DecimalFormat("0.##").format(mm / 1000.0)} m" else "${DecimalFormat("0.##").format(mm)} mm"
 }
 
 /** Keeps the material list in the app's own storage, outside any project, so every project sees the same list. */
@@ -83,15 +89,15 @@ internal object MaterialStore {
 
     /** Sheets every list starts with, added once to older lists too. */
     private val sheetDefaults = listOf(
-        Material("sheet-steel-3", "Steel sheet 3 mm", sheetProfile, 0xFF8A9497.toInt(), 3.0, Finish.METAL),
-        Material("sheet-plywood-18", "Plywood 18 mm", sheetProfile, 0xFFC89B6A.toInt(), 18.0, Finish.WOOD),
-        Material("sheet-glass-6", "Glass 6 mm", sheetProfile, 0xFF9CC9E0.toInt(), 6.0, Finish.GLASS),
+        Material("sheet-steel-3", "Steel sheet 3 mm", sheetProfile, 0xFF8A9497.toInt(), 3.0, Finish.METAL, stockWidthMm = 1250.0, stockHeightMm = 2500.0),
+        Material("sheet-plywood-18", "Plywood 18 mm", sheetProfile, 0xFFC89B6A.toInt(), 18.0, Finish.WOOD, stockWidthMm = 1220.0, stockHeightMm = 2440.0),
+        Material("sheet-glass-6", "Glass 6 mm", sheetProfile, 0xFF9CC9E0.toInt(), 6.0, Finish.GLASS, stockWidthMm = 1220.0, stockHeightMm = 2440.0),
     )
     private val defaults = listOf(
-        Material("iron-rect-40x20", "Iron pipe, rectangular", MemberProfile(ProfileKind.RECT_TUBE, 40.0, 20.0, 2.0), 0xFF5F6B6D.toInt(), finish = Finish.METAL),
-        Material("iron-square-20", "Iron pipe, square", MemberProfile(ProfileKind.RECT_TUBE, 20.0, 20.0, 1.5), 0xFF4E5A5C.toInt(), finish = Finish.METAL),
-        Material("iron-round-25", "Iron pipe, round", MemberProfile(ProfileKind.ROUND_TUBE, 25.0, 25.0, 2.0), 0xFF6D7778.toInt(), finish = Finish.METAL),
-        Material("wood-50x100", "Wood beam", MemberProfile(ProfileKind.RECT_BAR, 50.0, 100.0), 0xFFB5865A.toInt(), finish = Finish.WOOD),
+        Material("iron-rect-40x20", "Iron pipe, rectangular", MemberProfile(ProfileKind.RECT_TUBE, 40.0, 20.0, 2.0), 0xFF5F6B6D.toInt(), finish = Finish.METAL, stockLengthMm = 6000.0),
+        Material("iron-square-20", "Iron pipe, square", MemberProfile(ProfileKind.RECT_TUBE, 20.0, 20.0, 1.5), 0xFF4E5A5C.toInt(), finish = Finish.METAL, stockLengthMm = 6000.0),
+        Material("iron-round-25", "Iron pipe, round", MemberProfile(ProfileKind.ROUND_TUBE, 25.0, 25.0, 2.0), 0xFF6D7778.toInt(), finish = Finish.METAL, stockLengthMm = 6000.0),
+        Material("wood-50x100", "Wood beam", MemberProfile(ProfileKind.RECT_BAR, 50.0, 100.0), 0xFFB5865A.toInt(), finish = Finish.WOOD, stockLengthMm = 6000.0),
     ) + sheetDefaults
 
     fun load(context: Context): List<Material> {
@@ -104,9 +110,17 @@ internal object MaterialStore {
                 val holes = o.optJSONArray("holes")?.let { h -> (0 until h.length()).map { points(h.getJSONArray(it)) } }.orEmpty()
                 val name = o.getString("name")
                 Material(o.getString("id"), name, MemberProfile(ProfileKind.of(o.optString("kind")), o.getDouble("width"), o.optDouble("height", o.getDouble("width")), o.optDouble("wall", 0.0), points(o.optJSONArray("outline")), holes),
-                    o.optInt("color", 0xFF5F6B6D.toInt()), o.optDouble("sheet").takeIf { it.isFinite() && it > 0 }, Finish.of(o.optString("finish").ifBlank { null }, name))
+                    o.optInt("color", 0xFF5F6B6D.toInt()), o.optDouble("sheet").takeIf { it.isFinite() && it > 0 }, Finish.of(o.optString("finish").ifBlank { null }, name),
+                    o.optDouble("stockLength").takeIf { it.isFinite() && it > 0 }, o.optDouble("stockWidth").takeIf { it.isFinite() && it > 0 }, o.optDouble("stockHeight").takeIf { it.isFinite() && it > 0 })
             } }
-        }.getOrDefault(defaults)
+        }.getOrDefault(defaults).let { saved ->
+            // Give the bundled materials useful purchase sizes after an app upgrade,
+            // without changing any user-created material.
+            val templates = defaults.associateBy { it.id }
+            saved.map { material -> templates[material.id]?.let { template ->
+                material.copy(stockLengthMm = material.stockLengthMm ?: template.stockLengthMm, stockWidthMm = material.stockWidthMm ?: template.stockWidthMm, stockHeightMm = material.stockHeightMm ?: template.stockHeightMm)
+            } ?: material }
+        }
         // Older lists had no sheets; they get the default ones once (a deleted one is remembered as seen).
         val seen = runCatching { JSONArray(File(context.filesDir, "materials-seen.json").readText()) }.getOrNull()
         val known = (0 until (seen?.length() ?: 0)).map { seen!!.getString(it) }.toSet()
@@ -121,7 +135,7 @@ internal object MaterialStore {
             fun points(list: List<Vec2>) = JSONArray().apply { list.forEach { put(it.x); put(it.y) } }
             materials.forEach { m -> put(JSONObject().apply {
                 put("id", m.id); put("name", m.name); put("kind", m.profile.kind.name); put("width", m.profile.widthMm); put("height", m.profile.heightMm); put("wall", m.profile.wallMm); put("color", m.argb); put("finish", m.finish.name)
-                m.sheetMm?.let { put("sheet", it) }
+                m.sheetMm?.let { put("sheet", it) }; m.stockLengthMm?.let { put("stockLength", it) }; m.stockWidthMm?.let { put("stockWidth", it) }; m.stockHeightMm?.let { put("stockHeight", it) }
                 if (m.profile.outline.isNotEmpty()) { put("outline", points(m.profile.outline)); put("holes", JSONArray().apply { m.profile.holes.forEach { put(points(it)) } }) }
             }) }
         }.toString())
@@ -179,6 +193,7 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
                         Column(Modifier.weight(1f)) {
                             Text(material.name, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                             Text(material.description, fontSize = 13.sp, color = Color(0xFF4D5A57))
+                            material.stockDescription?.let { Text(it, fontSize = 13.sp, color = Color(0xFF00695C), fontWeight = FontWeight.Medium) }
                         }
                     }
                 }
@@ -204,6 +219,9 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
     var color by remember { mutableStateOf(initial?.argb ?: materialColors.first()) }
     var sheet by remember { mutableStateOf(initial?.isSheet == true) }
     var thickness by remember { mutableStateOf(text(initial?.sheetMm)) }
+    var stockLength by remember { mutableStateOf(text(initial?.stockLengthMm?.div(1000.0))) }
+    var stockWidth by remember { mutableStateOf(text(initial?.stockWidthMm)) }
+    var stockHeight by remember { mutableStateOf(text(initial?.stockHeightMm)) }
     var finish by remember { mutableStateOf(initial?.finish ?: Finish.PLAIN) }
     var confirmDelete by remember { mutableStateOf(false) }
     fun number(s: String) = s.replace(',', '.').toDoubleOrNull()
@@ -211,8 +229,14 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
     val w = number(width); val h = if (kind.round) w else number(height); val t = if (kind.hollow) number(wall) else 0.0
     // A drawn profile keeps its outline; only its name and color change here.
     val sheetMm = number(thickness)
+    val stockLengthMm = number(stockLength)?.times(1000.0)
+    val stockWidthMm = number(stockWidth)
+    val stockHeightMm = number(stockHeight)
     val profile = if (sheet) sheetProfile else drawn ?: if (w != null && h != null && t != null) MemberProfile(kind, w, h, t) else null
-    val problem = if (sheet) (if (sheetMm == null || sheetMm <= 0) "Thickness must be positive" else null) else profile?.problem()
+    val stockProblem = if (sheet) {
+        if ((stockWidthMm == null) != (stockHeightMm == null) || stockWidthMm?.let { it <= 0 } == true || stockHeightMm?.let { it <= 0 } == true) "Enter both stock sheet dimensions, or leave both blank" else null
+    } else if (stockLength.isNotBlank() && (stockLengthMm == null || stockLengthMm <= 0)) "Stock length must be positive" else null
+    val problem = if (sheet) (if (sheetMm == null || sheetMm <= 0) "Thickness must be positive" else stockProblem) else profile?.problem() ?: stockProblem
     if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Delete ${initial?.name}?") },
         text = { Text("Lines made of it become plain lines again.") },
         confirmButton = { TextButton(onClick = { onDelete?.invoke() }) { Text("Delete") } }, dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } })
@@ -225,7 +249,16 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
                 FilterChip(selected = !sheet, onClick = { sheet = false }, label = { Text("Bar or pipe", fontSize = 13.sp) })
                 FilterChip(selected = sheet, onClick = { sheet = true }, label = { Text("Sheet", fontSize = 13.sp) })
             }
-            if (sheet) OutlinedTextField(thickness, { thickness = it }, label = { Text("Thickness (mm)") }, supportingText = { Text("A closed shape made of it becomes a sheet this thick.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            if (sheet) {
+                OutlinedTextField(thickness, { thickness = it }, label = { Text("Thickness (mm)") }, supportingText = { Text("A closed shape made of it becomes a sheet this thick.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(stockWidth, { stockWidth = it }, Modifier.weight(1f), label = { Text("Stock width (mm)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                    OutlinedTextField(stockHeight, { stockHeight = it }, Modifier.weight(1f), label = { Text("Stock length (mm)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                }
+                Text("Optional. Used to estimate how many full sheets to buy.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+            } else {
+                OutlinedTextField(stockLength, { stockLength = it }, label = { Text("Sold stock length (m)") }, supportingText = { Text("For example 6. Every line using this material is packed into 6 m sticks in Materials used.") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            }
             if (drawn == null && !sheet) {
             Text("Profile", fontWeight = FontWeight.Medium)
             ProfileKind.entries.filter { it != ProfileKind.DRAWN }.chunked(2).forEach { row ->
@@ -246,7 +279,7 @@ private val materialColors = listOf(0xFF5F6B6D, 0xFF2F3A3C, 0xFF8A9497, 0xFFB586
             if (onDelete != null) TextButton(onClick = { confirmDelete = true }) { Text("Delete material", color = Color(0xFFB3261E)) }
         }
     }, confirmButton = {
-        TextButton(enabled = name.isNotBlank() && profile != null && problem == null, onClick = { onSave(Material(initial?.id ?: UUID.randomUUID().toString(), name.trim(), profile!!, color, if (sheet) sheetMm else null, finish)) }) { Text("Save") }
+        TextButton(enabled = name.isNotBlank() && profile != null && problem == null, onClick = { onSave(Material(initial?.id ?: UUID.randomUUID().toString(), name.trim(), profile!!, color, if (sheet) sheetMm else null, finish, if (sheet) null else stockLengthMm, if (sheet) stockWidthMm else null, if (sheet) stockHeightMm else null)) }) { Text("Save") }
     }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 

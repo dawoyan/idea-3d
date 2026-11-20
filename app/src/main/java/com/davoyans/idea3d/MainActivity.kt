@@ -6655,6 +6655,11 @@ private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -
                 val area = { mm2: Double -> "${java.text.DecimalFormat("0.###").format(mm2 / 1e6)} m²" }
                 group.sortedByDescending { it.third }.forEachIndexed { i, (_, plane, a) -> Text("  ${i + 1}.  ${area(a)}${if (plane != ModelPlane.FRONT) "  (${plane.label})" else ""}", fontSize = 14.sp) }
                 Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${area(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                val stockArea = material.stockWidthMm?.let { w -> material.stockHeightMm?.let { h -> w * h } }
+                if (stockArea != null) {
+                    val count = kotlin.math.ceil(group.sumOf { it.third } / stockArea).toInt().coerceAtLeast(1)
+                    Text("  Buy: at least $count × ${format(material.stockWidthMm!!)} × ${format(material.stockHeightMm!!)} sheet${if (count == 1) "" else "s"} (area only — check the cut layout)", color = Color(0xFF00695C), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
             }
             pieces.groupBy { it.first.id }.values.forEach { group ->
                 val material = group.first().first
@@ -6669,6 +6674,17 @@ private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -
                     Text("  ${i + 1}.  ${format(length)}${if (plane != ModelPlane.FRONT) "  (${plane.label})" else ""}", fontSize = 14.sp)
                 }
                 Text("  Total: ${group.size} piece${if (group.size == 1) "" else "s"}, ${format(group.sumOf { it.third })}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                material.stockLengthMm?.let { stock ->
+                    // First-fit decreasing gives a practical shopping count for ordinary sticks.
+                    val remaining = mutableListOf<Double>()
+                    val tooLong = group.filter { it.third > stock + 0.01 }
+                    group.map { it.third }.filter { it <= stock + 0.01 }.sortedDescending().forEach { cut ->
+                        val bin = remaining.indexOfFirst { it + 0.01 >= cut }
+                        if (bin >= 0) remaining[bin] -= cut else remaining += stock - cut
+                    }
+                    if (remaining.isNotEmpty()) Text("  Buy: ${remaining.size} × ${format(stock)} stick${if (remaining.size == 1) "" else "s"}; offcuts ${format(remaining.sum())}", color = Color(0xFF00695C), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    tooLong.forEach { (_, _, length) -> Text("  Cannot cut ${format(length)} from a ${format(stock)} stick", color = Color(0xFFB3261E), fontSize = 13.sp) }
+                }
             }
         }
     }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
