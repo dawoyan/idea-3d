@@ -225,6 +225,13 @@ private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>
 private data class PlaneFrame(val originU: Double, val originV: Double, val width: Int, val height: Int, val normalOffsetMm: Double = 0.0)
 /** The visible intersection of one other drawing plane with the current 2D view. */
 private data class ViewpointLine(val target: ModelPlane, val vertical: Boolean, val position: Float)
+/** A dragged cross-view plane is a one-sided clipping plane.  At its untouched
+ * centre position it is only a guide, not a clip. */
+private fun visiblePastMovedPlanes(world: Vec3, current: ModelPlane, frames: Map<ModelPlane, PlaneFrame>): Boolean =
+    ModelPlane.entries.filter { it != current }.all { plane ->
+        val offset = frames[plane]?.normalOffsetMm ?: 0.0
+        kotlin.math.abs(offset) < 0.1 || (world dot plane.toward) >= offset - 0.1
+    }
 private data class EndpointJoinUpdate(val sourceGuides: List<GuideLine>, val targetGuides: List<GuideLine>, val distanceMm: Double)
 /** Plans a true 3D endpoint-to-line join without depending on Compose state. */
 private fun joinEndpointToLine(sourcePlane: ModelPlane, sourceId: Int, sourceStart: Boolean, sourceAll: List<GuideLine>, targetPlane: ModelPlane, targetIds: Set<Int>, targetAll: List<GuideLine>, setup: ModelSetup, jointId: Int): EndpointJoinUpdate? {
@@ -1729,13 +1736,12 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         // Every line of the other views, flattened into this one, so plain lines can be found and lined up with too.
         // Lines of other views are shown here as normal lines; only 3D objects' outlines remain in their view.
         // A hole is part of its object; it is never drawn as a line of its own in other views.
-        val viewDepth = frameOf(memberPlane).normalOffsetMm
         // A moved plane is a real one-sided viewpoint: geometry behind it is not
         // drawn into this view and therefore cannot obscure the construction.
         val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }.filterNot { it.hole }.filter { guide ->
             memberSetup.mapping(guide.plane)?.let { own ->
-                val averageDepth = ((own.model(guide.start, guide.startZMm) dot memberPlane.toward) + (own.model(guide.end, guide.endZMm) dot memberPlane.toward)) / 2
-                averageDepth >= viewDepth - 0.1
+                val midpoint = (own.model(guide.start, guide.startZMm) + own.model(guide.end, guide.endZMm)) * 0.5
+                visiblePastMovedPlanes(midpoint, memberPlane, planeFrames)
             } ?: true
         }
         // An object's lines, and its holes' lines, sit on its face.
@@ -2138,7 +2144,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return null; val own = setup.mapping(sel.first) ?: return null
         val g = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
         val f = faceOffset(sel.first, sel.second)
-        return here.pixel(own.model(if (sel.third) g.start else g.end, (if (sel.third) g.startZMm else g.endZMm) + f))
+        val world = own.model(if (sel.third) g.start else g.end, (if (sel.third) g.startZMm else g.endZMm) + f)
+        return here.pixel(world).takeIf { visiblePastMovedPlanes(world, editPlane, planeFrames) }
     }
     /** The end point of another view's line nearest [point], within [radius]. */
     fun ghostPointAt(point: Pt, radius: Double): Triple<ModelPlane, Int, Boolean>? =
@@ -2569,6 +2576,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val seen = mutableListOf<Pair<ModelPlane, Int>>()
         ModelPlane.entries.forEach { plane -> planeGeometry(plane).guides.forEach { g ->
             val key = plane to g.id
+            if (ghostPointHere(Triple(plane, g.id, true)) == null && ghostPointHere(Triple(plane, g.id, false)) == null) return@forEach
             if (seen.any { sameItem(it, key) }) return@forEach
             val pts = itemOutlineHere(key).flatten()
             if (pts.isNotEmpty() && pts.all { it.x in x1..x2 && it.y in y1..y2 }) seen += key
@@ -2658,7 +2666,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             data class VisiblePoint(val selection: Triple<ModelPlane, Int, Boolean>, val at: Pt, val drawOrder: Int)
             val visiblePoints = guides.flatMapIndexed { index, guide ->
                 val key = homeKey(guide)
-                listOf(VisiblePoint(Triple(key.first, key.second, true), guide.start, index), VisiblePoint(Triple(key.first, key.second, false), guide.end, index))
+                listOf(true, false).mapNotNull { isStart ->
+                    val selection = Triple(key.first, key.second, isStart)
+                    ghostPointHere(selection)?.let { VisiblePoint(selection, it, index) }
+                }
             }
             val pointPick = when (selectionMode) {
                 SelectionMode.POINTS, SelectionMode.ALL -> allPointsHere()
