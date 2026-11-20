@@ -225,6 +225,42 @@ private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>
 private data class PlaneFrame(val originU: Double, val originV: Double, val width: Int, val height: Int, val normalOffsetMm: Double = 0.0)
 /** The visible intersection of one other drawing plane with the current 2D view. */
 private data class ViewpointLine(val target: ModelPlane, val vertical: Boolean, val position: Float)
+private data class EndpointJoinUpdate(val sourceGuides: List<GuideLine>, val targetGuides: List<GuideLine>, val distanceMm: Double)
+/** Plans a true 3D endpoint-to-line join without depending on Compose state. */
+private fun joinEndpointToLine(sourcePlane: ModelPlane, sourceId: Int, sourceStart: Boolean, sourceAll: List<GuideLine>, targetPlane: ModelPlane, targetIds: Set<Int>, targetAll: List<GuideLine>, setup: ModelSetup, jointId: Int): EndpointJoinUpdate? {
+    val source = sourceAll.firstOrNull { it.id == sourceId } ?: return null
+    val sourceMap = setup.mapping(sourcePlane) ?: return null
+    val sourcePoint = if (sourceStart) source.start else source.end
+    val sourceDepth = if (sourceStart) source.startZMm else source.endZMm
+    val from = sourceMap.model(sourcePoint, sourceDepth)
+    var nearest: Vec3? = null; var distanceMm = Double.POSITIVE_INFINITY
+    targetAll.filter { it.id in targetIds }.forEach { guide ->
+        val map = setup.mapping(guide.plane) ?: return@forEach
+        val steps = if (guide.curveMid == null) 1 else 96
+        (0..steps).forEach { index ->
+            val t = index.toDouble() / steps
+            val at = map.model(guidePointAt(guide, t.toFloat()), guide.startZMm + (guide.endZMm - guide.startZMm) * t)
+            val d = (at - from).length
+            if (d < distanceMm) { distanceMm = d; nearest = at }
+        }
+    }
+    val onto = nearest ?: return null
+    val joinedPoint = sourceMap.pixel(onto); val joinedDepth = onto dot sourcePlane.toward
+    val sourceIds = sourceAll.filter { guide ->
+        (distance(guide.start, sourcePoint) < 0.6 || distance(guide.end, sourcePoint) < 0.6) && !guide.locked
+    }.map { it.id }.toSet()
+    var nextSource = sourceAll.map { guide -> if (guide.id !in sourceIds) guide else guide.copy(
+        start = if (distance(guide.start, sourcePoint) < 0.6) joinedPoint else guide.start,
+        end = if (distance(guide.end, sourcePoint) < 0.6) joinedPoint else guide.end,
+        startZMm = if (distance(guide.start, sourcePoint) < 0.6) joinedDepth else guide.startZMm,
+        endZMm = if (distance(guide.end, sourcePoint) < 0.6) joinedDepth else guide.endZMm,
+        groupId = jointId
+    ) }
+    val nextTarget = if (targetPlane == sourcePlane) {
+        nextSource = nextSource.map { if (it.id in targetIds) it.copy(groupId = jointId) else it }; nextSource
+    } else targetAll.map { if (it.id in targetIds) it.copy(groupId = jointId) else it }
+    return EndpointJoinUpdate(nextSource, nextTarget, distanceMm)
+}
 private fun viewpointLinesFor(plane: ModelPlane, frames: Map<ModelPlane, PlaneFrame>, setup: ModelSetup): List<ViewpointLine> {
     val here = setup.mapping(plane) ?: return emptyList()
     return ModelPlane.entries.filter { it != plane }.map { target ->
@@ -1693,7 +1729,15 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         // Every line of the other views, flattened into this one, so plain lines can be found and lined up with too.
         // Lines of other views are shown here as normal lines; only 3D objects' outlines remain in their view.
         // A hole is part of its object; it is never drawn as a line of its own in other views.
-        val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }.filterNot { it.hole }
+        val viewDepth = frameOf(memberPlane).normalOffsetMm
+        // A moved plane is a real one-sided viewpoint: geometry behind it is not
+        // drawn into this view and therefore cannot obscure the construction.
+        val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }.filterNot { it.hole }.filter { guide ->
+            memberSetup.mapping(guide.plane)?.let { own ->
+                val averageDepth = ((own.model(guide.start, guide.startZMm) dot memberPlane.toward) + (own.model(guide.end, guide.endZMm) dot memberPlane.toward)) / 2
+                averageDepth >= viewDepth - 0.1
+            } ?: true
+        }
         // An object's lines, and its holes' lines, sit on its face.
         val faces = ModelPlane.entries.filter { it != editPlane }.flatMap { p -> planeStash[p]?.let { g -> g.extrusions.flatMap { e -> val outline = extrusionGuides(e, g.guides); (outline + holesInside(outline, g.guides)).map { (p to it.id) to facePositionMm(e) } } }.orEmpty() }.toMap()
         ghostLines = withContext(Dispatchers.Default) { runCatching {
@@ -4247,68 +4291,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun pickedIsGroup() = pickedItems.size >= 2 && itemGroups.any { group -> pickedItems.all { p -> group.any { sameItem(p, it) } } }
     /** Merge: two 3D objects become one solid; two shapes in the same view become one outline. */
-    /**
-     * Welds lines that touch: where an end of one lies on another line (at its end or anywhere along it), that line is
-     * split there so both share the point, and all touching items become one object that moves together. With
-     * [anchored], only items touching the first one are welded to it. Returns whether anything was welded.
-     */
-    fun weldItems(keys: List<Pair<ModelPlane, Int>>, anchored: Boolean): Boolean {
-        if (keys.any(::itemLocked)) {
-            logToast(context, "Unlock locked items before welding", Toast.LENGTH_SHORT).show(); return false
-        }
-        var any = false
-        var undoPushed = false
-        keys.groupBy { it.first }.forEach { (plane, planeKeys) ->
-            val items = planeKeys.distinctBy { k -> itemGuides(k).minOfOrNull { it.id } ?: k.second }
-            if (items.size < 2) return@forEach
-            val geometry = planeGeometry(plane)
-            val frame = frameOf(plane)
-            val tolerance = max(3.0, min(frame.width, frame.height) * 0.004)
-            val guidesNow = geometry.guides.toMutableList()
-            val ids = items.map { k -> itemGuides(k).map { it.id }.toMutableSet() }
-            var nextId = (guidesNow.maxOfOrNull { it.id } ?: 0) + 1
-            val welded = mutableSetOf<Int>()
-            for (i in ids.indices) for (j in ids.indices) {
-                if (i == j || anchored && i != 0 && j != 0) continue
-                val ends = guidesNow.filter { it.id in ids[i] }.flatMap { listOf(it.start, it.end) }.distinctBy { (it.x * 10).roundToInt() to (it.y * 10).roundToInt() }
-                for (p in ends) {
-                    val target = guidesNow.filter { it.id in ids[j] }.minByOrNull { g -> distance(p, guidePointAt(g, guideNearestParameter(g, p))) } ?: continue
-                    val q = guidePointAt(target, guideNearestParameter(target, p))
-                    if (distance(p, q) > tolerance) continue
-                    welded += i; welded += j
-                    // The touching end moves exactly onto the line.
-                    for (k in guidesNow.indices) { val g = guidesNow[k]; if (g.id in ids[i]) guidesNow[k] = g.copy(start = if (distance(g.start, p) < 0.01) q else g.start, end = if (distance(g.end, p) < 0.01) q else g.end) }
-                    // A straight line touched in its middle is split there, so the two share a corner.
-                    if (target.curveMid == null && distance(q, target.start) > tolerance && distance(q, target.end) > tolerance) {
-                        val at = guidesNow.indexOfFirst { it.id == target.id }
-                        val second = target.copy(id = nextId++, start = q)
-                        guidesNow[at] = target.copy(end = q); guidesNow.add(at + 1, second)
-                        ids[j] += second.id
-                    }
-                }
-            }
-            if (welded.size < 2) return@forEach
-            if (!undoPushed) { pushUndo(); undoPushed = true }
-            val group = (guidesNow.mapNotNull { it.groupId }.maxOrNull() ?: 0) + 1
-            val members = welded.flatMap { ids[it] }.toSet()
-            setPlaneShapes(plane, guidesNow.map { if (it.id in members) it.copy(groupId = group) else it }, geometry.extrusions)
-            any = true
-        }
-        if (any) logToast(context, "Welded: they share the touching points and move together", Toast.LENGTH_SHORT).show()
-        return any
-    }
-    /** Separates lines previously connected by Weld without changing their endpoints or dimensions. */
-    fun unweldGuide(id: Int) {
-        val guide = guides.firstOrNull { it.id == id } ?: return
-        val group = guide.groupId
-        if (group == null) {
-            logToast(context, "This line is not welded to another line", Toast.LENGTH_SHORT).show()
-            return
-        }
-        pushUndo()
-        guides = guides.map { if (it.groupId == group) it.copy(groupId = null) else it }
-        logToast(context, "Unwelded: the lines can move independently again", Toast.LENGTH_SHORT).show()
-    }
     /** Turns one closed outline into independent lines, retaining the material on each edge. */
     fun separateShape(id: Int) {
         val guide = guides.firstOrNull { it.id == id } ?: return
@@ -4362,8 +4344,32 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             applyShapeOperation(JunctionAction(JunctionKind.SHAPE_OVERLAP, first.second, rest[0].second, Pt(0f, 0f)), "merge")
             pickedItems = emptyList(); return
         }
-        if (weldItems(pickedItems, anchored = false)) { pickedItems = emptyList(); return }
-        logToast(context, "Merge needs lines that touch (an end on the other line), two overlapping shapes in the same view, or 3D objects", Toast.LENGTH_LONG).show()
+        logToast(context, "Merge needs two overlapping shapes in the same view, or two 3D objects. To connect a line: select the line and one endpoint, then tap Join.", Toast.LENGTH_LONG).show()
+    }
+    /**
+     * Connects a chosen endpoint to the nearest point of a chosen line in real 3D space.
+     * Unlike the old Weld action it does not require the two drawings to already touch on
+     * screen: the endpoint is moved in all three axes and the connection is remembered.
+     */
+    fun joinPickedLineToEndpoint() {
+        val targetKey = pickedItems.singleOrNull() ?: run { logToast(context, "Select one line, then select the endpoint to join", Toast.LENGTH_LONG).show(); return }
+        val endSel = pickedPoints.singleOrNull() ?: run { logToast(context, "Now select exactly one endpoint to join to that line", Toast.LENGTH_LONG).show(); return }
+        if (itemLocked(targetKey) || pointLocked(endSel)) { logToast(context, "Unlock the selected line and endpoint before joining", Toast.LENGTH_SHORT).show(); return }
+        val setup = modelSetup()
+        val sourceGeometry = planeGeometry(endSel.first)
+        val source = sourceGeometry.guides.firstOrNull { it.id == endSel.second } ?: return
+        val targetGuides = itemGuides(targetKey)
+        if (targetGuides.any { it.plane == endSel.first && it.id == source.id }) { logToast(context, "Choose another line to join to", Toast.LENGTH_SHORT).show(); return }
+        val jointId = (allGuides().mapNotNull { it.groupId }.maxOrNull() ?: 0) + 1
+        val targetGeometry = planeGeometry(targetKey.first)
+        val targetIds = targetGuides.map { it.id }.toSet()
+        val update = joinEndpointToLine(endSel.first, source.id, endSel.third, sourceGeometry.guides, targetKey.first, targetIds, targetGeometry.guides, setup, jointId) ?: return
+        pushUndo()
+        if (targetKey.first == endSel.first) setPlaneShapes(endSel.first, update.sourceGuides, targetGeometry.extrusions)
+        else { setPlaneShapes(targetKey.first, update.targetGuides, targetGeometry.extrusions); setPlaneShapes(endSel.first, update.sourceGuides, sourceGeometry.extrusions) }
+        ActionLog.add("join: ${endSel.first.label} line ${source.id} endpoint → ${targetKey.first.label} line ${targetGuides.first().id}; moved ${format(update.distanceMm)} mm")
+        pickedItems = emptyList(); pickedPoints = emptyList()
+        logToast(context, "Joined in 3D: the endpoint was moved onto the selected line", Toast.LENGTH_LONG).show()
     }
     /**
      * Makes a new, closed face from selected vertices.  It deliberately does not reuse the
@@ -5399,7 +5405,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Loft level", R.drawable.ic_move_point, enabled = n == 1 && pickedPoints.isEmpty() && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftLevelItems = distinctPicked() }
                         ActionIcon(if (n == 1) "Loft 1/2" else "Loft $n", R.drawable.ic_cube, enabled = n >= 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
                         ActionIcon("Lofts ${lofts.size}", R.drawable.ic_join, enabled = lofts.isNotEmpty()) { showLofts = true }
-                        ActionIcon("Merge/weld", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
+                        ActionIcon("Join", R.drawable.ic_join, enabled = n == 1 && pickedPoints.size == 1 && !pickedItems.any(::itemLocked) && !pickedPoints.any(::pointLocked), onClick = ::joinPickedLineToEndpoint)
+                        ActionIcon("Merge", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
                         ActionIcon("Intersect", R.drawable.ic_cube, enabled = n >= 1 && pickedItems.all(::isClosedShape), onClick = ::intersectPicked)
@@ -5431,7 +5438,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                             if (!inShape && guide.pathId != null) ActionIcon("Close shape", R.drawable.ic_join, enabled = !itemLocked(itemKey)) { closeBrokenGuide(guide.id) }
                             if (inShape) ActionIcon("Separate", R.drawable.ic_broken_line, enabled = !itemLocked(itemKey)) { separateShape(guide.id) }
                             if (itemGroups.any { members -> members.any { sameItem(it, itemKey) } }) ActionIcon("Ungroup", R.drawable.ic_group) { ungroupItem(itemKey) }
-                            if (guide.groupId != null) ActionIcon("Unweld", R.drawable.ic_close, enabled = !itemLocked(itemKey)) { unweldGuide(guide.id) }
                             // Grow: shows arrows to pull the shape into a 3D object (or change its depth).
                             if (tool == Tool.ADJUST && inShape) ActionIcon("Grow", R.drawable.ic_cube, enabled = !itemLocked(itemKey), on = growMode) { growMode = !growMode }
                             // An open line grows into a surface of its shape.
@@ -5445,16 +5451,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                             ActionIcon("Outline", R.drawable.ic_outline) { planeGeometry(plane).let { g -> g.extrusions.firstOrNull { it.id == extrusionId }?.let { e -> extrusionGuides(e, g.guides).firstOrNull() } }?.let { outlineOf(listOf(plane to it.id)) } }
                         }
                         TurnIcons()
-                        if (tool == Tool.ADJUST && selectedGuideEndpoint == null && selectedCurveId == null) selectedWholeGuideId?.let { wholeId ->
-                            // Weld this line to every line it touches (an end on the other line, or the other's end on it).
-                            ActionIcon("Weld", R.drawable.ic_merge) {
-                                guides.firstOrNull { it.id == wholeId }?.let { g ->
-                                    val key = homeKey(g)
-                                    val others = planeGeometry(key.first).guides.map { key.first to it.id }.filterNot { sameItem(key, it) }
-                                    if (!weldItems(listOf(key) + others, anchored = true)) logToast(context, "Nothing touches this line: put an end of one line on the other", Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        }
                         if (tool == Tool.ADJUST && selectedForeign == null && (selectedGuideEndpoint != null || selectedEndpoint != null)) ActionIcon("Move by", R.drawable.ic_move_point) { movePointDialog = true }
                         // The same Align buttons as in Select, doing the same thing.
                         if (tool == Tool.ADJUST && selectedVertices.size + selectedGhostPoints.size >= 2) {
@@ -6235,7 +6231,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 Triple(material, plane, abs(pts.indices.sumOf { i -> val a = pts[i]; val b = pts[(i + 1) % pts.size]; a.x * b.y - b.x * a.y }) / 2)
             }
         }
-        MaterialListDialog(pieces, sheets, format) { showMaterialList = false }
+        MaterialListDialog(pieces, sheets, allGuides().mapNotNull { it.groupId }.distinct().size, format) { showMaterialList = false }
     }
     saveMaterialShape?.let { shape ->
         /** The selected shape as a cross-section in millimeters, centered, with the closed shapes inside it as holes. */
@@ -6642,10 +6638,11 @@ private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -
 }
 
 /** Materials used: bars and pipes by cut length, sheets by area, grouped by material. */
-@Composable private fun MaterialListDialog(pieces: List<Triple<Material, ModelPlane, Double>>, sheets: List<Triple<Material, ModelPlane, Double>>, format: (Double) -> String, onDismiss: () -> Unit) {
+@Composable private fun MaterialListDialog(pieces: List<Triple<Material, ModelPlane, Double>>, sheets: List<Triple<Material, ModelPlane, Double>>, joinCount: Int, format: (Double) -> String, onDismiss: () -> Unit) {
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Materials used") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (pieces.isEmpty() && sheets.isEmpty()) Text("Nothing has a material yet. Select a line or shape, then Material.")
+            if (joinCount > 0) Text("Joins made: $joinCount", color = Color(0xFF00695C), fontSize = 13.sp)
             sheets.groupBy { it.first.id }.values.forEach { group ->
                 val material = group.first().first
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -7375,7 +7372,12 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         val draftDrag = tool == Tool.LINES && latestLineDraft.value && !transformed && (adjusting || (change.position - down.position).getDistance() > 8f)
                         if (hypot(delta.x.toDouble(), delta.y.toDouble()) > dragThreshold || draftDrag) {
                             holdJob?.cancel(); heldLineId = null; heldGuideId = null
-                            if (!transformed && (viewpointDragging || latestViewpointDragStart.value(sourceAt(down.position, localZoom, localPan), 28.0 / (baseFit * localZoom)))) {
+                            val downPoint = sourceAt(down.position, localZoom, localPan)
+                            val viewGrabRadius = 28.0 / (baseFit * localZoom)
+                            // A blue viewpoint guide must never steal a measurement or drawing that it crosses.
+                            val grabbedGeometry = closestLine(downPoint, gestureLines)?.let { distanceToLine(downPoint, it) <= viewGrabRadius } == true ||
+                                closestGuide(downPoint, gestureGuides, viewGrabRadius) != null
+                            if (!transformed && !grabbedGeometry && (viewpointDragging || latestViewpointDragStart.value(downPoint, viewGrabRadius))) {
                                 viewpointDragging = true
                                 latestViewpointDrag.value(sourceAt(change.position, localZoom, localPan))
                             } else if (tool == Tool.ADJUST && !transformed) {
