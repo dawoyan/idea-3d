@@ -99,6 +99,10 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -959,7 +963,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
 @Composable private fun Idea3dApp(sharedImage: Uri?, sharedModel: Pair<Uri, String>? = null, onSharedModelConsumed: () -> Unit = {}, onSharedImageConsumed: () -> Unit) {
     val context = LocalContext.current
     val preferences = remember { context.getSharedPreferences("idea3d-settings", Context.MODE_PRIVATE) }
-    remember { ActionLog.start(context) }
+    remember { ActionLog.start(context); ActionUsage.start(context) }
     remember { MeasurementPrecision.load(context) }
     val scope = rememberCoroutineScope()
     var projectExportId by remember { mutableStateOf<String?>(null) }
@@ -2729,6 +2733,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 return
             }
             if (pointPick != null) { togglePoint(pointPick.first); return }
+            // A tap on anything already picked unpicks it, whatever the filter is now.
+            run {
+                val hitLine = closestGuide(point, guides, hitRadius * 1.7)?.let(::homeKey)
+                val pickedHit = listOfNotNull(hitLine, item).firstOrNull { k -> pickedItems.any { sameItem(it, k) } }
+                if (pickedHit != null) { togglePicked(pickedHit); ActionLog.add("unpick ${pickedHit.first.label} line ${pickedHit.second}; picked items=${pickedItems.size}"); return }
+                if (hitLine != null && hitLine in pickedSegments) { pickedSegments = pickedSegments - hitLine; ActionLog.add("unpick part ${hitLine.first.label} line ${hitLine.second}"); return }
+            }
             fun closedItem(key: Pair<ModelPlane, Int>): Boolean {
                 val geometry = planeGeometry(key.first); val ids = itemGuides(key).map { it.id }.toSet()
                 return closedGuideShapes(geometry.guides).any { path -> path.any { it.id == key.second || it.id in ids } }
@@ -4755,9 +4766,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             logToast(context, "Unlock selected items before aligning or spacing them", Toast.LENGTH_SHORT).show(); return
         }
         val here = modelSetup().mapping(editPlane) ?: return
-        val itemBoxes: List<Pair<Any, FloatArray>> = distinctPicked().mapNotNull { k -> itemBox(k)?.let { k to it } }
         val points = (pickedPoints + markedPoints()).fold(emptyList<Triple<ModelPlane, Int, Boolean>>()) { acc, sel -> if (acc.any { samePoint(it, sel) }) acc else acc + sel }
-        val pointBoxes: List<Pair<Any, FloatArray>> = points.filterNot { p -> pickedItems.any { it.first == p.first && itemGuides(it).any { g -> g.id == p.second } } }.mapNotNull { p -> ghostPointHere(p)?.let { at -> p to floatArrayOf(at.x, at.y, at.x, at.y) } }
+        // Points picked on a picked item are the finer choice: they are lined up and the item is not moved whole.
+        fun ownsPoint(k: Pair<ModelPlane, Int>) = pickedPoints.any { p -> k.first == p.first && itemGuides(k).any { g -> g.id == p.second } }
+        val itemBoxes: List<Pair<Any, FloatArray>> = distinctPicked().filterNot(::ownsPoint).mapNotNull { k -> itemBox(k)?.let { k to it } }
+        val pointBoxes: List<Pair<Any, FloatArray>> = points.filterNot { p -> pickedItems.any { it.first == p.first && !ownsPoint(it) && itemGuides(it).any { g -> g.id == p.second } } }.mapNotNull { p -> ghostPointHere(p)?.let { at -> p to floatArrayOf(at.x, at.y, at.x, at.y) } }
         val boxes = itemBoxes + pointBoxes
         @Suppress("UNCHECKED_CAST")
         fun moveAny(k: Any, d: Vec3) = if (k is Triple<*, *, *>) moveGhostPoint(k as Triple<ModelPlane, Int, Boolean>, d) else moveItem(k as Pair<ModelPlane, Int>, d)
@@ -5287,7 +5300,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         else -> "item"
                     }
                     val selectedCount = if (profiles.isNotEmpty()) profiles.size else pickedPoints.size
-                    val selectedSummary = if (selectedCount == 0) "" else "Selected $selectedCount $selectedKind${if (selectedCount == 1) "" else "s"} · "
+                    val pointsToo = if (profiles.isNotEmpty() && pickedPoints.isNotEmpty()) " and ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"}" else ""
+                    val selectedSummary = if (selectedCount == 0) "" else "Selected $selectedCount $selectedKind${if (selectedCount == 1) "" else "s"}$pointsToo · "
                     when {
                         pickedItems.isEmpty() && pickedPoints.isEmpty() -> when (selectionMode) {
                             // Only what the Select filter lets you pick.
@@ -5300,7 +5314,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         }
                         profiles.size == 1 && isClosedShape(profiles.first()) -> "${selectedSummary}Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
                         profiles.size >= 2 && profiles.all(::isClosedShape) -> "${selectedSummary}Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
-                        else -> "${selectedSummary}Loft needs two closed shapes"
+                        // Otherwise: what is picked and what the toolbar does with it.
+                        else -> "${selectedSummary}tap a picked one again to unpick it"
                     }
                 }
                 growDrag != null -> growDrag!!.let { g -> planeGeometry(g.handle.key.first).extrusions.firstOrNull { it.id == g.extrusionId }?.depthMm?.let { "Depth ${formatMeasure(it / unitFactorMm(unit), unit)} $unit · drag along the arrow" } ?: "Drag along the arrow" }
@@ -5326,7 +5341,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             }
             val axesHint = if (show3d) "" else if (editPlane in mirroredViews) when (editPlane) { ModelPlane.FRONT -> "X ←  Y ↑  from behind"; ModelPlane.TOP -> "X →  Z ↑ front  from below"; ModelPlane.PROFILE -> "Z → front  Y ↑  from the left" }
                 else when (editPlane) { ModelPlane.FRONT -> "X →  Y ↑  depth Z"; ModelPlane.TOP -> "X →  Z ↓ front  depth Y"; ModelPlane.PROFILE -> "Z ← front  Y ↑  depth X" }
-            StatusStrip(tool, drawingEnd = draftStart != null, hint = editHint, primaryAction = if (selectMode) ({
+            StatusStrip(tool, drawingEnd = draftStart != null, hint = editHint, primaryAction = if (selectMode && (pickedPoints.size >= 3 || distinctPicked().count { itemGuides(it).size == 1 } >= 3)) ({
                 // This is deliberately always in the first command slot: it works from
                 // either selected corner points or selected loose lines.
                 val selectedLines = distinctPicked().count { itemGuides(it).size == 1 }
@@ -5387,10 +5402,20 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     }
                     selectMode -> {
                         val n = pickedItems.size; val total = n + pickedPoints.size
+                        // What is picked decides which actions come first (see ActionUsage).
+                        val pickKind = distinctPicked().let { items -> when {
+                            items.isEmpty() && pickedSegments.isEmpty() && pickedPoints.isEmpty() -> "none"
+                            items.isEmpty() && pickedSegments.isEmpty() -> "points"
+                            pickedPoints.isNotEmpty() -> "mixed"
+                            items.isNotEmpty() && items.all(::isObjectItem) -> "objects"
+                            items.isNotEmpty() && items.all(::isClosedShape) -> "shapes"
+                            else -> "lines"
+                        } }
+                        CompositionLocalProvider(LocalActionKind provides pickKind) {
                         val allLocked = n > 0 && pickedItems.all(::itemLocked)
                         // Align by an edge or the middle: top / middle / bottom, left / center / right.
                         @Composable fun AlignMenu() {
-                            Box {
+                            Box(actionRank("Align", total >= 2)) {
                                 ActionIcon("Align", R.drawable.ic_align_horizontal, enabled = total >= 2) { alignMenuOpen = true }
                                 DropdownMenu(expanded = alignMenuOpen, onDismissRequest = { alignMenuOpen = false }) {
                                     Text("Align picked", Modifier.padding(horizontal = 16.dp, vertical = 8.dp), fontWeight = FontWeight.Bold)
@@ -5449,6 +5474,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon(if (pipeProfile != null) "Cancel pipe" else "Pipe", R.drawable.ic_broken_line, enabled = pipeProfile != null || n >= 1 && pickedItems.firstOrNull()?.let(::isClosedShape) == true, onClick = ::pipePicked)
                         ActionIcon("Outline", R.drawable.ic_outline, enabled = n >= 1) { outlineOf(pickedItems); pickedItems = emptyList() }
                         ActionIcon("Unselect", R.drawable.ic_close, enabled = total + parts > 0) { pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList() }
+                        }
                         ViewIcons()
                     }
                     else -> {
@@ -6801,7 +6827,7 @@ private fun sendToRoomik(context: android.content.Context, file: File, name: Str
     }, dismissButton = { TextButton(onClick = onDismiss) { Text(if (report is ModelReport.Ready) "Cancel" else "Close") } })
 }
 
-@Composable private fun StatusStrip(tool: Tool, drawingEnd: Boolean = false, hint: String? = null, primaryAction: (@Composable () -> Unit)? = null, actions: @Composable RowScope.() -> Unit) {
+@Composable private fun StatusStrip(tool: Tool, drawingEnd: Boolean = false, hint: String? = null, primaryAction: (@Composable () -> Unit)? = null, actions: @Composable () -> Unit) {
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 8.dp, vertical = 4.dp)) {
         val status = when { drawingEnd -> "Tap the end point"; tool == Tool.NONE -> "Choose a tool"; tool == Tool.CROP -> "Adjust crop, then confirm"; tool == Tool.LINES -> "Tap points to draw a guide"; tool == Tool.ADJUST -> "Select a point, line or label"; tool == Tool.CALIBRATE -> "Tap two points to calibrate"; else -> "Tap two points to measure" }
         // Always two lines tall, so a changing hint never resizes (and re-fits) the canvas below.
@@ -6809,7 +6835,16 @@ private fun sendToRoomik(context: android.content.Context, file: File, name: Str
         // The primary Select action stays visible; all secondary actions may scroll.
         Row(Modifier.fillMaxWidth().height(46.dp), verticalAlignment = Alignment.CenterVertically) {
             primaryAction?.invoke()
-            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, content = actions)
+            // Actions are laid out by rank: the ones used most for this kind of pick first, unusable ones last.
+            Layout(content = actions, modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())) { measurables, constraints ->
+                val loose = constraints.copy(minWidth = 0, maxWidth = Constraints.Infinity, minHeight = 0)
+                val placeables = measurables.withIndex().sortedWith(compareBy({ (it.value.parentData as? ActionRank)?.rank ?: 0f }, { it.index })).map { it.value.measure(loose) }
+                val h = placeables.maxOfOrNull { it.height } ?: 0
+                layout(placeables.sumOf { it.width }, h.coerceAtMost(constraints.maxHeight)) {
+                    var x = 0
+                    placeables.forEach { p -> p.placeRelative(x, (h - p.height) / 2); x += p.width }
+                }
+            }
         }
     }
 }
@@ -6859,9 +6894,35 @@ internal object ActionLog {
 private fun logToast(context: Context, text: CharSequence, duration: Int): Toast { ActionLog.add("message: $text"); return Toast.makeText(context, text, duration) }
 
 /** One action in the top row: a small icon with its name under it. */
+/** Where an action sits in the toolbar: lower comes first. */
+private class ActionRank(val rank: Float) : androidx.compose.ui.layout.ParentDataModifier {
+    override fun Density.modifyParentData(parentData: Any?) = this@ActionRank
+}
+/** The kind of pick the toolbar is for ("points", "lines", "objects"...), or null where actions keep their order. */
+private val LocalActionKind = androidx.compose.runtime.staticCompositionLocalOf<String?> { null }
+/**
+ * How often each action was used for each kind of pick, kept between sessions, so the actions you use most for
+ * points, lines, shapes or objects come first.
+ */
+internal object ActionUsage {
+    private var prefs: android.content.SharedPreferences? = null
+    private val counts = mutableMapOf<String, Int>()
+    fun start(context: Context) {
+        if (prefs != null) return
+        prefs = context.getSharedPreferences("action-usage", Context.MODE_PRIVATE).also { p -> p.all.forEach { (k, v) -> (v as? Int)?.let { counts[k] = it } } }
+    }
+    fun count(kind: String, label: String) = counts["$kind|$label"] ?: 0
+    fun used(kind: String, label: String) { val k = "$kind|$label"; val n = (counts[k] ?: 0) + 1; counts[k] = n; prefs?.edit()?.putInt(k, n)?.apply() }
+}
+@Composable private fun actionRank(label: String, enabled: Boolean): Modifier {
+    val kind = LocalActionKind.current ?: return Modifier
+    // Unusable actions go to the end; usable ones by how often they were used for this kind of pick.
+    return ActionRank(if (!enabled) 1_000_000f else -ActionUsage.count(kind, label).toFloat())
+}
 @OptIn(ExperimentalFoundationApi::class)
 @Composable private fun ActionIcon(label: String, icon: Int, enabled: Boolean = true, on: Boolean = false, tint: Color = Color(0xFF173C39), onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
-    Column(Modifier.width(54.dp).background(if (on) Color(0xFFCFE3DF) else Color.Transparent, RoundedCornerShape(8.dp)).combinedClickable(enabled = enabled, onClick = { ActionLog.add("tap $label"); onClick() }, onLongClick = onLongClick?.let { long -> { ActionLog.add("hold $label"); long() } }).padding(vertical = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    val kind = LocalActionKind.current
+    Column(actionRank(label, enabled).width(54.dp).background(if (on) Color(0xFFCFE3DF) else Color.Transparent, RoundedCornerShape(8.dp)).combinedClickable(enabled = enabled, onClick = { ActionLog.add("tap $label"); kind?.let { ActionUsage.used(it, label) }; onClick() }, onLongClick = onLongClick?.let { long -> { ActionLog.add("hold $label"); long() } }).padding(vertical = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Icon(painterResource(icon), contentDescription = label, tint = if (enabled) tint else Color(0xFFB4BEBA), modifier = Modifier.size(22.dp))
         Text(label, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (enabled) Color(0xFF173C39) else Color(0xFFB4BEBA))
     }
