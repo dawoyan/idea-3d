@@ -333,6 +333,19 @@ private object JointStore {
     } } } }.getOrDefault(emptyList())
     fun save(context: Context, id: String, joints: List<Joint>) = file(context, id).writeText(JSONArray().apply { joints.forEach { j -> put(JSONObject().apply { put("id", j.id); put("ap", j.a.first.name); put("a", j.a.second); put("bp", j.b.first.name); put("b", j.b.second); put("type", j.typeId); put("count", j.count); put("x", j.at.x); put("y", j.at.y); put("z", j.at.z) }) } }.toString())
 }
+/** Free turn: one stick turns round one of its ends, by dragging its other end or with the arrows. Kept outside the big app function. */
+private val freeTurn = FreeTurn()
+private class FreeTurn {
+    var on by mutableStateOf(false)
+    var key: Pair<ModelPlane, Int>? = null
+    var pivot by mutableStateOf<Vec3?>(null)
+    var end: Vec3? = null
+    var lastPx: Pt? = null
+    var turned by mutableStateOf(0.0)
+    var grab: (Pt, Double) -> Boolean = { _, _ -> false }
+    var by: (Double) -> Unit = {}
+    fun clear() { on = false; key = null; pivot = null; end = null; lastPx = null; turned = 0.0 }
+}
 /** Runs [content] as its own composable lambda, so a big block leaves the app function's bytecode. */
 @Composable private fun Scoped(content: @Composable () -> Unit) = content()
 /** Join state kept outside the big app composable: the scene's joints, the library and the open dialogs. */
@@ -2783,6 +2796,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             else { attachSelectedToSurface(items, surface); surfaceAttachItems = null }
             return
         }
+        if (selectMode && freeTurn.on) {
+            if (freeTurn.grab(point, hitRadius)) logToast(context, "It turns round the marked end: drag this end, or use the arrows", Toast.LENGTH_SHORT).show()
+            return
+        }
         if (selectMode) {
             // The canvas contains this view plus projected guides from the other
             // planes. Use that displayed layer for a quick tap; in an overlap,
@@ -3276,6 +3293,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             lineDragging = true; lineDragRadius = hitRadius; pendingEnd = sourcePoint
             return
         }
+        if (selectMode && freeTurn.on && freeTurn.grab(sourcePoint, hitRadius)) { pushUndo(); freeTurn.lastPx = sourcePoint; return }
         if (selectMode) {
             // Dragging a picked item moves all of them; dragging elsewhere draws a box to pick items.
             val hit = itemAt(sourcePoint, hitRadius)
@@ -3800,6 +3818,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         if (refs.size > 1) pendingAlignment = horizontal else alignSelectedVertices(horizontal, refs.firstOrNull())
     }
     fun handleDrag(point: Pt, snappedToFeature: Boolean) {
+        freeTurn.lastPx?.let { last ->
+            val c = freeTurn.pivot?.let { pv -> modelSetup().mapping(editPlane)?.pixel(pv) } ?: return
+            val a = Math.toDegrees(atan2((point.y - c.y).toDouble(), (point.x - c.x).toDouble()) - atan2((last.y - c.y).toDouble(), (last.x - c.x).toDouble()))
+            val deg = -(((a + 540.0) % 360.0) - 180.0)
+            if (abs(deg) > 0.01 && distance(point, c) > 4.0) { freeTurn.by(deg); freeTurn.lastPx = point }
+            return
+        }
         ovalDrag?.let { (pieces, c, h) ->
             val (half, horizontal) = h
             val k = ((if (horizontal) abs(point.x - c.x) else abs(point.y - c.y)) / half).coerceAtLeast(0.02f)
@@ -3944,6 +3969,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
     }
     fun handleDragEnd() {
+        if (freeTurn.lastPx != null) { freeTurn.lastPx = null; ActionLog.add("free turn: ${"%.1f".format(freeTurn.turned)}° round one end"); return }
         if (lineDragging) {
             // The line ends where the finger lifts, as if tapped there.
             lineDragging = false
@@ -3990,6 +4016,17 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun handleDragCancel() { foreignDrag = null; selectionStart = null; selectionEnd = null; handleDragEnd() }
     fun nudgeSelected(dx: Float, dy: Float) {
+        if (freeTurn.on) {
+            val here = modelSetup().mapping(editPlane) ?: return
+            val c = freeTurn.pivot?.let(here::pixel); val e = freeTurn.end?.let(here::pixel)
+            if (c == null || e == null) { logToast(context, "Free turn: first tap the end that should move", Toast.LENGTH_SHORT).show(); return }
+            // The arrow pushes the moving end; its sideways part turns it.
+            val ex = e.x - c.x; val ey = e.y - c.y
+            val push = dx * ey - dy * ex
+            if (abs(push) < 1e-6) return
+            pushNudgeUndo("free turn"); freeTurn.by(if (push > 0) 0.25 else -0.25)
+            return
+        }
         selectedForeignPoint?.let { pushNudgeUndo("foreign point(s)=${it.points.size}"); nudgeForeignPoint(it, dx, dy); return }
         // A whole 3D object from another view, or an imported model: one step in the arrow's direction.
         val objectStep = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble())
@@ -4310,7 +4347,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
      * (counterclockwise on screen for positive [deg]). A shape that ends up lying flat in another view moves to that
      * view, with its 3D depth, groups, cuts and joins, so it stays a proper shape there.
      */
-    fun turnItems(keys: List<Pair<ModelPlane, Int>>, points: List<Triple<ModelPlane, Int, Boolean>>, requestedDeg: Double) {
+    fun turnItems(keys: List<Pair<ModelPlane, Int>>, points: List<Triple<ModelPlane, Int, Boolean>>, requestedDeg: Double, around: Vec3? = null, record: Boolean = true) {
         if (keys.any(::itemLocked) || points.any(::pointLocked)) {
             logToast(context, "Unlock the selected item before turning it", Toast.LENGTH_SHORT).show(); return
         }
@@ -4320,7 +4357,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val curvedEdgeOn = keys.any { k -> k.first != editPlane && itemGuides(k).any { it.curveMid != null } }
         val deg = if (curvedEdgeOn && abs(requestedDeg % 90.0) > 1e-6) 90.0 * kotlin.math.sign(requestedDeg) else requestedDeg
         if (deg != requestedDeg) logToast(context, "Curved shapes from another view turn a quarter at a time here, so they keep their shape. To turn by ${requestedDeg.toInt().let(::abs)}°, do it in the view it was drawn in", Toast.LENGTH_LONG).show()
-        ActionLog.add("turn ${keys.size} item(s), ${points.size} point(s) by ${deg.toInt()}° in ${editPlane.label}${if (fromOtherView) " (from another view)" else ""}")
+        if (record) ActionLog.add("turn ${keys.size} item(s), ${points.size} point(s) by ${deg.toInt()}° in ${editPlane.label}${if (fromOtherView) " (from another view)" else ""}")
         val setup = modelSetup(); val axis = editPlane.toward
         fun pointModel(sel: Triple<ModelPlane, Int, Boolean>): Vec3? {
             val g = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
@@ -4333,9 +4370,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         fun itemFace(key: Pair<ModelPlane, Int>) = itemGuides(key).firstOrNull()?.let { faceOffset(key.first, it.id) } ?: 0.0
         val all = items.flatMap { key -> val own = setup.mapping(key.first) ?: return@flatMap emptyList(); val f = itemFace(key); itemGuides(key).flatMap { g -> listOf(own.model(g.start, g.startZMm + f), own.model(g.end, g.endZMm + f)) } } + loose.mapNotNull(::pointModel)
         if (all.isEmpty()) return
-        val center = Vec3((all.minOf { it.x } + all.maxOf { it.x }) / 2, (all.minOf { it.y } + all.maxOf { it.y }) / 2, (all.minOf { it.z } + all.maxOf { it.z }) / 2)
+        val center = around ?: Vec3((all.minOf { it.x } + all.maxOf { it.x }) / 2, (all.minOf { it.y } + all.maxOf { it.y }) / 2, (all.minOf { it.z } + all.maxOf { it.z }) / 2)
         fun turned(v: Vec3) = center + ModelImport.turn(v - center, axis, deg)
-        pushUndo()
+        if (record) pushUndo()
         val pointMoves = loose.mapNotNull { sel -> pointModel(sel)?.let { sel to (turned(it) - it) } }
         items.forEach { key ->
             val plane = key.first; val own = setup.mapping(plane) ?: return@forEach
@@ -4412,6 +4449,34 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             transformSelectedVertices { p -> here.pixel(center + ModelImport.turn(here.model(p, 0.0) - center, editPlane.toward, deg)) }
         }
     }
+    /** Free turn: takes the stick under [point] (its nearest end moves, the far end stays). */
+    fun freeTurnGrab(point: Pt, hitRadius: Double): Boolean {
+        val here = modelSetup().mapping(editPlane) ?: return false
+        val picks = distinctPicked()
+        val key = itemAt(point, hitRadius * 1.5)?.let { hit -> picks.firstOrNull { sameItem(hit, it) } ?: hit } ?: picks.singleOrNull() ?: return false
+        if (itemLocked(key)) { logToast(context, "Unlock it before turning it", Toast.LENGTH_SHORT).show(); return false }
+        val own = modelSetup().mapping(key.first) ?: return false
+        val ends = itemGuides(key).flatMap { g -> val f = faceOffset(key.first, g.id); listOf(own.model(g.start, g.startZMm + f), own.model(g.end, g.endZMm + f)) }
+        if (ends.size < 2) return false
+        val grab = ends.minBy { distance(here.pixel(it), point) }
+        freeTurn.key = key; freeTurn.end = grab; freeTurn.pivot = ends.maxBy { (it - grab).length }; freeTurn.turned = 0.0
+        pickedItems = listOf(key); pickedPoints = emptyList()
+        return true
+    }
+    /** Turns the free-turn stick by [deg] (counter-clockwise on screen) round its pivot. */
+    fun freeTurnBy(deg: Double) {
+        val key = freeTurn.key ?: return; val pivot = freeTurn.pivot ?: return
+        val here = modelSetup().mapping(editPlane) ?: return
+        // Which way a positive model turn goes on screen depends on the view; measure it.
+        val probe = pivot + ModelImport.turn(editPlane.right * 100.0, editPlane.toward, 1.0)
+        val a0 = here.pixel(pivot + editPlane.right * 100.0); val a1 = here.pixel(probe); val c = here.pixel(pivot)
+        val screenCcw = (a0.x - c.x) * (a1.y - c.y) - (a0.y - c.y) * (a1.x - c.x) < 0
+        val d = if (screenCcw) deg else -deg
+        turnItems(listOf(key), emptyList(), d, around = pivot, record = false)
+        freeTurn.end = freeTurn.end?.let { pivot + ModelImport.turn(it - pivot, editPlane.toward, d) }
+        freeTurn.turned += deg
+    }
+    freeTurn.grab = ::freeTurnGrab; freeTurn.by = ::freeTurnBy
     fun groupPicked() {
         if (pickedItems.size < 2) return
         pushUndo()
@@ -5073,7 +5138,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     fun setSelectMode(on: Boolean) {
         // Points marked before Select starts stay picked, so what shows as selected is what Align and Move use.
         val carried = if (on && !selectMode) markedPoints() else emptyList()
-        selectMode = on; selectByTap = false; pickedItems = emptyList(); pickedPoints = carried; pickedSegments = emptyList(); itemRectStart = null; itemRectEnd = null; selectedGhostPoints = emptyList()
+        freeTurn.clear(); selectMode = on; selectByTap = false; pickedItems = emptyList(); pickedPoints = carried; pickedSegments = emptyList(); itemRectStart = null; itemRectEnd = null; selectedGhostPoints = emptyList()
         if (on) { tool = Tool.ADJUST; clearOwnSelection(); selectedForeign = null; selectedGhostPoint = null; panOnEmptyDrag = false }
     }
     setSelectModeLate = ::setSelectMode
@@ -5250,7 +5315,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         return guides.mapNotNull { g ->
             val m = materials.firstOrNull { it.id == g.materialId && !it.isSheet } ?: return@mapNotNull null
             g.id to (m.argb to (m.profile.widthMm * pxPerMm).toFloat())
-        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 }; joinUi.marks = joinUi.joints.map { j -> here.pixel(j.at) to joinUi.label(j) } }
+        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 }; joinUi.marks = joinUi.joints.map { j -> here.pixel(j.at) to joinUi.label(j) } + listOfNotNull(freeTurn.pivot?.let { here.pixel(it) to "turns here" }) }
     }
     fun memberSections(): List<Pair<Int, List<List<Pt>>>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList()
@@ -5511,6 +5576,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     val pointsToo = if (profiles.isNotEmpty() && pickedPoints.isNotEmpty()) " and ${pickedPoints.size} point${if (pickedPoints.size == 1) "" else "s"}" else ""
                     val selectedSummary = if (selectedCount == 0) "" else "Selected $selectedCount $selectedKind${if (selectedCount == 1) "" else "s"}$pointsToo · "
                     when {
+                        freeTurn.on -> if (freeTurn.pivot == null) "Free turn: tap the end of the stick that should move" else "Free turn ${"%.1f".format(freeTurn.turned)}°: drag the end, or use the arrows · Done turn to finish"
                         pickedItems.isEmpty() && pickedPoints.isEmpty() -> when (selectionMode) {
                             // Only what the Select filter lets you pick.
                             SelectionMode.POINTS -> "Tap points to pick them, or drag a box around them"
@@ -5571,6 +5637,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Turn ↺", R.drawable.ic_rotate_left) { turnSelection(turnStep) }
                         ActionIcon("${turnStep.toInt()}°", R.drawable.ic_sizes, onLongClick = { showExactTurn = true }) { turnStep = if (turnStep == 15.0) 90.0 else if (turnStep == 90.0) 5.0 else 15.0 }
                         ActionIcon("Turn ↻", R.drawable.ic_rotate_right) { turnSelection(-turnStep) }
+                        if (selectMode) ActionIcon(if (freeTurn.on) "Done turn" else "Free turn", R.drawable.ic_rotate_right, on = freeTurn.on) {
+                            if (freeTurn.on) freeTurn.clear() else { freeTurn.clear(); freeTurn.on = true; logToast(context, "Free turn: tap the end that should move. The other end stays", Toast.LENGTH_LONG).show() }
+                        }
                     }
                 }
                 // View 3D, Fit and Sizes: first normally; last while Modify has something selected, so its own buttons lead.
