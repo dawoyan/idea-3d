@@ -150,11 +150,39 @@ internal class ViewerMesh private constructor(
             val axes = a.normals + b.normals + a.edges.flatMap { e -> b.edges.mapNotNull { f -> unit(floatArrayOf(e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0])) } }
             return axes.none { overlapOn(it, a, b) <= tolerance }
         }
+        // The hull test treats a wall with a door as solid across the door. So an overlap also needs the real
+        // surfaces to cross: an edge of one passing right through a face of the other, or one sitting inside the other.
+        val triangles = HashMap<Int, List<Array<FloatArray>>>()
+        fun trianglesOf(id: Int) = triangles.getOrPut(id) { triangleObjects.indices.filter { triangleObjects[it] == id }.map { t -> Array(3) { k -> floatArrayOf(vertex(t * 3 + k, 0), vertex(t * 3 + k, 1), vertex(t * 3 + k, 2)) } } }
+        fun sub(a: FloatArray, b: FloatArray) = floatArrayOf(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+        fun cross(a: FloatArray, b: FloatArray) = floatArrayOf(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+        fun dot(a: FloatArray, b: FloatArray) = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+        val margin = 0.002f
+        /** Does segment p→q pass through the inside of triangle t (not just touch it)? */
+        fun pierces(p: FloatArray, q: FloatArray, t: Array<FloatArray>): Boolean {
+            val n = unit(cross(sub(t[1], t[0]), sub(t[2], t[0]))) ?: return false
+            val dp = dot(sub(p, t[0]), n); val dq = dot(sub(q, t[0]), n)
+            if (!(dp > margin && dq < -margin || dp < -margin && dq > margin)) return false
+            val f = dp / (dp - dq); val x = floatArrayOf(p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f, p[2] + (q[2] - p[2]) * f)
+            for (k in 0..2) { val a = t[k]; val b = t[(k + 1) % 3]; val inward = cross(n, sub(b, a)); val len = kotlin.math.sqrt(dot(inward, inward)); if (len < 1e-9f || dot(sub(x, a), inward) / len < margin) return false }
+            return true
+        }
+        fun inside(p: FloatArray, mesh: List<Array<FloatArray>>): Boolean {
+            val far = floatArrayOf(p[0] + 37.1f, p[1] + 23.3f, p[2] + 51.7f)
+            return mesh.count { pierces(p, far, it) } % 2 == 1
+        }
+        fun meshesPierce(a: Int, b: Int): Boolean {
+            val ta = trianglesOf(a); val tb = trianglesOf(b)
+            fun edgesThrough(x: List<Array<FloatArray>>, y: List<Array<FloatArray>>) = x.any { t -> (0..2).any { k -> val p = t[k]; val q = t[(k + 1) % 3]; y.any { pierces(p, q, it) } } }
+            fun centre(m: List<Array<FloatArray>>) = FloatArray(3) { axis -> m.sumOf { t -> t.sumOf { it[axis].toDouble() } }.toFloat() / (m.size * 3) }
+            return edgesThrough(ta, tb) || edgesThrough(tb, ta) || ta.isNotEmpty() && inside(centre(ta), tb) || tb.isNotEmpty() && inside(centre(tb), ta)
+        }
         val colliding = mutableSetOf<Int>()
         boxes.indices.forEach { a -> for (b in a + 1 until boxes.size) {
             val first = boxes[a]; val second = boxes[b]
             val boxesMeet = (0..2).all { axis -> minOf(first.high[axis], second.high[axis]) - maxOf(first.low[axis], second.low[axis]) > tolerance }
-            if (boxesMeet && reallyOverlap(hulls.getOrPut(first.objectId) { hull(first.objectId) }, hulls.getOrPut(second.objectId) { hull(second.objectId) })) { colliding += first.objectId; colliding += second.objectId }
+            if (boxesMeet && reallyOverlap(hulls.getOrPut(first.objectId) { hull(first.objectId) }, hulls.getOrPut(second.objectId) { hull(second.objectId) }) &&
+                meshesPierce(first.objectId, second.objectId)) { colliding += first.objectId; colliding += second.objectId }
         } }
         boxes.filter { it.objectId in colliding }
     }

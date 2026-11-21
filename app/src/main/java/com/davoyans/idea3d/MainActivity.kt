@@ -209,7 +209,7 @@ private data class FeatureSnap(val point: Pt, val found: Boolean)
 private data class ScreenLine(val id: Int, val start: Offset, val end: Offset)
 private data class MeasureLine(val id: Int, val start: Pt, val end: Pt, val value: Double, val isReference: Boolean, val label: String, val colorIndex: Int = 0, val isScaleReference: Boolean = false, val labelOffset: Float = 0f, val pathId: Int? = null, val segmentIndex: Int = 0, val lengthSource: LengthSource = LengthSource.CALCULATED, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val axis: String = "", val plane: ModelPlane = ModelPlane.FRONT)
 private fun MeasureLine.hasDepth() = abs(startZMm) > 0.000001 || abs(endZMm) > 0.000001
-private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null, val hole: Boolean = false, val locked: Boolean = false, val surfaceMm: Double? = null)
+private data class GuideLine(val id: Int, val start: Pt, val end: Pt, val manual: Boolean, val pathId: Int? = null, val colorIndex: Int = 0, val strokeWidth: Float = 5f, val curveMid: Pt? = null, val fillTransparency: Int? = null, val groupId: Int? = null, val lengthMm: Double? = null, val shapeWidthMm: Double? = null, val shapeHeightMm: Double? = null, val startZMm: Double = 0.0, val endZMm: Double = 0.0, val startThicknessMm: Double? = null, val endThicknessMm: Double? = null, val plane: ModelPlane = ModelPlane.FRONT, val materialId: String? = null, val materialTurnDeg: Double = 0.0, val midDepthMm: Double? = null, val hole: Boolean = false, val locked: Boolean = false, val surfaceMm: Double? = null, val holeOf: Int? = null)
 private data class AlignmentReference(val guide: Boolean, val id: Int, val point: Pt, val description: String)
 private data class SelectedAlignmentObject(val guideIds: Set<Int>, val lineIds: Set<Int>, val points: List<Pt>)
 private data class Extrusion(val id: Int, val guideIds: List<Int>, val origin: Pt, val handle: Pt, val vanishing: Pt, val sun: Pt = vanishing, val depthMm: Double? = null, val positionZMm: Double = 0.0, val plane: ModelPlane = ModelPlane.FRONT)
@@ -972,6 +972,7 @@ private object ProjectStore {
             if (guide.materialTurnDeg != 0.0) put("materialTurn", guide.materialTurnDeg)
             if (guide.hole) put("hole", true)
             if (guide.locked) put("locked", true)
+            guide.holeOf?.let { put("holeOf", it) }
             guide.surfaceMm?.let { put("surfaceMm", it) }
         }) }
         val extrusions = JSONArray()
@@ -1055,7 +1056,7 @@ private object ProjectStore {
         val values = json.getJSONArray("lines")
         val lines = buildList { for (index in 0 until values.length()) { val line = values.getJSONObject(index); val fixed = line.optBoolean("scaleReference", line.getBoolean("reference")); val source = LengthSource.entries.firstOrNull { it.name == line.optString("lengthSource") } ?: if (fixed) LengthSource.MANUAL else LengthSource.CALCULATED; add(MeasureLine(line.getInt("id"), Pt(line.getDouble("sx").toFloat(), line.getDouble("sy").toFloat()), Pt(line.getDouble("ex").toFloat(), line.getDouble("ey").toFloat()), line.getDouble("value"), line.getBoolean("reference"), line.optString("label"), line.optInt("color"), fixed, line.optDouble("labelOffset", 0.0).toFloat(), line.takeIf { it.has("pathId") }?.getInt("pathId"), line.optInt("segmentIndex", 0), source, line.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, line.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, CalibrationAxis.of(line.optString("axis")).key, ModelPlane.of(line.optString("plane")))) } }
         val guideValues = json.optJSONArray("guides") ?: JSONArray()
-        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(0, 20, 50, 90, 100) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0, null, hole = guide.optBoolean("hole", false), locked = guide.optBoolean("locked", false), surfaceMm = guide.optDouble("surfaceMm", Double.NaN).takeIf { it.isFinite() && it > 0 })) } }
+        val guides = buildList { for (index in 0 until guideValues.length()) { val guide = guideValues.getJSONObject(index); add(GuideLine(guide.getInt("id"), Pt(guide.getDouble("sx").toFloat(), guide.getDouble("sy").toFloat()), Pt(guide.getDouble("ex").toFloat(), guide.getDouble("ey").toFloat()), guide.optBoolean("manual", false), guide.takeIf { it.has("pathId") }?.getInt("pathId"), guide.optInt("color", 0), guide.optDouble("width", 5.0).toFloat(), if (guide.has("curveX") && guide.has("curveY")) Pt(guide.getDouble("curveX").toFloat(), guide.getDouble("curveY").toFloat()) else null, guide.optInt("fillTransparency", -1).takeIf { it in listOf(0, 20, 50, 90, 100) }, guide.takeIf { it.has("groupId") }?.getInt("groupId"), guide.takeIf { it.has("lengthMm") }?.optDouble("lengthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeWidthMm") }?.optDouble("shapeWidthMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("shapeHeightMm") }?.optDouble("shapeHeightMm")?.takeIf { it.isFinite() && it > 0 }, guide.optDouble("startZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.optDouble("endZMm", 0.0).takeIf { it.isFinite() } ?: 0.0, guide.takeIf { it.has("startThicknessMm") }?.optDouble("startThicknessMm")?.takeIf { it.isFinite() && it > 0 }, guide.takeIf { it.has("endThicknessMm") }?.optDouble("endThicknessMm")?.takeIf { it.isFinite() && it > 0 }, ModelPlane.of(guide.optString("plane")), guide.optString("material").ifBlank { null }, guide.optDouble("materialTurn", 0.0).takeIf { it.isFinite() } ?: 0.0, null, hole = guide.optBoolean("hole", false), locked = guide.optBoolean("locked", false), surfaceMm = guide.optDouble("surfaceMm", Double.NaN).takeIf { it.isFinite() && it > 0 }, holeOf = guide.takeIf { it.has("holeOf") }?.getInt("holeOf"))) } }
         val figure = ComparisonFigure.entries.firstOrNull { it.name == json.optString("figure") } ?: if (!json.has("figure") && json.optBoolean("silhouette")) ComparisonFigure.STANDING else null
         val transparency = json.optInt("transparency", 0).takeIf { it in listOf(0, 10, 90, 100) } ?: 0
         val extrusionValues = json.optJSONArray("extrusions") ?: JSONArray()
@@ -3689,13 +3690,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         // as the hole's outline, grouped with the shape, and the hole goes through it in 3D.
         if ((operation == "cut-first" || operation == "cut-second") && target != null && razor != null && shapePoints(razor).all { pointInsidePolygon(it, shapePoints(target)) }) {
             pushUndo()
-            val holeIds = razor.map { it.id }.toSet()
+            // The hole is a copy of the cutter at the target's depth; the cutter itself stays, to use again or delete.
             val z = target.map { (it.startZMm + it.endZMm) / 2 }.average()
-            guides = guides.map { if (it.id in holeIds) it.copy(hole = true, fillTransparency = null, materialId = null, startZMm = z, endZMm = z) else it }
-            val gone = extrusions.filter { e -> e.guideIds.any { it in holeIds } }.map { editPlane to it.id }.toSet()
-            extrusions = extrusions.filterNot { e -> e.guideIds.any { it in holeIds } }
-            solidOps = solidOps.filterNot { it.target in gone || it.tool in gone }
-            logToast(context, "Cut a hole: the inner shape is now a hole that goes through in 3D", Toast.LENGTH_SHORT).show()
+            var nextId = nextGuideId(guides)
+            val path = (guides.mapNotNull { it.pathId }.maxOrNull() ?: 0) + 1
+            val holeLines = razor.map { g -> g.copy(id = nextId++, pathId = if (g.pathId != null) path else null, groupId = null, hole = true, fillTransparency = null, materialId = null, startZMm = z, endZMm = z, locked = false, holeOf = target.first().id) }
+            guides = guides + holeLines
+            ActionLog.add("cut hole: ${holeLines.size} line(s) in shape ${target.first().id} at depth ${format(z)} mm; cutter kept")
+            logToast(context, "Cut a hole in that shape only; the cutting shape stays (delete it if you don't need it)", Toast.LENGTH_LONG).show()
             return
         }
         val result = when (operation) {
@@ -9772,10 +9774,14 @@ private fun buildModel(guides: List<GuideLine>, extrusions: List<Extrusion>, ops
     val specs = if (members.isNotEmpty() || lofts.isNotEmpty()) buildSolidSpecs(guides, extrusions, setup, objects, strict = false) else buildSolidSpecs(guides, extrusions, setup, objects)
     val issues = mutableListOf<MeshIssue>()
     // Holes (shapes cut out of a shape and lying wholly inside it) are left open right through the object.
-    val raw = specs.map { spec ->
+    val raw = specs.mapIndexed { index, spec ->
         val mapping = setup.mapping(spec.plane)
         val outer = spec.outline.map { Pt(it.x.toFloat(), it.y.toFloat()) }
-        val holes = if (mapping == null) emptyList() else closedGuideShapes(guides.filter { it.plane == spec.plane }).filter { s -> s.all { it.hole } }
+        // Only this object's own holes: a hole cut in one wall must not go through another wall behind it.
+        val planeGuides = guides.filter { it.plane == spec.plane }
+        val ownIds = objects.getOrNull(index)?.guideIds?.toSet()
+        val holes = if (mapping == null) emptyList() else closedGuideShapes(planeGuides).filter { s -> s.all { it.hole } }
+            .filter { s -> ownIds == null || holeContainer(s.first(), planeGuides)?.let { c -> c.id in ownIds || planeGuides.any { o -> o.id in ownIds && sameGuideObject(o, c) } } != false }
             .map { hole -> shapePoints(hole).map { Pt(mapping.right(it).toFloat(), mapping.up(it).toFloat()) } }
             .filter { pts -> pts.size >= 3 && pts.all { pointInsidePolygon(it, outer) } }
             .map { pts -> pts.map { Vec2(it.x.toDouble(), it.y.toDouble()) } }
@@ -10063,15 +10069,23 @@ private fun simplifiedOutline(outline: List<OutlinePoint>): List<OutlinePoint> {
 /** The closed shape (not a hole) that the hole [hole] lies inside, as one of its lines. */
 private fun holeContainer(hole: GuideLine, all: List<GuideLine>): GuideLine? {
     val shapes = closedGuideShapes(all)
-    val pts = shapes.firstOrNull { p -> p.any { it.id == hole.id } }?.let(::shapePoints) ?: return null
-    return shapes.filter { p -> p.none { it.hole } && pts.all { pointInsidePolygon(it, shapePoints(p)) } }.minByOrNull { p -> shapePoints(p).let { s -> abs(s.indices.sumOf { i -> val a = s[i]; val b = s[(i + 1) % s.size]; (a.x * b.y - b.x * a.y).toDouble() }) } }?.first()
+    val holeShape = shapes.firstOrNull { p -> p.any { it.id == hole.id } } ?: return null
+    val pts = shapePoints(holeShape)
+    // A hole cut with Cut 1st knows its shape: it cuts that one only, even where another shape lies behind it.
+    hole.holeOf?.let { owner -> shapes.firstOrNull { p -> p.none { it.hole } && p.any { it.id == owner && it.plane == hole.plane } }?.let { return it.first() } }
+    // A hole cuts only the shape at its own depth: two walls one behind the other look the same in this view.
+    fun depth(p: List<GuideLine>) = p.map { (it.startZMm + it.endZMm) / 2 }.average()
+    val around = shapes.filter { p -> p.none { it.hole } && pts.all { pointInsidePolygon(it, shapePoints(p)) } }
+    val atDepth = around.filter { abs(depth(it) - depth(holeShape)) <= 1.0 }
+    val nearest = around.minOfOrNull { abs(depth(it) - depth(holeShape)) }
+    return atDepth.ifEmpty { around.filter { abs(depth(it) - depth(holeShape)) == nearest } }.minByOrNull { p -> shapePoints(p).let { s -> abs(s.indices.sumOf { i -> val a = s[i]; val b = s[(i + 1) % s.size]; (a.x * b.y - b.x * a.y).toDouble() }) } }?.first()
 }
 /** The holes lying inside the closed shape that [lines] belong to. */
 private fun holesInside(lines: List<GuideLine>, all: List<GuideLine>): List<GuideLine> {
     val shapes = closedGuideShapes(all)
     val outer = shapes.firstOrNull { p -> p.none { it.hole } && p.any { g -> lines.any { it.id == g.id } } } ?: return emptyList()
     val pts = shapePoints(outer)
-    return shapes.filter { p -> p.all { it.hole } && shapePoints(p).all { pointInsidePolygon(it, pts) } }.flatten()
+    return shapes.filter { p -> p.all { it.hole } && shapePoints(p).all { pointInsidePolygon(it, pts) } && holeContainer(p.first(), all)?.let { c -> outer.any { it.id == c.id } } == true }.flatten()
 }
 
 /** A circle or oval: one closed path of six or more curved pieces (drawn with the Circle tool). */

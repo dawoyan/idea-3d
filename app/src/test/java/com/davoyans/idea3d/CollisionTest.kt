@@ -31,6 +31,15 @@ class CollisionTest {
         val rail = box(1900f, 80f, 50f, 0.0, 50f, 1700f)
         assertEquals(0, overlapping(postL, postR, beam, rail))
     }
+    @Test fun crossingBeamsOverlap() {
+        assertEquals(2, overlapping(box(1000f, 50f, 50f, 0.0, 0f, 500f), box(50f, 1000f, 50f, 0.0, 500f, 0f)))
+    }
+    @Test fun shapeInADoorwayDoesNotOverlapTheWall() {
+        // A wall with a door hole (boards round it) as one object, and a thin board filling the doorway.
+        val wall = box(400f, 1000f, 18f, 0.0, 0f, 0f) + box(400f, 1000f, 18f, 0.0, 800f, 0f) + box(400f, 300f, 18f, 0.0, 400f, 700f) + box(400f, 100f, 18f, 0.0, 400f, 0f)
+        val filler = box(400f, 600f, 1f, 0.0, 400f, 100f)
+        assertEquals(0, overlapping(wall, filler))
+    }
     @Test fun realOverlapIsFound() {
         assertEquals(2, overlapping(box(100f, 100f, 100f, 0.0, 0f, 0f), box(100f, 100f, 100f, 30.0, 50f, 50f)))
     }
