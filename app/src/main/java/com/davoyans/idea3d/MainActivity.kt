@@ -304,6 +304,110 @@ private data class FinderItem(val plane: ModelPlane, val guideIds: List<Int>, va
 
 /** A 3D cut or join between two objects, each named by its drawing plane and object id. A kept cut tool stays in the model. */
 private enum class SolidMode { JOIN, CUT, COMMON }
+internal data class JoinType(val id: String, val name: String, val detail: String)
+private data class Joint(val id: Int, val a: Pair<ModelPlane, Int>, val b: Pair<ModelPlane, Int>, val typeId: String, val count: Int, val at: Vec3)
+private data class JoinEnd(val key: Pair<ModelPlane, Int>, val at: Vec3, val free: Boolean)
+/** The join library: kinds of fastening, kept for every project; the user adds and edits them. */
+internal object JoinLibrary {
+    val defaults = listOf(
+        JoinType("screw", "Wood screw", "5 × 60 mm"),
+        JoinType("bolt", "Bolt + nut", "M8 × 120 mm, 2 washers"),
+        JoinType("nail", "Nail", "90 mm"),
+        JoinType("bracket", "Corner bracket", "steel angle + 4 screws 4 × 30"),
+        JoinType("plate", "Flat plate", "steel plate + 4 screws 4 × 30"),
+        JoinType("dowel", "Dowel + glue", "Ø8 × 40 mm"),
+        JoinType("weld", "Weld", "fillet weld all round"),
+        JoinType("glue", "Glue", "wood glue")
+    )
+    private fun prefs(context: Context) = context.getSharedPreferences("join-library", Context.MODE_PRIVATE)
+    fun load(context: Context): List<JoinType> = prefs(context).getString("types", null)?.let { text -> runCatching { JSONArray(text).let { a -> (0 until a.length()).map { i -> a.getJSONObject(i).let { o -> JoinType(o.getString("id"), o.getString("name"), o.optString("detail")) } } } }.getOrNull() } ?: defaults
+    fun save(context: Context, types: List<JoinType>) = prefs(context).edit().putString("types", JSONArray().apply { types.forEach { t -> put(JSONObject().apply { put("id", t.id); put("name", t.name); put("detail", t.detail) }) } }.toString()).apply()
+    fun last(context: Context): String? = prefs(context).getString("last", null)
+    fun setLast(context: Context, id: String) = prefs(context).edit().putString("last", id).apply()
+}
+/** The joints of one project, next to its project file. */
+private object JointStore {
+    private fun file(context: Context, id: String) = File(File(context.filesDir, "joints").apply { mkdirs() }, "$id.json")
+    fun load(context: Context, id: String): List<Joint> = runCatching { JSONArray(file(context, id).readText()).let { a -> (0 until a.length()).map { i -> a.getJSONObject(i).let { o ->
+        Joint(o.getInt("id"), ModelPlane.valueOf(o.getString("ap")) to o.getInt("a"), ModelPlane.valueOf(o.getString("bp")) to o.getInt("b"), o.getString("type"), o.optInt("count", 1), Vec3(o.getDouble("x"), o.getDouble("y"), o.getDouble("z")))
+    } } } }.getOrDefault(emptyList())
+    fun save(context: Context, id: String, joints: List<Joint>) = file(context, id).writeText(JSONArray().apply { joints.forEach { j -> put(JSONObject().apply { put("id", j.id); put("ap", j.a.first.name); put("a", j.a.second); put("bp", j.b.first.name); put("b", j.b.second); put("type", j.typeId); put("count", j.count); put("x", j.at.x); put("y", j.at.y); put("z", j.at.z) }) } }.toString())
+}
+/** Runs [content] as its own composable lambda, so a big block leaves the app function's bytecode. */
+@Composable private fun Scoped(content: @Composable () -> Unit) = content()
+/** Join state kept outside the big app composable: the scene's joints, the library and the open dialogs. */
+/** One shared join state (a plain object, so the big app function's helpers need not carry it). */
+private val joinUi = JoinUi()
+private class JoinUi {
+    var joints by mutableStateOf(emptyList<Joint>())
+    var jointsFor by mutableStateOf<String?>(null)
+    var pending by mutableStateOf<((JoinType, Int) -> Unit)?>(null)
+    var showLibrary by mutableStateOf(false)
+    var types by mutableStateOf(JoinLibrary.defaults)
+    /** Joint marks in the view being drawn, refreshed with the bars each frame. */
+    var marks: List<Pair<Pt, String>> = emptyList()
+    fun label(j: Joint) = "${types.firstOrNull { it.id == j.typeId }?.name ?: j.typeId}${if (j.count > 1) " ×${j.count}" else ""}"
+    fun add(context: Context, a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>, type: JoinType, count: Int, at: Vec3) {
+        joints = joints + Joint((joints.maxOfOrNull { it.id } ?: 0) + 1, a, b, type.id, count, at)
+        JoinLibrary.setLast(context, type.id); ActionLog.add("joint: ${type.name} ×$count")
+    }
+}
+@Composable private fun JoinDialogs(ui: JoinUi, projectId: String?, nameOf: (Pair<ModelPlane, Int>) -> String) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) { ui.types = JoinLibrary.load(context) }
+    LaunchedEffect(projectId) { ui.joints = projectId?.let { JointStore.load(context, it) }.orEmpty(); ui.jointsFor = projectId }
+    LaunchedEffect(ui.joints) { val id = projectId; if (id != null && ui.jointsFor == id) JointStore.save(context, id, ui.joints) }
+    ui.pending?.let { run -> JoinTypeDialog(ui.types, JoinLibrary.last(context), onJoin = { t, n -> ui.pending = null; run(t, n) }, onLibrary = { ui.showLibrary = true }, onDismiss = { ui.pending = null }) }
+    if (ui.showLibrary) JoinLibraryDialog(ui.types, ui.joints.map { j -> "${ui.label(j)} · ${nameOf(j.a)} + ${nameOf(j.b)}" },
+        onSave = { list -> ui.types = list; JoinLibrary.save(context, list) }, onDeleteJoint = { i -> ui.joints = ui.joints.filterIndexed { k, _ -> k != i } }, onDismiss = { ui.showLibrary = false })
+}
+@Composable private fun JoinTypeDialog(types: List<JoinType>, lastId: String?, onJoin: (JoinType, Int) -> Unit, onLibrary: () -> Unit, onDismiss: () -> Unit) {
+    var chosen by remember(types) { mutableStateOf(types.firstOrNull { it.id == lastId } ?: types.firstOrNull()) }
+    var count by remember { mutableStateOf(2) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("How are they joined?") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            types.forEach { t ->
+                Row(Modifier.fillMaxWidth().clickable { chosen = t }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = chosen?.id == t.id, onClick = { chosen = t })
+                    Column { Text(t.name, fontWeight = FontWeight.Bold); if (t.detail.isNotBlank()) Text(t.detail, fontSize = 12.sp, color = Color(0xFF4D5A57)) }
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("How many: ", fontSize = 14.sp)
+                TextButton(onClick = { if (count > 1) count-- }) { Text("−", fontSize = 20.sp) }
+                Text("$count", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                TextButton(onClick = { count++ }) { Text("+", fontSize = 20.sp) }
+            }
+            TextButton(onClick = onLibrary) { Text("Join library…") }
+        }
+    }, confirmButton = { TextButton(enabled = chosen != null, onClick = { chosen?.let { onJoin(it, count) } }) { Text("Join") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+@Composable private fun JoinLibraryDialog(types: List<JoinType>, jointsText: List<String>, onSave: (List<JoinType>) -> Unit, onDeleteJoint: (Int) -> Unit, onDismiss: () -> Unit) {
+    var list by remember { mutableStateOf(types) }
+    AlertDialog(onDismissRequest = { onSave(list.filter { it.name.isNotBlank() }); onDismiss() }, title = { Text("Join library") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            Text("Ways of joining you pick from on each Join. Edit them to match your screws, bolts and brackets.", fontSize = 12.sp, color = Color(0xFF4D5A57))
+            list.forEachIndexed { i, t ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        OutlinedTextField(t.name, { v -> list = list.toMutableList().also { it[i] = t.copy(name = v) } }, label = { Text("Name") }, singleLine = true)
+                        OutlinedTextField(t.detail, { v -> list = list.toMutableList().also { it[i] = t.copy(detail = v) } }, label = { Text("Size / details") }, singleLine = true)
+                    }
+                    TextButton(onClick = { list = list.filterIndexed { k, _ -> k != i } }) { Text("✕") }
+                }
+            }
+            TextButton(onClick = { list = list + JoinType("custom-${System.currentTimeMillis()}", "", "") }) { Text("＋ Add a way of joining") }
+            if (jointsText.isNotEmpty()) {
+                Text("Joints in this scene", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
+                jointsText.forEachIndexed { i, text ->
+                    Row(verticalAlignment = Alignment.CenterVertically) { Text(text, fontSize = 13.sp, modifier = Modifier.weight(1f)); TextButton(onClick = { onDeleteJoint(i) }) { Text("✕") } }
+                }
+            }
+        }
+    }, confirmButton = { TextButton(onClick = { onSave(list.filter { it.name.isNotBlank() }); onDismiss() }) { Text("Done") } },
+        dismissButton = { TextButton(onClick = { list = JoinLibrary.defaults }) { Text("Reset") } })
+}
 private data class SolidOp(val target: Pair<ModelPlane, Int>, val tool: Pair<ModelPlane, Int>, val join: Boolean, val keepTool: Boolean = false, val common: Boolean = false)
 
 /** Geometry of a drawing plane that is not the one being edited; items keep their [ModelPlane] tag. */
@@ -4369,12 +4473,18 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         pickedItems = listOf(shape, target)
         logToast(context, "Shape placed on ${objectName(target)}. Give it material/Grow, then use Cut, Common or Join 3D", Toast.LENGTH_LONG).show()
     }
+    fun groupTogether(a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>) {
+        val pair = listOf(a, b)
+        val inGroup = itemGroups.filter { group -> group.any { m -> pair.any { sameItem(m, it) } } }
+        val merged: List<Pair<ModelPlane, Int>> = (inGroup.flatten() + pair).fold(emptyList()) { acc, k -> if (acc.any { sameItem(it, k) }) acc else acc + k }
+        itemGroups = itemGroups.filterNot { it in inGroup } + listOf(merged)
+    }
     /**
      * Two picked lines or bars are fastened like two sticks screwed together: the one whose end is
      * nearest the other is moved whole (never stretched) until that end sits on the other bar's face,
      * and both become one group that is picked and moved together.
      */
-    fun fastenLines(a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>): Boolean {
+    fun fastenLines(a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>): Vec3? {
         val setup = modelSetup()
         fun halfWidth(g: GuideLine) = materials.firstOrNull { it.id == g.materialId && !it.isSheet }?.profile?.widthMm?.div(2.0) ?: 0.0
         fun segs(key: Pair<ModelPlane, Int>): List<Triple<Vec3, Vec3, GuideLine>> {
@@ -4396,27 +4506,70 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 Fit(source, e, onto, (e - near).length)
             }.minByOrNull { it.gap } }
         }
-        val best = (fits(b, a) + fits(a, b)).minByOrNull { it.gap } ?: return false
+        val best = (fits(b, a) + fits(a, b)).minByOrNull { it.gap } ?: return null
         pushUndo()
         moveItem(best.source, best.onto - best.from)
-        val pair = listOf(a, b)
-        val inGroup = itemGroups.filter { group -> group.any { m -> pair.any { sameItem(m, it) } } }
-        val merged: List<Pair<ModelPlane, Int>> = (inGroup.flatten() + pair).fold(emptyList()) { acc, k -> if (acc.any { sameItem(it, k) }) acc else acc + k }
-        itemGroups = itemGroups.filterNot { it in inGroup } + listOf(merged)
+        groupTogether(a, b)
         val moved = (best.onto - best.from).length
         ActionLog.add("fasten: moved ${best.source.first.label} line ${best.source.second} by ${format(moved)} mm; joined as one group")
         pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList()
         logToast(context, if (moved < 0.5) "Joined: they already touch, now fastened together; they move as one" else "Joined: ${itemNameLate(best.source)} moved ${format(moved)} mm to touch the other; they move together now", Toast.LENGTH_LONG).show()
-        return true
+        return best.onto
     }
-    /** Two picked points on two different lines or bars: those two, to be fastened together. */
-    fun twoSticksByPoints(): Pair<Pair<ModelPlane, Int>, Pair<ModelPlane, Int>>? {
-        if (pickedItems.isNotEmpty() || pickedSegments.isNotEmpty() || pickedPoints.size != 2) return null
-        val (a, b) = pickedPoints.map { it.first to it.second }
-        return if (sameItem(a, b) || itemGuides(a).any { g -> itemGuides(b).any { it.id == g.id && it.plane == g.plane } }) null else a to b
+    /**
+     * Two picked points on two different pieces (in Select, or corners picked in Modify). The
+     * piece whose point is a free end is moved whole so that end sits on the other piece's
+     * face at the other point (a point added on a bar marks where the joint goes).
+     */
+    fun joinEnds(): List<JoinEnd>? {
+        val setup = modelSetup()
+        fun end(plane: ModelPlane, g: GuideLine, at: Pt, z: Double): JoinEnd? {
+            val map = setup.mapping(plane) ?: return null
+            val key = plane to g.id
+            val free = itemGuides(key).count { o -> distance(o.start, at) < 0.6 || distance(o.end, at) < 0.6 } == 1
+            return JoinEnd(key, map.model(at, z), free)
+        }
+        fun ofTriple(t: Triple<ModelPlane, Int, Boolean>): JoinEnd? = planeGeometry(t.first).guides.firstOrNull { it.id == t.second }?.let { g -> if (t.third) end(t.first, g, g.start, g.startZMm) else end(t.first, g, g.end, g.endZMm) }
+        val ends = if (selectMode) {
+            if (pickedItems.isNotEmpty() || pickedSegments.isNotEmpty()) return null
+            pickedPoints.mapNotNull(::ofTriple)
+        } else if (tool == Tool.ADJUST) {
+            selectedVertices.mapNotNull { v -> guides.firstOrNull { g -> distance(g.start, v) < 0.6 || distance(g.end, v) < 0.6 }?.let { g -> val k = homeKey(g); val start = distance(g.start, v) < 0.6
+                planeGeometry(k.first).guides.firstOrNull { it.id == k.second }?.let { own -> if (start) end(k.first, own, own.start, own.startZMm) else end(k.first, own, own.end, own.endZMm) } } } + selectedGhostPoints.mapNotNull(::ofTriple)
+        } else return null
+        if (ends.size != 2) return null
+        val (a, b) = ends
+        return if (sameItem(a.key, b.key) || itemGuides(a.key).any { g -> itemGuides(b.key).any { it.id == g.id && it.plane == g.plane } }) null else ends
+    }
+    /** Moves one piece so its picked end rests on the other piece's face at the other picked point; returns the joint point. */
+    fun fastenEnds(ends: List<JoinEnd>): Vec3? {
+        val (e0, e1) = ends
+        // The piece picked at a free end moves; with both (or neither) free ends the second one picked moves.
+        val (src, dst) = if (e0.free && !e1.free) e0 to e1 else e1 to e0
+        if (itemLocked(src.key)) { logToast(context, "Unlock ${itemNameLate(src.key)} first", Toast.LENGTH_SHORT).show(); return null }
+        val setup = modelSetup()
+        val dstMap = setup.mapping(dst.key.first) ?: return null
+        val bar = itemGuides(dst.key).minByOrNull { g -> val a = dstMap.model(g.start, g.startZMm); val b = dstMap.model(g.end, g.endZMm); val d = b - a
+            val t = if (d.length < 1e-9) 0.0 else (((dst.at - a) dot d) / (d dot d)).coerceIn(0.0, 1.0); (a + d * t - dst.at).length } ?: return null
+        val axis = (dstMap.model(bar.end, bar.endZMm) - dstMap.model(bar.start, bar.startZMm)).normalized()
+        val face = materials.firstOrNull { it.id == bar.materialId && !it.isSheet }?.profile?.widthMm?.div(2.0) ?: 0.0
+        val dir = src.at - dst.at; val across = dir - axis * (dir dot axis)
+        val onto = if (face > 0 && across.length > 1e-6) dst.at + across.normalized() * face else dst.at
+        pushUndo()
+        moveItem(src.key, onto - src.at)
+        groupTogether(src.key, dst.key)
+        val moved = (onto - src.at).length
+        ActionLog.add("fasten at point: moved ${src.key.first.label} line ${src.key.second} by ${format(moved)} mm onto ${dst.key.first.label} line ${dst.key.second}")
+        pickedPoints = emptyList(); selectedVertices = emptyList(); selectedGhostPoints = emptyList()
+        logToast(context, if (moved < 0.5) "Joined where you picked; they move as one now" else "Joined: ${itemNameLate(src.key)} moved ${format(moved)} mm to the point you picked; they move as one now", Toast.LENGTH_LONG).show()
+        return onto
+    }
+    /** Every join first asks how the pieces are joined (screw, bolt, bracket, …) and records it. */
+    fun askJoin(a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>, fasten: () -> Vec3?) {
+        joinUi.pending = { type, count -> fasten()?.let { at -> joinUi.add(context, a, b, type, count, at) } }
     }
     fun mergePicked() {
-        twoSticksByPoints()?.let { (a, b) -> fastenLines(a, b); return }
+        joinEnds()?.let { ends -> askJoin(ends[0].key, ends[1].key) { fastenEnds(ends) }; return }
         if (pickedItems.size < 2) { logToast(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         if (pickedItems.any(::itemLocked)) { logToast(context, "Unlock locked items before merging", Toast.LENGTH_SHORT).show(); return }
         val first = pickedItems.first(); val rest = pickedItems.drop(1)
@@ -4430,7 +4583,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             applyShapeOperation(JunctionAction(JunctionKind.SHAPE_OVERLAP, first.second, rest[0].second, Pt(0f, 0f)), "merge")
             pickedItems = emptyList(); return
         }
-        if (rest.size == 1 && !isClosedShape(first) && !isClosedShape(rest[0]) && fastenLines(first, rest[0])) return
+        if (rest.size == 1 && !isClosedShape(first) && !isClosedShape(rest[0])) { askJoin(first, rest[0]) { fastenLines(first, rest[0]) }; return }
         logToast(context, "Merge needs two overlapping shapes in the same view, two 3D objects, or two lines or bars. To connect a line: select the line and one endpoint, then tap Join.", Toast.LENGTH_LONG).show()
     }
     /**
@@ -4459,7 +4612,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         logToast(context, "Joined in 3D: the endpoint was moved onto the selected line", Toast.LENGTH_LONG).show()
     }
     fun joinPicked() {
-        twoSticksByPoints()?.let { (a, b) -> if (!fastenLines(a, b)) logToast(context, "Could not join these two", Toast.LENGTH_SHORT).show(); return }
+        joinEnds()?.let { ends -> askJoin(ends[0].key, ends[1].key) { fastenEnds(ends) }; return }
+        if (pickedItems.size == 2 && pickedPoints.isEmpty() && pickedItems.none(::isClosedShape)) { val (a, b) = pickedItems; askJoin(a, b) { fastenLines(a, b) }; return }
         joinPickedLineToEndpoint()
     }
     /**
@@ -5096,7 +5250,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         return guides.mapNotNull { g ->
             val m = materials.firstOrNull { it.id == g.materialId && !it.isSheet } ?: return@mapNotNull null
             g.id to (m.argb to (m.profile.widthMm * pxPerMm).toFloat())
-        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 } }
+        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 }; joinUi.marks = joinUi.joints.map { j -> here.pixel(j.at) to joinUi.label(j) } }
     }
     fun memberSections(): List<Pair<Int, List<List<Pt>>>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList()
@@ -5233,7 +5387,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
             ImageEditor(
-                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, hiddenGuideIds = hiddenHere(), ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, hiddenGuideIds = hiddenHere(), ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), jointMarks = joinUi.marks, models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = (if (lineDragging || shapeDragging) triangleApex.takeIf { lineDrawing == LineDrawing.TRIANGLE && triangleBaseReady } ?: pendingEnd else null) ?: selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, zoom = zoom, pan = pan, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -5342,6 +5496,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         })
         else Column(Modifier.padding(padding).fillMaxSize()) {
             val editHint = when {
+                !selectMode && tool == Tool.ADJUST && selectedVertices.size + selectedGhostPoints.size >= 2 -> "${selectedVertices.size + selectedGhostPoints.size} points picked · Align, Depth, or Join when they are on two pieces"
                 selectMode -> {
                     val profiles = distinctPicked()
                     val selectedKind = when {
@@ -5367,7 +5522,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         }
                         profiles.size == 1 && isClosedShape(profiles.first()) -> "${selectedSummary}Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
                         profiles.size >= 2 && profiles.all(::isClosedShape) -> "${selectedSummary}Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
-                        twoSticksByPoints() != null -> "${selectedSummary}on two different pieces: tap Join to fasten them together"
+                        pickedItems.isEmpty() && pickedPoints.size == 2 -> "${selectedSummary}on two pieces? Tap Join, then choose how they are joined"
                         // Otherwise: what is picked and what the toolbar does with it.
                         else -> "${selectedSummary}tap a picked one again to unpick it"
                     }
@@ -5520,8 +5675,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Loft level", R.drawable.ic_move_point, enabled = n == 1 && pickedPoints.isEmpty() && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftLevelItems = distinctPicked() }
                         ActionIcon(if (n == 1) "Loft 1/2" else "Loft $n", R.drawable.ic_cube, enabled = n >= 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
                         ActionIcon("Lofts ${lofts.size}", R.drawable.ic_join, enabled = lofts.isNotEmpty()) { showLofts = true }
-                        ActionIcon("Join", R.drawable.ic_join, enabled = (n == 1 && pickedPoints.size == 1 || twoSticksByPoints() != null) && !pickedItems.any(::itemLocked) && !pickedPoints.any(::pointLocked), onClick = ::joinPicked)
-                        ActionIcon("Merge", R.drawable.ic_merge, enabled = n >= 2 || twoSticksByPoints() != null, onClick = ::mergePicked)
+                        ActionIcon("Join", R.drawable.ic_join, enabled = (n == 1 && pickedPoints.size == 1 || n == 2 && pickedPoints.isEmpty() || joinEnds() != null) && !pickedItems.any(::itemLocked) && !pickedPoints.any(::pointLocked), onClick = ::joinPicked)
+                        ActionIcon("Merge", R.drawable.ic_merge, enabled = n >= 2 || joinEnds() != null, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
                         ActionIcon("Intersect", R.drawable.ic_cube, enabled = n >= 1 && pickedItems.all(::isClosedShape), onClick = ::intersectPicked)
@@ -5573,6 +5728,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                             ActionIcon("Align H", R.drawable.ic_align_horizontal) { requestAlignment(true) }
                             ActionIcon("Align V", R.drawable.ic_align_vertical) { requestAlignment(false) }
                             ActionIcon("Depth", R.drawable.ic_cube) { showPointDepth = true }
+                            if (joinEnds() != null) ActionIcon("Join", R.drawable.ic_join) { joinPicked() }
                         }
                         if (tool == Tool.ADJUST) selectedForeignObject()?.let { target ->
                             if (selectedForeignPoint != null) ActionIcon("Move by", R.drawable.ic_move_point) { movePointDialog = true }
@@ -5631,7 +5787,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             Box(Modifier.fillMaxWidth().weight(1f)) {
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
-                bitmap = planeCanvas!!, lines = lines, guides = guides, hiddenGuideIds = hiddenHere(), ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), viewpointLines = viewpointLinesFor(editPlane, planeFrames, modelSetup()), onViewpointDragStart = { point, radius -> viewpointTargetAt(viewpointLinesFor(editPlane, planeFrames, modelSetup()), point, radius)?.let { target -> pushUndo(); draggingViewpointPlane = target; ActionLog.add("viewpoint drag start: ${target.label} plane from ${editPlane.label}"); true } ?: false }, onViewpointDrag = { point -> draggingViewpointPlane?.let { target -> modelSetup().mapping(editPlane)?.let { map -> planeFrames = planeFrames + (target to frameOf(target).copy(normalOffsetMm = map.model(point, 0.0) dot target.toward)) } } }, onViewpointDragEnd = { draggingViewpointPlane?.let { target -> ActionLog.add("viewpoint moved: ${target.label} plane") }; draggingViewpointPlane = null }, ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
+                bitmap = planeCanvas!!, lines = lines, guides = guides, hiddenGuideIds = hiddenHere(), ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), jointMarks = joinUi.marks, models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), viewpointLines = viewpointLinesFor(editPlane, planeFrames, modelSetup()), onViewpointDragStart = { point, radius -> viewpointTargetAt(viewpointLinesFor(editPlane, planeFrames, modelSetup()), point, radius)?.let { target -> pushUndo(); draggingViewpointPlane = target; ActionLog.add("viewpoint drag start: ${target.label} plane from ${editPlane.label}"); true } ?: false }, onViewpointDrag = { point -> draggingViewpointPlane?.let { target -> modelSetup().mapping(editPlane)?.let { map -> planeFrames = planeFrames + (target to frameOf(target).copy(normalOffsetMm = map.model(point, 0.0) dot target.toward)) } } }, onViewpointDragEnd = { draggingViewpointPlane?.let { target -> ActionLog.add("viewpoint moved: ${target.label} plane") }; draggingViewpointPlane = null }, ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
                 ghostPointMarks = (if (selectMode) pickedPoints else emptyList()).mapNotNull(::ghostPointHere), onViewSize = ::fitCanvasToView, selectedGuideId = selectedGuideId, unit = unit, drawingScale = scale, draftStart = draftStart, pendingEnd = pendingEnd, tool = tool, zoom = zoom, pan = pan,
                 selectedEndpoint = selectedEndpoint, magnifierPoint = (if (lineDragging || shapeDragging) triangleApex.takeIf { lineDrawing == LineDrawing.TRIANGLE && triangleBaseReady } ?: pendingEnd else null) ?: selectedPoint ?: magnifierPoint, deleteCandidateId = deleteCandidateId, alignmentLineIds = alignmentLineIds, alignmentFlashToken = alignmentFlashToken, edgeSnapPoint = edgeSnapPoint, edgeFlashToken = edgeFlashToken, adjustmentIndicatorPoint = adjustmentIndicatorPoint, adjustmentLineId = adjustmentLineId, adjustmentGuideId = adjustmentGuideId, adjustmentFlashToken = adjustmentFlashToken, lockedFlashGuideId = lockedFlashGuideId, lockedFlashToken = lockedFlashToken, guideColorIndex = guideColorIndex, guideStrokeWidth = guideStrokeWidth, rotation = if (editPlane == ModelPlane.FRONT) levelRotation else 0f, unitVisibility = unitVisibility, cropFrame = cropFrame, pictureOptions = pictureOptions, extrusions = extrusions, selectedExtrusionId = selectedExtrusionId, onTripleTap = { point, radius -> activateExtrusion(point, radius) },
@@ -5922,6 +6078,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }, confirmButton = { TextButton(enabled = depthMm != null, onClick = { apply(depthMm, sheetId); logToast(context, "Surface made: tap View 3D to see it", Toast.LENGTH_SHORT).show() }) { Text("Grow") } },
             dismissButton = { TextButton(onClick = { surfaceEditId = null }) { Text("Cancel") } })
     } ?: run { surfaceEditId = null } }
+    JoinDialogs(joinUi, projectId) { itemNameLate(it) }
     lineMaterialId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
         var chosen by remember(id) { mutableStateOf(guide.materialId) }
         var turn by remember(id) { mutableStateOf(guide.materialTurnDeg) }
@@ -5954,7 +6111,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             lineMaterialId = null
         }) { Text("Save") } }, dismissButton = { TextButton(onClick = { lineMaterialId = null }) { Text("Cancel") } })
     } ?: run { lineMaterialId = null } }
-    guideLengthEditId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
+    // Inside Scoped so this dialog compiles as its own method (the app function is at the JVM size limit).
+    guideLengthEditId?.let { id -> Scoped { guides.firstOrNull { it.id == id }?.let { guide ->
         var length by remember(id, unit) { mutableStateOf("") }
         var materialId by remember(id) { mutableStateOf(guide.materialId) }
         var turn by remember(id) { mutableStateOf(guide.materialTurnDeg) }
@@ -6069,7 +6227,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 guideLengthEditId = null
             }) { Text("Save") } },
             dismissButton = { TextButton(onClick = { guideLengthEditId = null }) { Text("Cancel") } })
-    } }
+    } } }
     junctionAction?.let { action ->
         val split = action.kind == JunctionKind.SPLIT_MEASUREMENT || action.kind == JunctionKind.SPLIT_GUIDE
         if (action.kind == JunctionKind.SHAPE_OVERLAP) AlertDialog(
@@ -7292,7 +7450,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
     }
 }
 
-@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, hiddenGuideIds: Set<Int> = emptySet(), ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, lineDraftDrag: Boolean = false, draftShape: LineDrawing? = null, triangleApex: Pt? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), memberBands: Map<Int, Pair<Int, Float>> = emptyMap(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), loftLines: List<Pair<Pt, Pt>> = emptyList(), viewpointLines: List<ViewpointLine> = emptyList(), onViewpointDragStart: (Pt, Double) -> Boolean = { _, _ -> false }, onViewpointDrag: (Pt) -> Unit = {}, onViewpointDragEnd: () -> Unit = {}, ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
+@Composable private fun ImageEditor(modifier: Modifier, bitmap: Bitmap, lines: List<MeasureLine>, guides: List<GuideLine>, hiddenGuideIds: Set<Int> = emptySet(), ghosts: List<Pair<Int, FloatArray>> = emptyList(), showSizes: Boolean = true, minZoom: Float = 0.1f, growArrows: List<Pair<Pt, Pt>> = emptyList(), rimHandles: List<Pt> = emptyList(), growOn: Boolean = false, dragToDraw: Boolean = false, lineDraftDrag: Boolean = false, draftShape: LineDrawing? = null, triangleApex: Pt? = null, mirrorX: Boolean = false, mirrorY: Boolean = false, sections: List<Pair<Int, List<List<Pt>>>> = emptyList(), memberBands: Map<Int, Pair<Int, Float>> = emptyMap(), jointMarks: List<Pair<Pt, String>> = emptyList(), models: List<Triple<Int, Int, List<Pt>>> = emptyList(), selectedModelId: Int? = null, materialNames: Map<String, String> = emptyMap(), ghostLines: List<Pair<Pair<ModelPlane, Int>, FloatArray>> = emptyList(), loftLines: List<Pair<Pt, Pt>> = emptyList(), viewpointLines: List<ViewpointLine> = emptyList(), onViewpointDragStart: (Pt, Double) -> Boolean = { _, _ -> false }, onViewpointDrag: (Pt) -> Unit = {}, onViewpointDragEnd: () -> Unit = {}, ghostNoDots: Set<Pair<ModelPlane, Int>> = emptySet(), highlightGhost: Pair<ModelPlane, Int>? = null, ghostPointMark: Pt? = null, pickedOutlines: List<Pair<List<Pt>, Boolean>> = emptyList(), itemRect: Pair<Pt, Pt>? = null, ghostPointMarks: List<Pt> = emptyList(), foreignOverlay: ForeignOverlay? = null, joinPick: JoinPick? = null, blankCanvas: Boolean = false, onViewSize: (Float, Float) -> Unit = { _, _ -> }, selectedGuideId: Int?, unit: String, drawingScale: Double?, draftStart: Pt?, pendingEnd: Pt?, tool: Tool, selectedEndpoint: Endpoint?, magnifierPoint: Pt?, deleteCandidateId: Int?, alignmentLineIds: Set<Int>, alignmentFlashToken: Int, edgeSnapPoint: Pt?, edgeFlashToken: Int, adjustmentIndicatorPoint: Pt?, adjustmentLineId: Int?, adjustmentGuideId: Int?, adjustmentFlashToken: Int, lockedFlashGuideId: Int?, lockedFlashToken: Int, guideColorIndex: Int, guideStrokeWidth: Float, rotation: Float, unitVisibility: String, zoom: Float, pan: Offset, cropFrame: CropFrame?, onTransform: (Float, Offset) -> Unit, onDoubleTap: () -> Unit, doubleTapEnabled: Boolean, onJunction: (JunctionAction) -> Unit, onAddPoint: (Pt, Double) -> Unit, onTap: (Pt, Double) -> Unit, onLongPress: (Pt, Double) -> Unit, onDragStart: (Pt, Double) -> Unit, onDrag: (Pt, Boolean) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit, onCropStart: (Pt, Double) -> Unit, onCropDrag: (Pt) -> Unit, onCropEnd: () -> Unit, selectedCurveId: Int?, selectedLabelId: Int?, selectedWholeLineId: Int?, selectedGuideEndpoint: GuideEndpoint?, selectedWholeGuideId: Int?, selectedVertices: List<Pt>, selectionStart: Pt?, selectionEnd: Pt?, panOnEmptyDrag: Boolean, showFineControls: Boolean, onNudge: (Float, Float) -> Unit, pictureOptions: PictureOptions, extrusions: List<Extrusion>, selectedExtrusionId: Int?, onTripleTap: (Pt, Double) -> Unit) {
     // Lines in front of a moved view plane are cut away: neither drawn nor grabbed here.
     @Suppress("NAME_SHADOWING") val guides = if (hiddenGuideIds.isEmpty()) guides else guides.filter { it.id !in hiddenGuideIds }
     val haptic = LocalHapticFeedback.current
@@ -7980,6 +8138,16 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 } else if (whole) { drawLine(Color(0x99FF8F00), from, to, strokeWidth = 11.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round); drawLine(Color(0xFFE65100), from, to, strokeWidth = 2.dp.toPx()) }
                 else drawLine(Color(0xCCFF8F00), from, to, strokeWidth = 6.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
             } }
+            // Joints: a screw-head mark with how the pieces are joined.
+            jointMarks.forEach { (p, label) ->
+                val c = viewAt(p); val r = 6.dp.toPx()
+                drawCircle(Color.White, r + 1.5.dp.toPx(), c); drawCircle(Color(0xFF37474F), r, c)
+                drawLine(Color.White, Offset(c.x - r * 0.6f, c.y), Offset(c.x + r * 0.6f, c.y), 1.5.dp.toPx()); drawLine(Color.White, Offset(c.x, c.y - r * 0.6f), Offset(c.x, c.y + r * 0.6f), 1.5.dp.toPx())
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 11.sp.toPx(); isFakeBoldText = true; style = Paint.Style.STROKE; strokeWidth = 3.dp.toPx(); color = AndroidColor.WHITE }
+                drawContext.canvas.nativeCanvas.drawText(label, c.x + r + 4.dp.toPx(), c.y + 4.dp.toPx(), paint)
+                paint.style = Paint.Style.FILL; paint.color = AndroidColor.rgb(0x37, 0x47, 0x4F)
+                drawContext.canvas.nativeCanvas.drawText(label, c.x + r + 4.dp.toPx(), c.y + 4.dp.toPx(), paint)
+            }
             itemRect?.let { (a, b) ->
                 val tl = viewAt(a).let { p -> viewAt(b).let { q -> Offset(min(p.x, q.x), min(p.y, q.y)) } }
                 drawRect(Color(0x33FF8F00), tl, Size(abs(a.x - b.x) * fit, abs(a.y - b.y) * fit)); drawRect(Color(0xFFFF8F00), tl, Size(abs(a.x - b.x) * fit, abs(a.y - b.y) * fit), style = Stroke(3f))
