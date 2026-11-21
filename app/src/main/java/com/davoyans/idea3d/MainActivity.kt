@@ -2697,7 +2697,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     .minWithOrNull(compareBy<VisiblePoint> { distance(it.at, point) }.thenByDescending { it.drawOrder })
                     ?.let { it.selection to it.at }?.let(::listOf).orEmpty()
                 else -> emptyList()
-            }.filter { distance(it.second, point) <= hitRadius }.minByOrNull { distance(it.second, point) }
+            }.let { all -> fun reach(sel: Triple<ModelPlane, Int, Boolean>) = if (sel.first == editPlane) barEndReach[sel.second] ?: 0.0 else 0.0
+                all.filter { distance(it.second, point) <= hitRadius + reach(it.first) }.minByOrNull { distance(it.second, point) - reach(it.first) } }
             val item = if (selectionMode == SelectionMode.VISIBLE) closestGuide(point, guides, hitRadius * 1.7)?.let(::homeKey) ?: itemAt(point, hitRadius) else itemAt(point, hitRadius)
             if (selectionMode == SelectionMode.VISIBLE || selectionMode == SelectionMode.ALL) {
                 // A tap right on a point picks that point; a tap on a line away from its points climbs from the
@@ -4368,6 +4369,46 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         pickedItems = listOf(shape, target)
         logToast(context, "Shape placed on ${objectName(target)}. Give it material/Grow, then use Cut, Common or Join 3D", Toast.LENGTH_LONG).show()
     }
+    /**
+     * Two picked lines or bars are fastened like two sticks screwed together: the one whose end is
+     * nearest the other is moved whole (never stretched) until that end sits on the other bar's face,
+     * and both become one group that is picked and moved together.
+     */
+    fun fastenLines(a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>): Boolean {
+        val setup = modelSetup()
+        fun halfWidth(g: GuideLine) = materials.firstOrNull { it.id == g.materialId && !it.isSheet }?.profile?.widthMm?.div(2.0) ?: 0.0
+        fun segs(key: Pair<ModelPlane, Int>): List<Triple<Vec3, Vec3, GuideLine>> {
+            val map = setup.mapping(key.first) ?: return emptyList()
+            return itemGuides(key).flatMap { g -> val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1)
+                pts.zipWithNext().mapIndexed { i, (p, q) -> Triple(map.model(p, g.startZMm + (g.endZMm - g.startZMm) * i / n), map.model(q, g.startZMm + (g.endZMm - g.startZMm) * (i + 1) / n), g) } }
+        }
+        data class Fit(val source: Pair<ModelPlane, Int>, val from: Vec3, val onto: Vec3, val gap: Double)
+        fun fits(source: Pair<ModelPlane, Int>, target: Pair<ModelPlane, Int>): List<Fit> {
+            val map = setup.mapping(source.first) ?: return emptyList()
+            val ends = itemGuides(source).flatMap { g -> listOf(map.model(g.start, g.startZMm), map.model(g.end, g.endZMm)) }
+            val parts = segs(target)
+            return ends.mapNotNull { e -> parts.map { (p, q, g) ->
+                val d = q - p; val t = if (d.length < 1e-9) 0.0 else ((e - p) dot d) / (d dot d)
+                val near = p + d * t.coerceIn(0.0, 1.0)
+                // The end rests on the face of the other bar, not inside it on its centre line.
+                val off = e - near; val face = halfWidth(g)
+                val onto = if (off.length > 1e-6 && face > 0) near + off.normalized() * face else near
+                Fit(source, e, onto, (e - near).length)
+            }.minByOrNull { it.gap } }
+        }
+        val best = (fits(b, a) + fits(a, b)).minByOrNull { it.gap } ?: return false
+        pushUndo()
+        moveItem(best.source, best.onto - best.from)
+        val pair = listOf(a, b)
+        val inGroup = itemGroups.filter { group -> group.any { m -> pair.any { sameItem(m, it) } } }
+        val merged: List<Pair<ModelPlane, Int>> = (inGroup.flatten() + pair).fold(emptyList()) { acc, k -> if (acc.any { sameItem(it, k) }) acc else acc + k }
+        itemGroups = itemGroups.filterNot { it in inGroup } + listOf(merged)
+        val moved = (best.onto - best.from).length
+        ActionLog.add("fasten: moved ${best.source.first.label} line ${best.source.second} by ${format(moved)} mm; joined as one group")
+        pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList()
+        logToast(context, "Joined: ${itemNameLate(best.source)} moved ${format(moved)} mm to touch the other; they move together now", Toast.LENGTH_LONG).show()
+        return true
+    }
     fun mergePicked() {
         if (pickedItems.size < 2) { logToast(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         if (pickedItems.any(::itemLocked)) { logToast(context, "Unlock locked items before merging", Toast.LENGTH_SHORT).show(); return }
@@ -4382,7 +4423,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             applyShapeOperation(JunctionAction(JunctionKind.SHAPE_OVERLAP, first.second, rest[0].second, Pt(0f, 0f)), "merge")
             pickedItems = emptyList(); return
         }
-        logToast(context, "Merge needs two overlapping shapes in the same view, or two 3D objects. To connect a line: select the line and one endpoint, then tap Join.", Toast.LENGTH_LONG).show()
+        if (rest.size == 1 && !isClosedShape(first) && !isClosedShape(rest[0]) && fastenLines(first, rest[0])) return
+        logToast(context, "Merge needs two overlapping shapes in the same view, two 3D objects, or two lines or bars. To connect a line: select the line and one endpoint, then tap Join.", Toast.LENGTH_LONG).show()
     }
     /**
      * Connects a chosen endpoint to the nearest point of a chosen line in real 3D space.
@@ -5043,7 +5085,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         return guides.mapNotNull { g ->
             val m = materials.firstOrNull { it.id == g.materialId && !it.isSheet } ?: return@mapNotNull null
             g.id to (m.argb to (m.profile.widthMm * pxPerMm).toFloat())
-        }.toMap()
+        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 } }
     }
     fun memberSections(): List<Pair<Int, List<List<Pt>>>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList()
@@ -6909,9 +6951,11 @@ internal object ActionUsage {
     private val counts = mutableMapOf<String, Int>()
     fun start(context: Context) {
         if (prefs != null) return
-        prefs = context.getSharedPreferences("action-usage", Context.MODE_PRIVATE).also { p -> p.all.forEach { (k, v) -> (v as? Int)?.let { counts[k] = it } } }
+        prefs = context.getSharedPreferences("action-usage", Context.MODE_PRIVATE).also { p -> p.all.forEach { (k, v) -> (v as? Int)?.let { counts[k] = it; ranked[k] = it } } }
     }
-    fun count(kind: String, label: String) = counts["$kind|$label"] ?: 0
+    // The order is learnt from earlier sessions only, so buttons never jump under the finger while working.
+    private val ranked = mutableMapOf<String, Int>()
+    fun count(kind: String, label: String) = ranked["$kind|$label"] ?: 0
     fun used(kind: String, label: String) { val k = "$kind|$label"; val n = (counts[k] ?: 0) + 1; counts[k] = n; prefs?.edit()?.putInt(k, n)?.apply() }
 }
 @Composable private fun actionRank(label: String, enabled: Boolean): Modifier {
@@ -7774,10 +7818,16 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         }
                         drawPath(path, fillColor, style = Stroke(bandPx, cap = androidx.compose.ui.graphics.StrokeCap.Butt))
                         // Bends of one bar run are filled round, so the bar has no gaps.
-                        listOf(guide.start to start, guide.end to end).forEach { (p, at) ->
-                            if (guides.any { o -> o.id != guide.id && o.id in memberBands && (distance(o.start, p) < 0.6 || distance(o.end, p) < 0.6) }) drawCircle(fillColor, bandPx / 2f, at)
-                        }
-                        drawPath(path, edge, style = Stroke(1.2.dp.toPx()))
+                        fun bendAt(p: Pt) = guide.pathId != null && guides.any { o -> o.id != guide.id && o.id in memberBands && o.pathId == guide.pathId && (distance(o.start, p) < 0.6 || distance(o.end, p) < 0.6) }
+                        listOf(guide.start to start, guide.end to end).forEach { (p, at) -> if (bendAt(p)) drawCircle(fillColor, bandPx / 2f, at) }
+                        val axis = end - start
+                        if (guide.curveMid == null && axis.getDistance() > 1f) {
+                            // A straight bar shows its own border, not the line inside it: two sides and its end faces.
+                            val n = Offset(-axis.y, axis.x) / axis.getDistance() * (bandPx / 2f)
+                            val w = (if (chosen) 2.2 else 1.2).dp.toPx()
+                            drawLine(edge, start + n, end + n, w); drawLine(edge, start - n, end - n, w)
+                            listOf(guide.start to start, guide.end to end).forEach { (p, at) -> if (!bendAt(p)) drawLine(edge, at + n, at - n, w) }
+                        } else drawPath(path, edge, style = Stroke(1.2.dp.toPx()))
                     } else if (guide.curveMid != null) {
                         val mid = viewAt(guide.curveMid)
                         val path = androidx.compose.ui.graphics.Path().apply { moveTo(start.x, start.y); quadraticTo(2f * mid.x - (start.x + end.x) / 2f, 2f * mid.y - (start.y + end.y) / 2f, end.x, end.y) }
@@ -7854,8 +7904,20 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 val smoothIds = smoothOutlineIds(guides)
                 val closedShapeIds = closedGuideShapes(guides).flatten().map { it.id }.toSet()
                 fun smoothJoint(p: Pt, g: GuideLine) = g.curveMid != null && g.pathId != null && guides.count { o -> o.pathId == g.pathId && o.curveMid != null && (distance(o.start, p) < 0.6 || distance(o.end, p) < 0.6) } >= 2
+                // A straight bar's ends are its corners: two at each end, always the bar's own width apart.
+                fun barStraight(g: GuideLine) = g.id in memberBands && g.curveMid == null && (viewAt(g.end) - viewAt(g.start)).getDistance() > 1f
+                guides.filter(::barStraight).forEach { g ->
+                    val a = viewAt(g.start); val b = viewAt(g.end); val axis = b - a
+                    val bandPx = (memberBands.getValue(g.id).second * fit).coerceAtLeast(3.dp.toPx())
+                    val n = Offset(-axis.y, axis.x) / axis.getDistance() * (bandPx / 2f)
+                    val active = selectedGuide != null && sameGuideObject(g, selectedGuide)
+                    listOf(a, b).forEach { at -> listOf(at + n, at - n).forEach { c ->
+                        drawCircle(guideColor(g.colorIndex), if (active) 4.5.dp.toPx() else 3.dp.toPx(), c)
+                        if (active) drawCircle(Color.White, 2.dp.toPx(), c)
+                    } }
+                }
                 guides.sortedBy { if (selectedGuide != null && sameGuideObject(it, selectedGuide)) 0 else 1 }
-                    .flatMap { guide -> listOf(guide.start to guide, guide.end to guide) }.filterNot { (p, g) -> smoothJoint(p, g) || g.id in smoothIds || g.id in filledIds && !(selectedGuide != null && sameGuideObject(g, selectedGuide)) }
+                    .flatMap { guide -> listOf(guide.start to guide, guide.end to guide) }.filterNot { (p, g) -> barStraight(g) || smoothJoint(p, g) || g.id in smoothIds || g.id in filledIds && !(selectedGuide != null && sameGuideObject(g, selectedGuide)) }
                     .fold(emptyList<Pair<Pt, GuideLine>>()) { vertices, vertex -> if (vertices.any { distance(it.first, vertex.first) < 0.6 }) vertices else vertices + vertex }
                     .forEach { (point, guide) ->
                         val center = viewAt(point)
@@ -7893,7 +7955,17 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
             // a wide orange band for a whole object (shape, broken line, 3D object), a thin one for a single line.
             pickedOutlines.forEach { (pts, whole) -> pts.zipWithNext().forEach { (a, b) ->
                 val from = viewAt(Pt(a.x, a.y)); val to = viewAt(Pt(b.x, b.y))
-                if (whole) { drawLine(Color(0x99FF8F00), from, to, strokeWidth = 11.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round); drawLine(Color(0xFFE65100), from, to, strokeWidth = 2.dp.toPx()) }
+                // A picked bar is shown by its own border in orange, not a line down its middle.
+                val pa = Pt(a.x, a.y); val pb = Pt(b.x, b.y)
+                val bar = guides.firstOrNull { g -> g.id in memberBands && g.curveMid == null && ((distance(g.start, pa) < 0.6 && distance(g.end, pb) < 0.6) || (distance(g.start, pb) < 0.6 && distance(g.end, pa) < 0.6)) }
+                val axis = to - from
+                if (bar != null && axis.getDistance() > 1f) {
+                    val bandPx = (memberBands.getValue(bar.id).second * fit).coerceAtLeast(3.dp.toPx())
+                    val n = Offset(-axis.y, axis.x) / axis.getDistance() * (bandPx / 2f)
+                    val outline = androidx.compose.ui.graphics.Path().apply { moveTo((from + n).x, (from + n).y); lineTo((to + n).x, (to + n).y); lineTo((to - n).x, (to - n).y); lineTo((from - n).x, (from - n).y); close() }
+                    drawPath(outline, Color(0x33FF8F00))
+                    drawPath(outline, Color(0xFFE65100), style = Stroke((if (whole) 3f else 2.5f).dp.toPx()))
+                } else if (whole) { drawLine(Color(0x99FF8F00), from, to, strokeWidth = 11.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round); drawLine(Color(0xFFE65100), from, to, strokeWidth = 2.dp.toPx()) }
                 else drawLine(Color(0xCCFF8F00), from, to, strokeWidth = 6.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
             } }
             itemRect?.let { (a, b) ->
@@ -9642,10 +9714,12 @@ private fun smoothOutlineIds(guides: List<GuideLine>): Set<Int> =
     guides.filter { it.pathId != null }.groupBy { it.plane to it.pathId }.values
         .filter { p -> p.size >= 6 && p.all { it.curveMid != null } || p.size >= 24 || p.all { it.hole } }.flatten().map { it.id }.toSet() +
         guides.filter { it.hole }.map { it.id }
+/** Half the width of each bar in the view being edited (canvas pixels): its corners count as its ends. */
+private var barEndReach: Map<Int, Double> = emptyMap()
 private fun closestGuideEndpoint(point: Pt, guides: List<GuideLine>, radius: Double): GuideEndpoint? =
     guides.flatMap { guide -> listOf(GuideEndpoint(guide.id, true) to guide.start, GuideEndpoint(guide.id, false) to guide.end) }
-        .minByOrNull { distance(point, it.second) }
-        ?.takeIf { distance(point, it.second) <= radius }
+        .minByOrNull { distance(point, it.second) - (barEndReach[it.first.guideId] ?: 0.0) }
+        ?.takeIf { distance(point, it.second) <= radius + (barEndReach[it.first.guideId] ?: 0.0) }
         ?.first
 
 private fun segmentIntersection(a: Pt, b: Pt, c: Pt, d: Pt): Pt? {
