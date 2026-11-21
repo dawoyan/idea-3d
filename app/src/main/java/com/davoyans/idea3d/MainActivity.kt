@@ -307,6 +307,114 @@ private enum class SolidMode { JOIN, CUT, COMMON }
 internal data class JoinType(val id: String, val name: String, val detail: String)
 private data class Joint(val id: Int, val a: Pair<ModelPlane, Int>, val b: Pair<ModelPlane, Int>, val typeId: String, val count: Int, val at: Vec3)
 private data class JoinEnd(val key: Pair<ModelPlane, Int>, val at: Vec3, val free: Boolean)
+
+/** A compact, self-contained hand-off package for the person building the job.
+ * It deliberately uses SVG for drawings: it opens as a picture everywhere and
+ * remains sharp enough to print or inspect at any size. */
+private data class MasterExportSnapshot(
+    val name: String,
+    val unit: String,
+    val guides: List<GuideLine>,
+    val materials: List<Material>,
+    val joints: List<Joint>,
+    val joinTypes: List<JoinType>,
+    val guideLengthsMm: Map<Pair<ModelPlane, Int>, Double>,
+    val modelSegments: List<Pair<Vec3, Vec3>>,
+    val source: Bitmap?
+)
+
+private object MasterExport {
+    private fun csv(value: String) = '"' + value.replace("\"", "\"\"") + '"'
+    private fun esc(value: String) = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+    private fun lengthOf(g: GuideLine): Double {
+        val points = guidePoints(g)
+        return points.zipWithNext().sumOf { (a, b) -> hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble()) }
+    }
+    private fun drawingSvg(title: String, guides: List<GuideLine>): String {
+        val points = guides.flatMap { guidePoints(it) }
+        val left = (points.minOfOrNull { it.x } ?: 0f) - 30f; val top = (points.minOfOrNull { it.y } ?: 0f) - 30f
+        val right = (points.maxOfOrNull { it.x } ?: 100f) + 30f; val bottom = (points.maxOfOrNull { it.y } ?: 100f) + 30f
+        fun n(v: Float) = DecimalFormat("0.##").format(v)
+        return buildString {
+            append("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"${n(left)} ${n(top)} ${n(right-left)} ${n(bottom-top)}\">\n")
+            append("<rect x=\"$left\" y=\"$top\" width=\"${right-left}\" height=\"${bottom-top}\" fill=\"white\"/><text x=\"$left\" y=\"${top+18}\" font-family=\"sans-serif\" font-size=\"12\">${esc(title)}</text>\n")
+            guides.forEach { g ->
+                val p = guidePoints(g)
+                if (p.size > 1) append("<path d=\"M ${p.joinToString(" L ") { "${n(it.x)} ${n(it.y)}" }}\" fill=\"none\" stroke=\"#263936\" stroke-width=\"2\"/>\n")
+                p.forEach { append("<circle cx=\"${n(it.x)}\" cy=\"${n(it.y)}\" r=\"2.4\" fill=\"#8b5e3c\"/>\n") }
+            }
+            append("</svg>")
+        }
+    }
+    private fun isometricSvg(title: String, segments: List<Pair<Vec3, Vec3>>): String {
+        fun p(v: Vec3) = Pair((v.x - v.z * 0.72).toFloat(), (v.y + (v.x + v.z) * 0.36).toFloat())
+        val points = segments.flatMap { listOf(p(it.first), p(it.second)) }
+        val left = (points.minOfOrNull { it.first } ?: 0f) - 20f; val top = (points.minOfOrNull { it.second } ?: 0f) - 30f
+        val right = (points.maxOfOrNull { it.first } ?: 100f) + 20f; val bottom = (points.maxOfOrNull { it.second } ?: 100f) + 20f
+        fun n(v: Float) = DecimalFormat("0.##").format(v)
+        return buildString {
+            append("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"${n(left)} ${n(top)} ${n(right-left)} ${n(bottom-top)}\"><rect x=\"$left\" y=\"$top\" width=\"${right-left}\" height=\"${bottom-top}\" fill=\"white\"/><text x=\"$left\" y=\"${top+18}\" font-family=\"sans-serif\" font-size=\"12\">${esc(title)}</text>")
+            segments.forEach { (a, b) -> val x = p(a); val y = p(b); append("<line x1=\"${n(x.first)}\" y1=\"${n(x.second)}\" x2=\"${n(y.first)}\" y2=\"${n(y.second)}\" stroke=\"#61442f\" stroke-width=\"2\"/>") }
+            append("</svg>")
+        }
+    }
+    fun write(file: File, snapshot: MasterExportSnapshot) {
+        val materialById = snapshot.materials.associateBy { it.id }
+        val barCuts = snapshot.guides.mapNotNull { g ->
+            val m = g.materialId?.let(materialById::get)?.takeUnless { it.isSheet } ?: return@mapNotNull null
+            Triple(m, g, snapshot.guideLengthsMm[g.plane to g.id] ?: lengthOf(g))
+        }
+        val sheetShapes = ModelPlane.entries.flatMap { plane ->
+            closedGuideShapes(snapshot.guides.filter { it.plane == plane }).mapNotNull { path ->
+                val m = path.firstNotNullOfOrNull { it.materialId?.let(materialById::get) }?.takeIf { it.isSheet } ?: return@mapNotNull null
+                val p = shapePoints(path); val area = abs(p.indices.sumOf { i -> val a = p[i]; val b = p[(i + 1) % p.size]; (a.x * b.y - b.x * a.y).toDouble() }) / 2
+                Triple(m, plane, area)
+            }
+        }
+        ZipOutputStream(file.outputStream().buffered()).use { zip ->
+            fun text(path: String, content: String) { zip.putNextEntry(ZipEntry(path)); zip.write(content.toByteArray(Charsets.UTF_8)); zip.closeEntry() }
+            fun binary(path: String, bytes: ByteArray) { zip.putNextEntry(ZipEntry(path)); zip.write(bytes); zip.closeEntry() }
+            val report = buildString {
+                appendLine("IDEA 3D — MASTER WORK PACKAGE")
+                appendLine(snapshot.name); appendLine("Units: ${snapshot.unit}"); appendLine()
+                appendLine("Open report.html first. It links the printable Front, Top and Profile drawings.")
+                appendLine("MATERIAL PURCHASE")
+                barCuts.groupBy { it.first.id }.values.forEach { group ->
+                    val m = group.first().first; val required = group.sumOf { it.third }; val stock = m.stockLengthMm
+                    val units = stock?.let { kotlin.math.ceil(required / it).toInt() }
+                    appendLine("- ${m.name}: ${DecimalFormat("0.#").format(required)} mm total" + if (units != null) "; buy $units × ${DecimalFormat("0.#").format(stock)} mm; offcut ${DecimalFormat("0.#").format(units * stock - required)} mm" else "")
+                }
+                sheetShapes.groupBy { it.first.id }.values.forEach { group ->
+                    val m = group.first().first; val required = group.sumOf { it.third }; val stockArea = (m.stockWidthMm ?: 0.0) * (m.stockHeightMm ?: 0.0)
+                    val units = stockArea.takeIf { it > 0 }?.let { kotlin.math.ceil(required / it).toInt() }
+                    appendLine("- ${m.name}: ${DecimalFormat("0.#").format(required)} square drawing-px" + if (units != null) "; buy $units sheet(s); unused ${DecimalFormat("0.#").format(units * stockArea - required)} square drawing-px" else "")
+                }
+                appendLine(); appendLine("JOINS / FASTENERS")
+                snapshot.joints.groupBy { it.typeId }.forEach { (id, list) ->
+                    val type = snapshot.joinTypes.firstOrNull { it.id == id }
+                    appendLine("- ${type?.name ?: id}: ${list.sumOf { it.count }} (${type?.detail.orEmpty()})")
+                }
+                if (snapshot.joints.isEmpty()) appendLine("- No joins were recorded.")
+            }
+            text("README.txt", report)
+            text("materials-and-cut-list.csv", buildString {
+                appendLine("material,part,view,cut_length_drawing_px,stock_length_mm")
+                barCuts.forEachIndexed { i, (m, g, length) -> appendLine("${csv(m.name)},${csv("Bar ${i+1}")},${g.plane.label},${DecimalFormat("0.##").format(length)},${m.stockLengthMm ?: ""}") }
+                appendLine(); appendLine("sheet_material,view,area_drawing_px,stock_width_mm,stock_height_mm")
+                sheetShapes.forEach { (m, plane, area) -> appendLine("${csv(m.name)},${plane.label},${DecimalFormat("0.##").format(area)},${m.stockWidthMm ?: ""},${m.stockHeightMm ?: ""}") }
+            })
+            text("joins-and-fasteners.csv", buildString {
+                appendLine("join,type,detail,count,first_part,second_part")
+                snapshot.joints.forEach { j -> val type = snapshot.joinTypes.firstOrNull { it.id == j.typeId }; appendLine("${j.id},${csv(type?.name ?: j.typeId)},${csv(type?.detail.orEmpty())},${j.count},${j.a.first.label} ${j.a.second},${j.b.first.label} ${j.b.second}") }
+            })
+            ModelPlane.entries.forEach { plane -> text("views/${plane.name.lowercase()}.svg", drawingSvg("${snapshot.name} — ${plane.label} view", snapshot.guides.filter { it.plane == plane })) }
+            text("views/3d-wireframe.svg", isometricSvg("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
+            // The front image is useful to a workshop as a visual reference alongside the vector cut drawings.
+            snapshot.source?.let { image -> ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 92, out); binary("reference-picture.png", out.toByteArray()) } }
+            text("report.html", """<!doctype html><meta charset=\"utf-8\"><title>${esc(snapshot.name)} — Master package</title><h1>${esc(snapshot.name)}</h1><p>Open <b>README.txt</b> for quantities, purchase units, waste and joins. The drawings below are printable vector views.</p><ul><li><a href=\"materials-and-cut-list.csv\">Materials and cut list</a></li><li><a href=\"joins-and-fasteners.csv\">Joins and fasteners</a></li><li><a href=\"views/front.svg\">Front view</a></li><li><a href=\"views/top.svg\">Top view</a></li><li><a href=\"views/profile.svg\">Profile view</a></li><li><a href=\"views/3d-wireframe.svg\">3D wireframe view</a></li></ul>""")
+        }
+    }
+}
 /** The join library: kinds of fastening, kept for every project; the user adds and edits them. */
 internal object JoinLibrary {
     val defaults = listOf(
@@ -1672,6 +1780,55 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val result = withContext(Dispatchers.IO) { runCatching { ProjectStore.exportProject(context, id, uri) } }
             result.onSuccess { logToast(context, "Project exported", Toast.LENGTH_SHORT).show() }
                 .onFailure { discardEmpty(uri); logToast(context, "Could not export project: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+        }
+    }
+    // Unlike the project archive, this is intentionally readable by a workshop without Idea 3D.
+    val masterExporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        val staged = File(context.cacheDir, "idea3d-master-package.zip")
+        if (uri == null) { staged.delete(); return@rememberLauncherForActivityResult }
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching {
+                require(staged.isFile && staged.length() > 0) { "The master package is unavailable. Please export again." }
+                val stream = runCatching { context.contentResolver.openOutputStream(uri, "wt") }.getOrNull()
+                    ?: context.contentResolver.openOutputStream(uri) ?: error("Cannot open the selected file")
+                staged.inputStream().use { input -> stream.use { output -> input.copyTo(output) } }
+                staged.delete()
+            } }
+            if (result.isFailure) discardEmpty(uri)
+            result.onSuccess { logToast(context, "Master package exported", Toast.LENGTH_LONG).show() }
+                .onFailure { logToast(context, "Could not export master package: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
+        }
+    }
+    fun exportForMaster() {
+        if (projectId == null) { logToast(context, "Open or create a drawing first", Toast.LENGTH_SHORT).show(); return }
+        val guideSnapshot = allGuides()
+        val setup = modelSetup()
+        val lengths = guideSnapshot.associate { g ->
+            val mapping = setup.mapping(g.plane)
+            val points = guidePoints(g); val steps = (points.size - 1).coerceAtLeast(1)
+            val mm = if (mapping == null) 0.0 else points.withIndex().zipWithNext().sumOf { (a, b) ->
+                val za = g.startZMm + (g.endZMm - g.startZMm) * a.index / steps
+                val zb = g.startZMm + (g.endZMm - g.startZMm) * b.index / steps
+                (mapping.model(b.value, zb) - mapping.model(a.value, za)).length
+            }
+            (g.plane to g.id) to mm
+        }
+        val segments = guideSnapshot.flatMap { g ->
+            val mapping = setup.mapping(g.plane) ?: return@flatMap emptyList()
+            val points = guidePoints(g); val steps = (points.size - 1).coerceAtLeast(1)
+            points.withIndex().zipWithNext().map { (a, b) ->
+                val za = g.startZMm + (g.endZMm - g.startZMm) * a.index / steps
+                val zb = g.startZMm + (g.endZMm - g.startZMm) * b.index / steps
+                mapping.model(a.value, za) to mapping.model(b.value, zb)
+            }
+        }
+        val snapshot = MasterExportSnapshot(projectName.ifBlank { "Idea 3D project" }, unit, guideSnapshot, materials, joinUi.joints, joinUi.types, lengths, segments, bitmap)
+        scope.launch {
+            val result = withContext(Dispatchers.Default) { runCatching { MasterExport.write(File(context.cacheDir, "idea3d-master-package.zip"), snapshot) } }
+            result.onSuccess {
+                val safe = projectName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "Idea-3D" }
+                masterExporter.launch("$safe-master-package.zip")
+            }.onFailure { logToast(context, "Could not prepare master package: ${it.localizedMessage}", Toast.LENGTH_LONG).show() }
         }
     }
     fun writeStagedModel(uri: Uri?, extension: String) {
@@ -6556,7 +6713,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     // This is also the project menu for a blank drawing: importing a 3D object must not
     // require a reference photo first.
-    if (showPictureEdit) PictureEditDialog(projectName, unit, pictureOptions, scale != null, bitmap != null, onExportImage = {
+    if (showPictureEdit) PictureEditDialog(projectName, unit, pictureOptions, scale != null, bitmap != null, onExportForMaster = { showPictureEdit = false; exportForMaster() }, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); logToast(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onExportDxf = { showPictureEdit = false; showDxfExport = true }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onCalibrate = { showPictureEdit = false; tool = Tool.CALIBRATE; logToast(context, "Tap two points of a known distance", Toast.LENGTH_LONG).show() }, onSaveMaterial = {
         // The selected shape, or else the biggest closed shape that isn't a hole inside another one.
@@ -8819,7 +8976,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     }, confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onSave(name.trim()) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, hasPicture: Boolean, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onCalibrate: () -> Unit = {}, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
+@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, hasPicture: Boolean, onExportForMaster: () -> Unit, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onCalibrate: () -> Unit = {}, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
     var name by remember { mutableStateOf(currentName) }
     var unit by remember { mutableStateOf(currentUnit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
@@ -8831,6 +8988,8 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
         text = {
             Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Project name") }, singleLine = true)
+                Button(onClick = onExportForMaster, modifier = Modifier.fillMaxWidth()) { Text("Export for master") }
+                Text("Materials to buy, offcuts, cut list, joins / fasteners and Front, Top, Profile drawings in one ZIP.", fontSize = 12.sp, color = Color(0xFF53615D))
                 if (hasPicture) OutlinedButton(onClick = onExportImage) { Text("Export picture") }
                 OutlinedButton(onClick = onExport3d) { Text("Export 3D model (STL or 3MF)") }
                 OutlinedButton(onClick = onExportDxf) { Text("Export 2D drawing (DXF)") }
