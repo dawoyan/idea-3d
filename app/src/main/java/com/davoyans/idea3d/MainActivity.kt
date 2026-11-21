@@ -4596,7 +4596,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
         fun ofTriple(t: Triple<ModelPlane, Int, Boolean>): JoinEnd? = planeGeometry(t.first).guides.firstOrNull { it.id == t.second }?.let { g -> if (t.third) end(t.first, g, g.start, g.startZMm) else end(t.first, g, g.end, g.endZMm) }
         val ends = if (selectMode) {
-            if (pickedItems.isNotEmpty() || pickedSegments.isNotEmpty()) return null
+            // Two picked points name the joint, whatever else is picked (joined pieces come picked as a group).
+            if (pickedPoints.size != 2) return null
             pickedPoints.mapNotNull(::ofTriple)
         } else if (tool == Tool.ADJUST) {
             selectedVertices.mapNotNull { v -> guides.firstOrNull { g -> distance(g.start, v) < 0.6 || distance(g.end, v) < 0.6 }?.let { g -> val k = homeKey(g); val start = distance(g.start, v) < 0.6
@@ -4619,7 +4620,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val axis = (dstMap.model(bar.end, bar.endZMm) - dstMap.model(bar.start, bar.startZMm)).normalized()
         val face = materials.firstOrNull { it.id == bar.materialId && !it.isSheet }?.profile?.widthMm?.div(2.0) ?: 0.0
         val dir = src.at - dst.at; val across = dir - axis * (dir dot axis)
-        val onto = if (face > 0 && across.length > 1e-6) dst.at + across.normalized() * face else dst.at
+        val srcFace = itemGuides(src.key).firstNotNullOfOrNull { g -> materials.firstOrNull { it.id == g.materialId && !it.isSheet }?.profile?.widthMm?.div(2.0) } ?: 0.0
+        // Already touching (the points lie within the two bars' widths): nothing moves, the joint goes between them.
+        val touching = dir.length <= 2.0 * (face + srcFace) + 1.0
+        val onto = if (touching) src.at else if (face > 0 && across.length > 1e-6) dst.at + across.normalized() * face else dst.at
         pushUndo()
         moveItem(src.key, onto - src.at)
         groupTogether(src.key, dst.key)
@@ -4627,7 +4631,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         ActionLog.add("fasten at point: moved ${src.key.first.label} line ${src.key.second} by ${format(moved)} mm onto ${dst.key.first.label} line ${dst.key.second}")
         pickedPoints = emptyList(); selectedVertices = emptyList(); selectedGhostPoints = emptyList()
         logToast(context, if (moved < 0.5) "Joined where you picked; they move as one now" else "Joined: ${itemNameLate(src.key)} moved ${format(moved)} mm to the point you picked; they move as one now", Toast.LENGTH_LONG).show()
-        return onto
+        return if (touching) (src.at + dst.at) * 0.5 else onto
     }
     /** Every join first asks how the pieces are joined (screw, bolt, bracket, …) and records it. */
     fun askJoin(a: Pair<ModelPlane, Int>, b: Pair<ModelPlane, Int>, fasten: () -> Vec3?) {
@@ -5588,7 +5592,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         }
                         profiles.size == 1 && isClosedShape(profiles.first()) -> "${selectedSummary}Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
                         profiles.size >= 2 && profiles.all(::isClosedShape) -> "${selectedSummary}Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
-                        pickedItems.isEmpty() && pickedPoints.size == 2 -> "${selectedSummary}on two pieces? Tap Join, then choose how they are joined"
+                        pickedPoints.size == 2 -> "${selectedSummary}on two pieces? Tap Join, then choose how they are joined"
                         // Otherwise: what is picked and what the toolbar does with it.
                         else -> "${selectedSummary}tap a picked one again to unpick it"
                     }
