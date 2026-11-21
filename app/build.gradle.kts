@@ -19,8 +19,8 @@ android {
         applicationId = "com.davoyans.idea3d"
         minSdk = 26
         targetSdk = 36
-        versionCode = 127
-        versionName = "0.10.86"
+        versionCode = 128
+        versionName = "0.10.87"
     }
     signingConfigs {
         create("release") {
