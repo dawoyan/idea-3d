@@ -357,6 +357,8 @@ private class JoinUi {
     var pending by mutableStateOf<((JoinType, Int) -> Unit)?>(null)
     var showLibrary by mutableStateOf(false)
     var types by mutableStateOf(JoinLibrary.defaults)
+    /** Joint names next to their marks on the drawing (off: just the screw mark). */
+    var showLabels by mutableStateOf(true)
     /** Joint marks in the view being drawn, refreshed with the bars each frame. */
     var marks: List<Pair<Pt, String>> = emptyList()
     fun label(j: Joint) = "${types.firstOrNull { it.id == j.typeId }?.name ?: j.typeId}${if (j.count > 1) " ×${j.count}" else ""}"
@@ -367,11 +369,11 @@ private class JoinUi {
 }
 @Composable private fun JoinDialogs(ui: JoinUi, projectId: String?, nameOf: (Pair<ModelPlane, Int>) -> String) {
     val context = LocalContext.current
-    LaunchedEffect(Unit) { ui.types = JoinLibrary.load(context) }
+    LaunchedEffect(Unit) { ui.types = JoinLibrary.load(context); ui.showLabels = context.getSharedPreferences("join-library", Context.MODE_PRIVATE).getBoolean("labels", true) }
     LaunchedEffect(projectId) { ui.joints = projectId?.let { JointStore.load(context, it) }.orEmpty(); ui.jointsFor = projectId }
     LaunchedEffect(ui.joints) { val id = projectId; if (id != null && ui.jointsFor == id) JointStore.save(context, id, ui.joints) }
     ui.pending?.let { run -> JoinTypeDialog(ui.types, JoinLibrary.last(context), onJoin = { t, n -> ui.pending = null; run(t, n) }, onLibrary = { ui.showLibrary = true }, onDismiss = { ui.pending = null }) }
-    if (ui.showLibrary) JoinLibraryDialog(ui.types, ui.joints.map { j -> "${ui.label(j)} · ${nameOf(j.a)} + ${nameOf(j.b)}" },
+    if (ui.showLibrary) JoinLibraryDialog(ui.types, ui.showLabels, { on -> ui.showLabels = on; context.getSharedPreferences("join-library", Context.MODE_PRIVATE).edit().putBoolean("labels", on).apply() }, ui.joints.map { j -> "${ui.label(j)} · ${nameOf(j.a)} + ${nameOf(j.b)}" },
         onSave = { list -> ui.types = list; JoinLibrary.save(context, list) }, onDeleteJoint = { i -> ui.joints = ui.joints.filterIndexed { k, _ -> k != i } }, onDismiss = { ui.showLibrary = false })
 }
 @Composable private fun JoinTypeDialog(types: List<JoinType>, lastId: String?, onJoin: (JoinType, Int) -> Unit, onLibrary: () -> Unit, onDismiss: () -> Unit) {
@@ -396,10 +398,13 @@ private class JoinUi {
     }, confirmButton = { TextButton(enabled = chosen != null, onClick = { chosen?.let { onJoin(it, count) } }) { Text("Join") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
-@Composable private fun JoinLibraryDialog(types: List<JoinType>, jointsText: List<String>, onSave: (List<JoinType>) -> Unit, onDeleteJoint: (Int) -> Unit, onDismiss: () -> Unit) {
+@Composable private fun JoinLibraryDialog(types: List<JoinType>, showLabels: Boolean, onLabels: (Boolean) -> Unit, jointsText: List<String>, onSave: (List<JoinType>) -> Unit, onDeleteJoint: (Int) -> Unit, onDismiss: () -> Unit) {
     var list by remember { mutableStateOf(types) }
     AlertDialog(onDismissRequest = { onSave(list.filter { it.name.isNotBlank() }); onDismiss() }, title = { Text("Join library") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState())) {
+            Row(Modifier.fillMaxWidth().clickable { onLabels(!showLabels) }, verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = showLabels, onCheckedChange = onLabels); Text("Show joint names on the drawing (Sizes off hides them too)", fontSize = 13.sp)
+            }
             Text("Ways of joining you pick from on each Join. Edit them to match your screws, bolts and brackets.", fontSize = 12.sp, color = Color(0xFF4D5A57))
             list.forEachIndexed { i, t ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -5319,7 +5324,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         return guides.mapNotNull { g ->
             val m = materials.firstOrNull { it.id == g.materialId && !it.isSheet } ?: return@mapNotNull null
             g.id to (m.argb to (m.profile.widthMm * pxPerMm).toFloat())
-        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 }; joinUi.marks = joinUi.joints.map { j -> here.pixel(j.at) to joinUi.label(j) } + listOfNotNull(freeTurn.pivot?.let { here.pixel(it) to "turns here" }) }
+        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 }; joinUi.marks = joinUi.joints.map { j -> here.pixel(j.at) to if (joinUi.showLabels) joinUi.label(j) else "" } + listOfNotNull(freeTurn.pivot?.let { here.pixel(it) to "turns here" }) }
     }
     fun memberSections(): List<Pair<Int, List<List<Pt>>>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList()
@@ -8216,6 +8221,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 val c = viewAt(p); val r = 6.dp.toPx()
                 drawCircle(Color.White, r + 1.5.dp.toPx(), c); drawCircle(Color(0xFF37474F), r, c)
                 drawLine(Color.White, Offset(c.x - r * 0.6f, c.y), Offset(c.x + r * 0.6f, c.y), 1.5.dp.toPx()); drawLine(Color.White, Offset(c.x, c.y - r * 0.6f), Offset(c.x, c.y + r * 0.6f), 1.5.dp.toPx())
+                if (label.isEmpty() || !showSizes && label != "turns here") return@forEach
                 val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 11.sp.toPx(); isFakeBoldText = true; style = Paint.Style.STROKE; strokeWidth = 3.dp.toPx(); color = AndroidColor.WHITE }
                 drawContext.canvas.nativeCanvas.drawText(label, c.x + r + 4.dp.toPx(), c.y + 4.dp.toPx(), paint)
                 paint.style = Paint.Style.FILL; paint.color = AndroidColor.rgb(0x37, 0x47, 0x4F)

@@ -80,11 +80,47 @@ internal class ViewerMesh private constructor(
                 CollisionBox(objectId, low, high)
             }
         }
+        // Boxes only say where to look: a sloped beam's box covers the posts it rests on. The real test is the
+        // separating-axis test on each object's corners (exact for bars and boards), so touching faces never count.
+        class Hull(val points: List<FloatArray>, val normals: List<FloatArray>, val edges: List<FloatArray>)
+        fun unit(v: FloatArray): FloatArray? { val l = kotlin.math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); return if (l < 1e-9f) null else floatArrayOf(v[0] / l, v[1] / l, v[2] / l) }
+        fun distinctDirs(list: List<FloatArray>, cap: Int): List<FloatArray> {
+            val seen = HashSet<Triple<Int, Int, Int>>(); val out = ArrayList<FloatArray>()
+            for (d in list) {
+                val sign = if (d[0] < -1e-6f || (kotlin.math.abs(d[0]) <= 1e-6f && (d[1] < -1e-6f || (kotlin.math.abs(d[1]) <= 1e-6f && d[2] < 0f)))) -1f else 1f
+                val k = Triple(Math.round(d[0] * sign * 500f), Math.round(d[1] * sign * 500f), Math.round(d[2] * sign * 500f))
+                if (seen.add(k)) { out += d; if (out.size >= cap) break }
+            }
+            return out
+        }
+        fun hull(objectId: Int): Hull {
+            val points = ArrayList<FloatArray>(); val normals = ArrayList<FloatArray>(); val edges = ArrayList<FloatArray>()
+            triangleObjects.indices.filter { triangleObjects[it] == objectId }.forEach { t ->
+                val c = (0..2).map { k -> floatArrayOf(vertex(t * 3 + k, 0), vertex(t * 3 + k, 1), vertex(t * 3 + k, 2)) }
+                points += c
+                val e1 = floatArrayOf(c[1][0] - c[0][0], c[1][1] - c[0][1], c[1][2] - c[0][2]); val e2 = floatArrayOf(c[2][0] - c[0][0], c[2][1] - c[0][1], c[2][2] - c[0][2])
+                unit(floatArrayOf(e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]))?.let { normals += it }
+                unit(e1)?.let { edges += it }; unit(e2)?.let { edges += it }
+            }
+            return Hull(points, distinctDirs(normals, 48), distinctDirs(edges, 24))
+        }
+        val hulls = HashMap<Int, Hull>()
+        fun overlapOn(axis: FloatArray, a: Hull, b: Hull): Float {
+            var aLo = Float.POSITIVE_INFINITY; var aHi = Float.NEGATIVE_INFINITY; var bLo = Float.POSITIVE_INFINITY; var bHi = Float.NEGATIVE_INFINITY
+            a.points.forEach { p -> val d = p[0] * axis[0] + p[1] * axis[1] + p[2] * axis[2]; aLo = minOf(aLo, d); aHi = maxOf(aHi, d) }
+            b.points.forEach { p -> val d = p[0] * axis[0] + p[1] * axis[1] + p[2] * axis[2]; bLo = minOf(bLo, d); bHi = maxOf(bHi, d) }
+            return minOf(aHi, bHi) - maxOf(aLo, bLo)
+        }
+        val tolerance = 0.003f
+        fun reallyOverlap(a: Hull, b: Hull): Boolean {
+            val axes = a.normals + b.normals + a.edges.flatMap { e -> b.edges.mapNotNull { f -> unit(floatArrayOf(e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0])) } }
+            return axes.none { overlapOn(it, a, b) <= tolerance }
+        }
         val colliding = mutableSetOf<Int>()
         boxes.indices.forEach { a -> for (b in a + 1 until boxes.size) {
             val first = boxes[a]; val second = boxes[b]
-            val overlaps = (0..2).all { axis -> minOf(first.high[axis], second.high[axis]) - maxOf(first.low[axis], second.low[axis]) > 0.003f }
-            if (overlaps) { colliding += first.objectId; colliding += second.objectId }
+            val boxesMeet = (0..2).all { axis -> minOf(first.high[axis], second.high[axis]) - maxOf(first.low[axis], second.low[axis]) > tolerance }
+            if (boxesMeet && reallyOverlap(hulls.getOrPut(first.objectId) { hull(first.objectId) }, hulls.getOrPut(second.objectId) { hull(second.objectId) })) { colliding += first.objectId; colliding += second.objectId }
         } }
         boxes.filter { it.objectId in colliding }
     }
