@@ -220,7 +220,7 @@ private data class JunctionAction(val kind: JunctionKind, val firstId: Int, val 
 private data class JunctionArm(val lineId: Int, val endpoint: Pt, val color: Color)
 /** Joining two crossing lines on the canvas: the parts (arms) blink until two are chosen to keep. */
 private data class JoinPick(val action: JunctionAction, val arms: List<JunctionArm>, val selected: Set<Int> = emptySet(), val keepRemaining: Boolean = false, val paths: List<List<Pt>> = emptyList())
-private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList(), val plane: ModelPlane = ModelPlane.FRONT, val stash: Map<ModelPlane, PlaneGeometry> = emptyMap(), val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList(), val itemGroups: List<List<Pair<ModelPlane, Int>>> = emptyList(), val models: List<ImportedModel> = emptyList(), val lofts: List<LoftSurface> = emptyList())
+private data class UndoSnapshot(val image: Bitmap?, val lines: List<MeasureLine>, val guides: List<GuideLine>, val guidesDetected: Boolean, val rotation: Float, val unit: String, val tool: Tool, val extrusions: List<Extrusion> = emptyList(), val plane: ModelPlane = ModelPlane.FRONT, val stash: Map<ModelPlane, PlaneGeometry> = emptyMap(), val frames: Map<ModelPlane, PlaneFrame> = emptyMap(), val solidOps: List<SolidOp> = emptyList(), val itemGroups: List<List<Pair<ModelPlane, Int>>> = emptyList(), val models: List<ImportedModel> = emptyList(), val lofts: List<LoftSurface> = emptyList(), val picked: Pair<List<Pair<ModelPlane, Int>>, List<Triple<ModelPlane, Int, Boolean>>>? = null)
 /**
  * Where a plane's canvas sits in model space: canvas pixel ([originU], [originV]) is the plane's (0, 0) and the
  * canvas is [width] x [height] pixels. Cropping or growing a canvas moves the origin with the drawing, so the
@@ -345,6 +345,34 @@ private class FreeTurn {
     var grab: (Pt, Double) -> Boolean = { _, _ -> false }
     var by: (Double) -> Unit = {}
     fun clear() { on = false; key = null; pivot = null; end = null; lastPx = null; turned = 0.0 }
+}
+/** How locked items show, and which ones flash when they block an action. Kept outside the big app function. */
+private object LockedView {
+    /** Locked lines drawn in other views, shown grey here. */
+    var ghostKeys: Set<Pair<ModelPlane, Int>> = emptySet()
+    /** Lines (this view's ids) and other views' lines that flash when locked items block an action. */
+    var flashIds: Set<Int> = emptySet()
+    var flashGhosts: Set<Pair<ModelPlane, Int>> = emptySet()
+    private var lastText = ""; private var lastAt = 0L
+    /** One toast per message while a held arrow keeps repeating it. */
+    fun toast(context: Context, text: String) {
+        val now = System.currentTimeMillis()
+        if (text != lastText || now - lastAt > 2000) { lastText = text; lastAt = now; logToast(context, text, Toast.LENGTH_SHORT).show() }
+    }
+}
+/** A locked item's look: its colour without saturation, halfway to the white page. */
+private fun lockedLook(c: Color): Color {
+    val grey = 0.3f * c.red + 0.59f * c.green + 0.11f * c.blue
+    return Color(grey + (1f - grey) * 0.5f, grey + (1f - grey) * 0.5f, grey + (1f - grey) * 0.5f, c.alpha * 0.75f)
+}
+/** The 3D Selection view: the whole scene with the picked items lit; taps pick and unpick. */
+private val selectionView = SelectionView()
+private class SelectionView {
+    var on by mutableStateOf(false)
+    /** Wired by the app where its helpers are declared, so the big app function only reads this object. */
+    var tap: (Int) -> Unit = {}
+    var styles: () -> IntArray? = { null }
+    var bar: @Composable () -> Unit = {}
 }
 /** Runs [content] as its own composable lambda, so a big block leaves the app function's bytecode. */
 @Composable private fun Scoped(content: @Composable () -> Unit) = content()
@@ -1129,7 +1157,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     var lockedFlashGuideId by remember { mutableStateOf<Int?>(null) }
     var lockedFlashToken by remember { mutableIntStateOf(0) }
     fun flashLockedGuide(guide: GuideLine, action: String) {
-        lockedFlashGuideId = guide.id; lockedFlashToken++
+        lockedFlashGuideId = guide.id; LockedView.flashIds = emptySet(); LockedView.flashGhosts = emptySet(); lockedFlashToken++
         ActionLog.add("blocked locked ${if (guide.pathId != null) "shape/line" else "line"} ${guide.id}: $action")
         logToast(context, "Locked — unlock it before $action", Toast.LENGTH_SHORT).show()
     }
@@ -1448,7 +1476,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
     }
     fun pushUndo(includeImage: Boolean = false) {
-        val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels, lofts)
+        // In the 3D Selection view the selection itself is part of what Undo brings back.
+        val snapshot = UndoSnapshot(if (includeImage) bitmap?.copy(Bitmap.Config.ARGB_8888, true) else null, lines, guides, guidesDetected, levelRotation, unit, tool, extrusions, editPlane, planeStash, planeFrames, solidOps, itemGroups, importedModels, lofts, if (selectionView.on) pickedItems to pickedPoints else null)
         undoHistory = undoHistory + snapshot
     }
     var draggingViewpointPlane by remember { mutableStateOf<ModelPlane?>(null) }
@@ -2343,7 +2372,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             val ids = planeItems.flatMap { itemGuides(it).map { g -> g.id } }.toSet()
             setPlaneShapes(plane, geometry.guides.map { guide -> if (guide.id in ids) guide.copy(locked = locked) else guide }, geometry.extrusions)
         }
-        ActionLog.add(if (locked) "locked ${items.size} item(s)" else "unlocked ${items.size} item(s)")
+        ActionLog.add(if (locked) "lock: ${items.size} item(s)" else "unlock: ${items.size} item(s)")
         logToast(context, if (locked) "Locked: it cannot be changed until unlocked" else "Unlocked", Toast.LENGTH_SHORT).show()
     }
     /** An item's outline as polylines in this view's canvas pixels. */
@@ -2475,6 +2504,35 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     /** Picked items once each (a shape and its hole, or two picks of one group member, are one item). */
     fun distinctPicked() = pickedItems.distinctBy { k -> k.first to (itemGuides(k).minOfOrNull { it.id } ?: k.second) }
+    /** Makes the picked things that are locked flash, here and as lines from other views. */
+    fun flashLockedItems(items: List<Pair<ModelPlane, Int>>, points: List<Triple<ModelPlane, Int, Boolean>>) {
+        LockedView.flashIds = (items.filter { it.first == editPlane }.flatMap { k -> itemGuides(k).map { it.id } } + points.filter { it.first == editPlane }.map { it.second }).toSet()
+        LockedView.flashGhosts = (items.filter { it.first != editPlane }.flatMap { k -> itemGuides(k).map { k.first to it.id } } + points.filter { it.first != editPlane }.map { it.first to it.second }).toSet()
+        lockedFlashGuideId = null; lockedFlashToken++
+    }
+    /**
+     * Runs a move, nudge, turn, align or spread of the picked things without the locked ones: they flash and are
+     * reported. When everything picked is locked nothing runs. The selection itself stays as it was.
+     */
+    fun withUnlockedPicks(action: String, verb: String, run: () -> Unit) {
+        val lockedItems = distinctPicked().filter(::itemLocked); val lockedPoints = pickedPoints.filter(::pointLocked)
+        if (lockedItems.isEmpty() && lockedPoints.isEmpty()) { run(); return }
+        flashLockedItems(lockedItems, lockedPoints)
+        val count = lockedItems.size + lockedPoints.size
+        val words = "$count locked item${if (count == 1) "" else "s"}"
+        ActionLog.add("blocked locked: $count item(s) skipped during $action")
+        val freeItems = pickedItems.filterNot { p -> lockedItems.any { sameItem(it, p) } }
+        val freePoints = pickedPoints.filterNot { p -> lockedPoints.any { it == p } }
+        if (freeItems.isEmpty() && freePoints.isEmpty()) { LockedView.toast(context, "$words — unlock to $verb"); return }
+        val keptItems = pickedItems; val keptPoints = pickedPoints
+        pickedItems = freeItems; pickedPoints = freePoints
+        try { run() } finally {
+            // A turn may move an item to another view and rename it in the picks; keep that, and the locked ones.
+            pickedItems = if (pickedItems == freeItems) keptItems else pickedItems + keptItems.filter { k -> lockedItems.any { sameItem(it, k) } }
+            pickedPoints = if (pickedPoints == freePoints) keptPoints else pickedPoints + lockedPoints
+        }
+        LockedView.toast(context, "$words skipped — unlock to $verb ${if (count == 1) "it" else "them"} too")
+    }
     fun movePicked(delta: Vec3) {
         distinctPicked().forEach { moveItem(it, delta) }
         // Points of items already moved above stay where the item took them.
@@ -3849,7 +3907,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             modelSetup().mapping(editPlane)?.modelDelta((point.x - last.x).toDouble(), (point.y - last.y).toDouble())?.let { d -> importedModels = importedModels.map { if (it.id == selectedModelId) it.copy(center = it.center + d) else it } }
             modelDragLast = point; return
         }
-        itemDragLast?.let { last -> modelSetup().mapping(editPlane)?.modelDelta((point.x - last.x).toDouble(), (point.y - last.y).toDouble())?.let(::movePicked); itemDragLast = point; return }
+        itemDragLast?.let { last -> modelSetup().mapping(editPlane)?.modelDelta((point.x - last.x).toDouble(), (point.y - last.y).toDouble())?.let { d -> withUnlockedPicks("move", "move") { movePicked(d) } }; itemDragLast = point; return }
         if (itemRectStart != null) { itemRectEnd = point; return }
         foreignDrag?.let { foreignDrag = it.copy(current = point); return }
         ghostDragLast?.let { last ->
@@ -4052,7 +4110,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         }
         if (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty())) {
             val step = unitFactorMm(unit) / Math.pow(10.0, (MeasurementPrecision.places[unit] ?: 2).toDouble())
-            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushNudgeUndo("${pickedItems.size} item(s), ${pickedPoints.size} point(s)"); movePicked(it.normalized() * step) }
+            modelSetup().mapping(editPlane)?.modelDelta(dx.toDouble(), dy.toDouble())?.let { pushNudgeUndo("${pickedItems.size} item(s), ${pickedPoints.size} point(s)"); withUnlockedPicks("nudge", "move") { movePicked(it.normalized() * step) } }
             return
         }
         if (selectedVertices.isNotEmpty() || selectedGhostPoints.isNotEmpty()) {
@@ -4193,7 +4251,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             projectId?.let { id -> ProjectStore.imageFile(context, id).outputStream().use { restored.compress(Bitmap.CompressFormat.PNG, 100, it) } }
         }
         editPlane = previous.plane; planeStash = previous.stash; planeFrames = previous.frames; solidOps = previous.solidOps; lofts = previous.lofts; itemGroups = previous.itemGroups; importedModels = previous.models
-        pickedItems = emptyList(); selectedGhostPoints = emptyList(); pickedPoints = emptyList()
+        pickedItems = previous.picked?.first.orEmpty(); selectedGhostPoints = emptyList(); pickedPoints = previous.picked?.second.orEmpty()
         lines = recalculate(previous.lines).map { line -> previous.lines.firstOrNull { it.id == line.id && (it.lengthSource == LengthSource.MANUAL || it.lengthSource == LengthSource.MEASURED) }?.let { line.copy(value = it.value) } ?: line }; guides = previous.guides; guidesDetected = previous.guidesDetected; extrusions = previous.extrusions; selectedExtrusionId = selectedExtrusionId?.takeIf { id -> extrusions.any { it.id == id } }; levelRotation = previous.rotation; unit = previous.unit; tool = previous.tool; referenceCount = lines.count { it.isReference }
         undoHistory = undoHistory.dropLast(1)
     }
@@ -4322,12 +4380,56 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             else -> ModelPlane.PROFILE
         }
     }
-    fun leave3d() { viewerRequest++; viewerBuilding = false; show3d = false; viewerModel = null; viewerEditObject = null; viewerScope = null }
+    fun leave3d() { selectionView.on = false; viewerRequest++; viewerBuilding = false; show3d = false; viewerModel = null; viewerEditObject = null; viewerScope = null }
     fun leave3dToPlane(plane: ModelPlane) {
         leave3d()
         if (plane != editPlane) switchPlane(plane) else fitView()
     }
     fun leave3dToClosestPlane() = leave3dToPlane(closest2dPlane())
+    /** The drawing item a 3D object comes from (a bar's line, a 3D object's outline), or null for imported models and lofts. */
+    fun viewerItem(index: Int): Pair<ModelPlane, Int>? {
+        if (viewerImportedIds.getOrNull(index) != null) return null
+        val (plane, id) = viewerObjects.getOrNull(index) ?: return null
+        val geometry = planeGeometry(plane)
+        if (id < 0) return (-id - 1).takeIf { gid -> geometry.guides.any { it.id == gid } }?.let { plane to it }
+        return geometry.extrusions.firstOrNull { it.id == id }?.guideIds?.firstOrNull()?.let { plane to it }
+    }
+    /** Each 3D object's look: locked ones grey; in the Selection view picked ones lit and the rest faded. */
+    fun viewerStyles(): IntArray = IntArray(viewerObjects.size) { i ->
+        val key = viewerItem(i) ?: return@IntArray if (selectionView.on) ViewerStyle.DIM else ViewerStyle.NORMAL
+        val locked = itemLocked(key); val picked = selectionView.on && pickedItems.any { sameItem(it, key) }
+        when { locked && picked -> ViewerStyle.LOCKED_PICKED; locked -> ViewerStyle.LOCKED; picked -> ViewerStyle.PICKED; selectionView.on -> ViewerStyle.DIM; else -> ViewerStyle.NORMAL }
+    }
+    /** Opens the whole scene in 3D to look over and change the picked items. */
+    fun openSelection3d() {
+        ActionLog.add("open selection 3D: items=${distinctPicked().size}, points=${pickedPoints.size}")
+        selectionView.on = true
+        open3dView()
+    }
+    /** Selection view: a tap picks or unpicks the item under the finger (with its group). Undo brings it back. */
+    fun toggle3d(index: Int) {
+        val key = viewerItem(index) ?: run { logToast(context, "This one can't be picked here", Toast.LENGTH_SHORT).show(); return }
+        val was = pickedItems.any { sameItem(it, key) }
+        pushUndo(); togglePicked(key)
+        ActionLog.add("3D ${if (was) "unpick" else "pick"} ${itemNameLate(key)}; picked items=${distinctPicked().size}")
+    }
+    /** Selection view: every item shown in 3D, or none. */
+    fun pickAll3d(all: Boolean) {
+        pushUndo()
+        if (all) { val keys = viewerObjects.indices.mapNotNull(::viewerItem); pickedItems = keys.fold(pickedItems) { acc, k -> if (acc.any { sameItem(it, k) }) acc else acc + k } }
+        else { pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList() }
+        ActionLog.add("3D select ${if (all) "all" else "none"}; picked items=${distinctPicked().size}")
+    }
+    @Composable fun SelectionBar() {
+        val picks = distinctPicked(); val lockedCount = picks.count(::itemLocked)
+        val lockLabel = when { picks.isEmpty() || lockedCount == 0 -> "Lock"; lockedCount == picks.size -> "Unlock"; else -> "Unlock all" }
+        Row(Modifier.fillMaxWidth().background(Color(0xFFE3ECE9)).padding(horizontal = 6.dp, vertical = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            TextButton(enabled = picks.isNotEmpty(), onClick = { setItemsLocked(picks, lockedCount == 0) }) { Text(lockLabel) }
+            TextButton(onClick = { pickAll3d(pickedItems.isEmpty() && pickedPoints.isEmpty()) }) { Text(if (pickedItems.isEmpty() && pickedPoints.isEmpty()) "Select all" else "Select none") }
+            TextButton(onClick = { ActionLog.add("selection 3D done: items=${distinctPicked().size}, points=${pickedPoints.size}"); leave3d() }) { Text("Done", fontWeight = FontWeight.Bold) }
+        }
+    }
+    selectionView.tap = ::toggle3d; selectionView.styles = ::viewerStyles; selectionView.bar = { SelectionBar() }
     /** Switches to the view a foreign object was drawn in and selects it there, where all drawing tools apply. */
     fun openInOwnView(key: Pair<ModelPlane, Int>) {
         leave3d(); switchPlane(key.first); tool = Tool.ADJUST
@@ -4442,7 +4544,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             importedModels = importedModels.map { if (it.id == id) it.copy(turns = it.turns + (axis to deg)) else it }
             return
         }
-        if (selectMode) { turnItems(pickedItems, pickedPoints, deg); return }
+        if (selectMode) { withUnlockedPicks("turn", "turn") { turnItems(pickedItems, pickedPoints, deg) }; return }
         val key = (selectedWholeGuideId ?: selectedGuideId)?.let { id -> guides.firstOrNull { it.id == id } }?.let(::homeKey)
             ?: selectedForeign?.let { (plane, extrusionId) -> planeGeometry(plane).let { g -> g.extrusions.firstOrNull { it.id == extrusionId }?.guideIds?.firstOrNull()?.let { plane to it } } }
         if (key != null) { turnItems(withGroup(key), emptyList(), deg); return }
@@ -5043,8 +5145,9 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     /** Arrange: line up the picked items' centers on this view's horizontal or vertical, or space them evenly. */
     /** Aligns ([edge] -1 top/left, 0 middle/center, 1 bottom/right, as seen on screen) or spreads the picked things. */
     fun arrangePicked(horizontal: Boolean, distribute: Boolean, edge: Int = 0) {
+        // Locked picks stay put (they flash and are reported); the rest line up or spread.
         if (pickedItems.any(::itemLocked) || pickedPoints.any(::pointLocked)) {
-            logToast(context, "Unlock selected items before aligning or spacing them", Toast.LENGTH_SHORT).show(); return
+            withUnlockedPicks(if (distribute) "spread" else "align", if (distribute) "spread" else "align") { arrangePicked(horizontal, distribute, edge) }; return
         }
         val here = modelSetup().mapping(editPlane) ?: return
         val points = (pickedPoints + markedPoints()).fold(emptyList<Triple<ModelPlane, Int, Boolean>>()) { acc, sel -> if (acc.any { samePoint(it, sel) }) acc else acc + sel }
@@ -5324,7 +5427,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         return guides.mapNotNull { g ->
             val m = materials.firstOrNull { it.id == g.materialId && !it.isSheet } ?: return@mapNotNull null
             g.id to (m.argb to (m.profile.widthMm * pxPerMm).toFloat())
-        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 }; joinUi.marks = joinUi.joints.map { j -> here.pixel(j.at) to if (joinUi.showLabels) joinUi.label(j) else "" } + listOfNotNull(freeTurn.pivot?.let { here.pixel(it) to "turns here" }) }
+        }.toMap().also { bands -> barEndReach = bands.mapValues { it.value.second / 2.0 }; LockedView.ghostKeys = ModelPlane.entries.filter { it != editPlane }.flatMap { p -> planeGeometry(p).guides.filter { it.locked }.map { p to it.id } }.toSet(); joinUi.marks = joinUi.joints.map { j -> here.pixel(j.at) to if (joinUi.showLabels) joinUi.label(j) else "" } + listOfNotNull(freeTurn.pivot?.let { here.pixel(it) to "turns here" }) }
     }
     fun memberSections(): List<Pair<Int, List<List<Pt>>>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList()
@@ -5408,7 +5511,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
      */
     itemNameLate = { itemName(it) }
     fun selectionName(): String? {
-        if (show3d) return null
+        if (show3d && !selectionView.on) return null
+        if (selectionView.on) return "${distinctPicked().size + pickedPoints.size} picked"
         if (selectMode) return when (val n = pickedItems.size + pickedPoints.size + pickedSegments.size) { 0 -> null; 1 -> pickedItems.singleOrNull()?.let { itemName(it) } ?: if (pickedSegments.isNotEmpty()) "Line (part)" else "Point"; else -> "$n picked" }
         selectedModelId?.let { id -> return importedModels.firstOrNull { it.id == id }?.name ?: "Model" }
         selectedForeign?.let { return objectName(it) }
@@ -5419,7 +5523,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     /** Opens the selected thing's own properties (what tapping its name does). */
     fun openSelection() {
-        if (selectMode) { if (pickedItems.size + pickedPoints.size == 1) propertiesPicked(); return }
+        if (selectionView.on) return
+        if (selectMode) { val n = pickedItems.size + pickedPoints.size + pickedSegments.size; if (n == 1) propertiesPicked() else if (n >= 2) openSelection3d(); return }
         selectedModelId?.let { modelDialogId = it; return }
         selectedForeign?.let { foreignDialog = it; return }
         openProperties()?.invoke() ?: selectedLineId?.let { showLineEdit = true }
@@ -5571,6 +5676,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         else Column(Modifier.padding(padding).fillMaxSize()) {
             val editHint = when {
                 !selectMode && tool == Tool.ADJUST && selectedVertices.size + selectedGhostPoints.size >= 2 -> "${selectedVertices.size + selectedGhostPoints.size} points picked · Align, Depth, or Join when they are on two pieces"
+                show3d && selectionView.on -> "Selection: tap an item to pick or unpick it · drag to orbit, two fingers to pan and zoom"
                 selectMode -> {
                     val profiles = distinctPicked()
                     val selectedKind = when {
@@ -5850,8 +5956,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 onEditObject = { index ->
                     viewerImportedIds.getOrNull(index)?.let { importedId ->
                         selectedModelId = importedId; modelDialogId = importedId
-                    } ?: if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index
+                    } ?: if (selectionView.on) selectionView.tap(index) else if (solidPick != null) finishSolidOp(viewerObjects.getOrNull(index)) else viewerEditObject = index
                 },
+                styles = selectionView.styles(), showLocks = selectionView.on,
+                bottomBar = if (selectionView.on) selectionView.bar else null,
                 detail = viewerCurveDetail,
                 onDetailChange = { viewerCurveDetail = it.roundToInt(); preferences.edit().putInt("curve_detail", viewerCurveDetail).apply() },
                 onDetailChangeFinished = { open3dView(viewerScope) },
@@ -7901,7 +8009,8 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                 ghostLines.forEach { (key, pts) ->
                     val chosen = key == highlightGhost
                     var i = 0
-                    while (i + 3 < pts.size) { drawLine(if (chosen) Color(0xFF1565C0) else Color(0xFF37474F), viewAt(Pt(pts[i], pts[i + 1])), viewAt(Pt(pts[i + 2], pts[i + 3])), strokeWidth = if (chosen) 10f else 5f, cap = androidx.compose.ui.graphics.StrokeCap.Round); i += 2 }
+                    val greyed = key in LockedView.ghostKeys
+                    while (i + 3 < pts.size) { drawLine(if (chosen) Color(0xFF1565C0) else if (greyed) Color(0x8037474F) else Color(0xFF37474F), viewAt(Pt(pts[i], pts[i + 1])), viewAt(Pt(pts[i + 2], pts[i + 3])), strokeWidth = if (chosen) 10f else 5f, cap = androidx.compose.ui.graphics.StrokeCap.Round); i += 2 }
                     // End dots show which points can be grabbed here (none along smooth outlines).
                     if (key !in ghostNoDots) { drawCircle(Color(0xFF455A64), 9f, viewAt(Pt(pts[0], pts[1]))); drawCircle(Color(0xFF455A64), 9f, viewAt(Pt(pts[pts.size - 2], pts[pts.size - 1]))) }
                     // A line seen end-on is a single point here: mark it so it can't vanish.
@@ -8002,7 +8111,7 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                         (listOf(shapePoints(shape)) + attachedRegions(shape, guides).map { it.points }).forEach { points ->
                             if (points.isNotEmpty()) {
                                 val path = androidx.compose.ui.graphics.Path().apply { val first = viewAt(points.first()); moveTo(first.x, first.y); points.drop(1).forEach { point -> viewAt(point).let { lineTo(it.x, it.y) } }; close() }
-                                drawPath(path, guideColor(shape.first().colorIndex).copy(alpha = 1f - transparency / 100f))
+                                drawPath(path, guideColor(shape.first().colorIndex).copy(alpha = 1f - transparency / 100f).let { if (shape.any { it.locked }) lockedLook(it).copy(alpha = it.alpha * 0.5f) else it })
                                 drawContext.canvas.clipPath(path, androidx.compose.ui.graphics.ClipOp.Difference)
                             }
                         }
@@ -8052,13 +8161,13 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     val separator = guide.id in separators
                     val border = guide.id in filledIds
                     val width = if (separator) (guide.strokeWidth * 0.35f).coerceAtLeast(1f) else guide.strokeWidth
-                    val lineColor = guideColor(guide.colorIndex).copy(alpha = if (separator) 0.45f else 1f)
+                    val lineColor = guideColor(guide.colorIndex).copy(alpha = if (separator) 0.45f else 1f).let { if (guide.locked) lockedLook(it) else it }
                     val band = memberBands[guide.id]
                     if (band != null && !separator) {
                         // A bar or pipe: as wide as its profile, in its material's colour; plain lines stay thin and black.
                         val chosen = selectedGuide != null && sameGuideObject(guide, selectedGuide)
-                        val edge = if (chosen) Color(0xFFCF2020) else Color(band.first).copy(alpha = 1f)
-                        val fillColor = androidx.compose.ui.graphics.lerp(edge, Color.White, 0.4f)
+                        val edge = if (chosen) Color(0xFFCF2020) else Color(band.first).copy(alpha = 1f).let { if (guide.locked) lockedLook(it) else it }
+                        val fillColor = androidx.compose.ui.graphics.lerp(edge, Color.White, 0.4f).let { if (guide.locked && !chosen) it.copy(alpha = 0.7f) else it }
                         val bandPx = (band.second * fit).coerceAtLeast(3.dp.toPx())
                         val path = androidx.compose.ui.graphics.Path().apply {
                             moveTo(start.x, start.y)
@@ -8274,6 +8383,16 @@ private fun trianglePath(triangles: FloatArray, left: Float, top: Float, fit: Fl
                     val center = viewAt(point)
                     drawCircle(Color.White, 20f * strokeZoom, center, style = Stroke(7f * strokeZoom))
                     drawCircle(Color(0xFF0066BE), 20f * strokeZoom, center, style = Stroke(3f * strokeZoom))
+                }
+            }
+            // Locked picks that blocked a move: every one of them flashes, here and as other views' lines.
+            if (lockedBlinkOn) {
+                guides.filter { it.id in LockedView.flashIds }.forEach { edge ->
+                    drawLine(Color.White, viewAt(edge.start), viewAt(edge.end), (edge.strokeWidth + 10f) * strokeZoom)
+                    drawLine(Color(0xFFFF8F00), viewAt(edge.start), viewAt(edge.end), (edge.strokeWidth + 5f) * strokeZoom)
+                }
+                ghostLines.filter { it.first in LockedView.flashGhosts }.forEach { (_, pts) -> var i = 0
+                    while (i + 3 < pts.size) { drawLine(Color(0xFFFF8F00), viewAt(Pt(pts[i], pts[i + 1])), viewAt(Pt(pts[i + 2], pts[i + 3])), 14f, cap = androidx.compose.ui.graphics.StrokeCap.Round); i += 2 }
                 }
             }
             if (lockedBlinkOn) lockedFlashGuideId?.let { id -> guides.firstOrNull { it.id == id } }?.let { guide ->

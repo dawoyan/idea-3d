@@ -43,6 +43,9 @@ import javax.microedition.khronos.opengles.GL10
 import kotlin.math.abs
 import kotlin.math.hypot
 
+/** How one object shows in the 3D view (an entry per object in [ViewerMesh.styledColors]). */
+internal object ViewerStyle { const val NORMAL = 0; const val PICKED = 1; const val DIM = 2; const val LOCKED = 3; const val LOCKED_PICKED = 4 }
+
 internal data class ViewerMeasurement(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val label: String, val color: Int, val z1: Float = 0f, val z2: Float = 0f)
 
 /** Maps model millimeters to the viewer's normalized space. Reused across rebuilds so edits don't make the view jump. */
@@ -65,7 +68,38 @@ internal class ViewerMesh private constructor(
     val vertices: FloatBuffer, private val cpuVertices: FloatArray, val normals: FloatBuffer, val colors: FloatBuffer, val count: Int,
     val picturePlane: FloatBuffer, val frontArrow: FloatBuffer, val measurements: List<ViewerMeasurement>, val triangleObjects: IntArray, val objectNames: List<String>,
     val frame: ViewerFrame, val warnings: List<String>, val texCoords: FloatBuffer, val groups: List<Triple<Finish, Int, Int>>,
+    private val baseColors: FloatArray = FloatArray(0),
 ) {
+    /** Each object's middle (viewer units), where a lock mark is drawn. */
+    val objectCenters: Map<Int, FloatArray> by lazy {
+        val sums = HashMap<Int, FloatArray>()
+        triangleObjects.forEachIndexed { t, id -> if (id >= 0) { val acc = sums.getOrPut(id) { FloatArray(4) }; repeat(3) { k -> repeat(3) { a -> acc[a] += vertex(t * 3 + k, a) } }; acc[3] += 3f } }
+        sums.mapValues { (_, a) -> floatArrayOf(a[0] / a[3], a[1] / a[3], a[2] / a[3]) }
+    }
+    /**
+     * The colours with each object's look: [ViewerStyle.PICKED] lit in the selection orange, [ViewerStyle.DIM] faded,
+     * [ViewerStyle.LOCKED] grey and faded, [ViewerStyle.LOCKED_PICKED] grey with a touch of orange.
+     */
+    fun styledColors(styles: IntArray?): FloatBuffer {
+        if (styles == null || styles.all { it == ViewerStyle.NORMAL } || baseColors.isEmpty()) return colors
+        val out = baseColors.copyOf()
+        val bg = floatArrayOf(0.94f, 0.96f, 0.95f); val orange = floatArrayOf(1f, 0.55f, 0f)
+        for (t in 0 until count / 3) {
+            val style = styles.getOrNull(triangleObjects[t]) ?: ViewerStyle.NORMAL
+            if (style == ViewerStyle.NORMAL) continue
+            for (v in 0..2) {
+                val i = (t * 3 + v) * 4
+                val grey = 0.3f * out[i] + 0.59f * out[i + 1] + 0.11f * out[i + 2]
+                for (a in 0..2) out[i + a] = when (style) {
+                    ViewerStyle.PICKED -> out[i + a] * 0.2f + orange[a] * 0.8f
+                    ViewerStyle.DIM -> out[i + a] * 0.45f + bg[a] * 0.55f
+                    ViewerStyle.LOCKED -> grey * 0.5f + bg[a] * 0.5f
+                    else -> grey * 0.3f + orange[a] * 0.45f + bg[a] * 0.25f
+                }
+            }
+        }
+        return ByteBuffer.allocateDirect(out.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(out); position(0) }
+    }
     fun vertex(i: Int, axis: Int) = cpuVertices[i * 3 + axis]
     data class CollisionBox(val objectId: Int, val low: FloatArray, val high: FloatArray)
     /** Conservative member/object collision check.  Face contact has zero volume and is allowed. */
@@ -185,7 +219,7 @@ internal class ViewerMesh private constructor(
             order.forEachIndexed { i, t -> val f = finishOf(t); if (groups.lastOrNull()?.first == f) groups[groups.lastIndex] = Triple(f, groups.last().second, groups.last().third + 3) else groups += Triple(f, i * 3, 3) }
             val sortedVertices = reorder(vertices, 9)
             return ViewerMesh(buffer(sortedVertices), sortedVertices, buffer(reorder(normals, 9)), buffer(reorder(colors, 12)), count * 3, buffer(plane), buffer(arrow), normalizedMeasurements,
-                IntArray(count) { objects[order[it]] }, objectNames, space, warnings, buffer(reorder(texture, 6)), groups)
+                IntArray(count) { objects[order[it]] }, objectNames, space, warnings, buffer(reorder(texture, 6)), groups, reorder(colors, 12))
         }
     }
 }
@@ -195,6 +229,7 @@ private class ModelRenderer(private val mesh: ViewerMesh, val camera: ViewerCame
     @Volatile var showFrontArrow = false
     @Volatile var sunPosition = 0.15f
     @Volatile var capture: ((Bitmap?) -> Unit)? = null
+    @Volatile var colorBuffer: FloatBuffer = mesh.colors
     private var surfaceWidth = 0
     private var surfaceHeight = 0
     override fun onSurfaceCreated(gl: GL10, config: EGLConfig) {
@@ -243,8 +278,9 @@ private class ModelRenderer(private val mesh: ViewerMesh, val camera: ViewerCame
             gl.glColor4f(0.85f, 0.1f, 0.1f, 1f); gl.glDrawArrays(GL10.GL_LINES, 0, 6)
         }
         gl.glEnable(GL10.GL_LIGHTING); gl.glEnableClientState(GL10.GL_NORMAL_ARRAY); gl.glEnableClientState(GL10.GL_COLOR_ARRAY)
-        mesh.vertices.position(0); mesh.normals.position(0); mesh.colors.position(0); mesh.texCoords.position(0)
-        gl.glVertexPointer(3, GL10.GL_FLOAT, 0, mesh.vertices); gl.glNormalPointer(GL10.GL_FLOAT, 0, mesh.normals); gl.glColorPointer(4, GL10.GL_FLOAT, 0, mesh.colors)
+        val colorBuffer = colorBuffer
+        mesh.vertices.position(0); mesh.normals.position(0); colorBuffer.position(0); mesh.texCoords.position(0)
+        gl.glVertexPointer(3, GL10.GL_FLOAT, 0, mesh.vertices); gl.glNormalPointer(GL10.GL_FLOAT, 0, mesh.normals); gl.glColorPointer(4, GL10.GL_FLOAT, 0, colorBuffer)
         gl.glEnableClientState(GL10.GL_TEXTURE_COORD_ARRAY); gl.glTexCoordPointer(2, GL10.GL_FLOAT, 0, mesh.texCoords)
         mesh.groups.forEach { (finish, first, vertexCount) ->
             val texture = textures[finish]
@@ -291,6 +327,13 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
     init { setEGLContextClientVersion(1); setRenderer(modelRenderer); renderMode = RENDERMODE_WHEN_DIRTY }
 
     fun reset() { camera.reset(); refresh() }
+    private var styles: IntArray? = null
+    var showLocks = false
+    /** Recolours objects (picked, dimmed, locked) without rebuilding the model. */
+    fun setStyles(next: IntArray?) {
+        if (next contentEquals styles) return
+        styles = next; modelRenderer.colorBuffer = mesh.styledColors(next); refresh()
+    }
     private fun refresh() { requestRender(); overlay.invalidate() }
 
     private fun project(x: Float, y: Float, z: Float, combined: FloatArray = viewMatrix(camera, width, height)): FloatArray {
@@ -380,9 +423,27 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
 
     private fun drawOverlay(canvas: Canvas) {
         drawAxes(canvas)
+        if (showLocks) drawLocks(canvas)
         if (showMeasurements) drawMeasurements(canvas)
         if (mesh.collisionBoxes.isNotEmpty() && System.currentTimeMillis() / 450L % 2L == 0L) drawCollisionBoxes(canvas)
         if (mesh.collisionBoxes.isNotEmpty()) overlay.postInvalidateDelayed(450L)
+    }
+
+    /** A small padlock on each locked object. */
+    private fun drawLocks(canvas: Canvas) {
+        val current = styles ?: return
+        val combined = viewMatrix(camera, width, height)
+        current.forEachIndexed { id, style ->
+            if (style != ViewerStyle.LOCKED && style != ViewerStyle.LOCKED_PICKED) return@forEachIndexed
+            val c = mesh.objectCenters[id] ?: return@forEachIndexed
+            val p = project(c[0], c[1], c[2], combined); val s = 7f * density
+            paint.style = Paint.Style.FILL; paint.color = android.graphics.Color.WHITE
+            canvas.drawRoundRect(p[0] - s - 3f * density, p[1] - s * 1.6f, p[0] + s + 3f * density, p[1] + s + 3f * density, 4f * density, 4f * density, paint)
+            paint.color = android.graphics.Color.rgb(0x37, 0x47, 0x4F)
+            canvas.drawRoundRect(p[0] - s, p[1] - s * 0.2f, p[0] + s, p[1] + s, 2f * density, 2f * density, paint)
+            paint.style = Paint.Style.STROKE; paint.strokeWidth = 2f * density
+            canvas.drawArc(p[0] - s * 0.6f, p[1] - s * 1.3f, p[0] + s * 0.6f, p[1] + s * 0.1f, 180f, 180f, false, paint)
+        }
     }
 
     private fun drawCollisionBoxes(canvas: Canvas) {
@@ -462,11 +523,16 @@ internal fun ThreeDViewerPane(
     showDrawings: Boolean,
     onShowDrawingsChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    styles: IntArray? = null,
+    showLocks: Boolean = false,
+    bottomBar: (@Composable () -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val view = remember(mesh) { ModelView(context, mesh, camera) }
     val figureOverlay = remember(mesh) { ScaleFigureOverlay(context, mesh, camera) }
     view.onObjectTap = onEditObject
+    view.showLocks = showLocks
+    LaunchedEffect(view, styles?.contentHashCode(), showLocks) { view.setStyles(styles); view.overlay.invalidate() }
     var showFrame by remember { mutableStateOf(false) }
     var showArrow by remember { mutableStateOf(false) }
     var showMeasurements by remember { mutableStateOf(false) }
@@ -514,6 +580,7 @@ internal fun ThreeDViewerPane(
                 modifier = Modifier.fillMaxWidth().weight(1f)
             )
         }
+        bottomBar?.invoke()
     }
 }
 
