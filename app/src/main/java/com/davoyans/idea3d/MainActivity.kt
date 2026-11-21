@@ -367,6 +367,8 @@ private fun lockedLook(c: Color): Color {
 }
 /** The 3D Selection view: the whole scene with the picked items lit; taps pick and unpick. */
 private val selectionView = SelectionView()
+/** This view's plane moved into the model hides what lies in front of it; the view-plane row says so and offers Show all. */
+private object ViewCut { var reset: () -> Unit = {} }
 private class SelectionView {
     var on by mutableStateOf(false)
     /** Wired by the app where its helpers are declared, so the big app function only reads this object. */
@@ -2305,7 +2307,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val g = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
         val f = faceOffset(sel.first, sel.second)
         val world = own.model(if (sel.third) g.start else g.end, (if (sel.third) g.startZMm else g.endZMm) + f)
-        return here.pixel(world).takeIf { visiblePastMovedPlanes(world, editPlane, planeFrames, editPlane in mirroredViews) }
+        if (visiblePastMovedPlanes(world, editPlane, planeFrames, editPlane in mirroredViews)) return here.pixel(world)
+        // A line of this view cut by its moved plane is still drawn, and so are both its end dots: keep them pickable.
+        if (sel.first != editPlane) return null
+        val other = own.model(if (sel.third) g.end else g.start, (if (sel.third) g.endZMm else g.startZMm) + f)
+        return here.pixel(world).takeIf { visiblePastMovedPlanes(other, editPlane, planeFrames, editPlane in mirroredViews) }
     }
     /** The end point of another view's line nearest [point], within [radius]. */
     fun ghostPointAt(point: Pt, radius: Double): Triple<ModelPlane, Int, Boolean>? =
@@ -4586,6 +4592,13 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         freeTurn.turned += deg
     }
     freeTurn.grab = ::freeTurnGrab; freeTurn.by = ::freeTurnBy
+    fun showWholeView() {
+        val f = planeFrames[editPlane] ?: return
+        pushUndo(); planeFrames = planeFrames + (editPlane to f.copy(normalOffsetMm = 0.0))
+        ActionLog.add("view cut removed: ${editPlane.label} plane back to 0")
+        logToast(context, "${editPlane.label} shows everything again (Undo puts the cut back)", Toast.LENGTH_SHORT).show()
+    }
+    ViewCut.reset = ::showWholeView
     fun groupPicked() {
         if (pickedItems.size < 2) return
         pushUndo()
@@ -5948,7 +5961,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 // A selected item's View 3D button above previews only that item.
                 // The regular main-view button remains the whole-scene 3D view.
             }
-            if (!show3d) PlaneSwitcher(editPlane, false, axesHint, mirroredViews, onPlane = { plane, flip ->
+            if (!show3d) PlaneSwitcher(editPlane, false, axesHint, mirroredViews, cutMm = planeFrames[editPlane]?.normalOffsetMm ?: 0.0, onPlane = { plane, flip ->
                 mirroredViews = if (flip) mirroredViews + plane else mirroredViews - plane
                 if (plane != editPlane) switchPlane(plane) else fitView()
             })
@@ -7033,7 +7046,7 @@ private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -
  * (Front or Back, Top or Bottom, Profile (right) or Left).
  */
 @OptIn(ExperimentalFoundationApi::class)
-@Composable private fun PlaneSwitcher(plane: ModelPlane, showing3d: Boolean, axes: String, mirrored: Set<ModelPlane>, onPlane: (ModelPlane, Boolean) -> Unit) {
+@Composable private fun PlaneSwitcher(plane: ModelPlane, showing3d: Boolean, axes: String, mirrored: Set<ModelPlane>, cutMm: Double = 0.0, onPlane: (ModelPlane, Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().background(Color(0xFFF2F5F4)).padding(horizontal = 8.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         ModelPlane.entries.forEach { candidate ->
             var menu by remember { mutableStateOf(false) }
@@ -7050,7 +7063,10 @@ private fun oppositeLabel(plane: ModelPlane) = when (plane) { ModelPlane.FRONT -
             }
         }
         Spacer(Modifier.weight(1f))
-        Text(axes, fontSize = 11.sp, color = Color(0xFF4D5A57), maxLines = 1)
+        // A moved view plane cuts the view: what is in front of it is hidden. One tap shows everything again (undo puts it back).
+        if (kotlin.math.abs(cutMm) >= 0.1 && !showing3d) Text("✂ Cut · Show all", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1,
+            modifier = Modifier.background(Color(0xFFB3261E), RoundedCornerShape(8.dp)).clickable { ViewCut.reset() }.padding(horizontal = 8.dp, vertical = 6.dp))
+        else Text(axes, fontSize = 11.sp, color = Color(0xFF4D5A57), maxLines = 1)
     }
 }
 
