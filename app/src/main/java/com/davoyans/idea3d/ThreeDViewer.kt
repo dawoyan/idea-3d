@@ -67,6 +67,27 @@ internal class ViewerMesh private constructor(
     val frame: ViewerFrame, val warnings: List<String>, val texCoords: FloatBuffer, val groups: List<Triple<Finish, Int, Int>>,
 ) {
     fun vertex(i: Int, axis: Int) = cpuVertices[i * 3 + axis]
+    data class CollisionBox(val objectId: Int, val low: FloatArray, val high: FloatArray)
+    /** Conservative member/object collision check.  Face contact has zero volume and is allowed. */
+    val collisionBoxes: List<CollisionBox> by lazy {
+        val boxes = triangleObjects.filter { it >= 0 }.distinct().mapNotNull { objectId ->
+            val ids = triangleObjects.indices.filter { triangleObjects[it] == objectId }
+            if (ids.isEmpty()) null else {
+                val low = FloatArray(3) { Float.POSITIVE_INFINITY }; val high = FloatArray(3) { Float.NEGATIVE_INFINITY }
+                ids.forEach { triangle -> repeat(3) { corner -> repeat(3) { axis ->
+                    val value = vertex(triangle * 3 + corner, axis); low[axis] = minOf(low[axis], value); high[axis] = maxOf(high[axis], value)
+                } } }
+                CollisionBox(objectId, low, high)
+            }
+        }
+        val colliding = mutableSetOf<Int>()
+        boxes.indices.forEach { a -> for (b in a + 1 until boxes.size) {
+            val first = boxes[a]; val second = boxes[b]
+            val overlaps = (0..2).all { axis -> minOf(first.high[axis], second.high[axis]) - maxOf(first.low[axis], second.low[axis]) > 0.003f }
+            if (overlaps) { colliding += first.objectId; colliding += second.objectId }
+        } }
+        boxes.filter { it.objectId in colliding }
+    }
 
     companion object {
         fun fromStl(
@@ -324,6 +345,18 @@ private class ModelView(context: Context, private val mesh: ViewerMesh, private 
     private fun drawOverlay(canvas: Canvas) {
         drawAxes(canvas)
         if (showMeasurements) drawMeasurements(canvas)
+        if (mesh.collisionBoxes.isNotEmpty() && System.currentTimeMillis() / 450L % 2L == 0L) drawCollisionBoxes(canvas)
+        if (mesh.collisionBoxes.isNotEmpty()) overlay.postInvalidateDelayed(450L)
+    }
+
+    private fun drawCollisionBoxes(canvas: Canvas) {
+        val combined = viewMatrix(camera, width, height)
+        paint.style = Paint.Style.STROKE; paint.strokeWidth = 3f * density; paint.color = android.graphics.Color.RED
+        mesh.collisionBoxes.forEach { box ->
+            val corners = (0..7).map { bit -> project(if (bit and 1 == 0) box.low[0] else box.high[0], if (bit and 2 == 0) box.low[1] else box.high[1], if (bit and 4 == 0) box.low[2] else box.high[2], combined) }
+            listOf(0 to 1, 0 to 2, 0 to 4, 1 to 3, 1 to 5, 2 to 3, 2 to 6, 3 to 7, 4 to 5, 4 to 6, 5 to 7, 6 to 7).forEach { (a, b) -> canvas.drawLine(corners[a][0], corners[a][1], corners[b][0], corners[b][1], paint) }
+        }
+        paint.style = Paint.Style.FILL; paint.textSize = 13f * density; canvas.drawText("OVERLAP", 12f * density, 26f * density, paint)
     }
 
     private fun drawMeasurements(canvas: Canvas) {

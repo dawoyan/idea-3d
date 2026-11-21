@@ -230,7 +230,9 @@ private data class ViewpointLine(val target: ModelPlane, val vertical: Boolean, 
 private fun visiblePastMovedPlanes(world: Vec3, current: ModelPlane, frames: Map<ModelPlane, PlaneFrame>): Boolean =
     ModelPlane.entries.filter { it != current }.all { plane ->
         val offset = frames[plane]?.normalOffsetMm ?: 0.0
-        kotlin.math.abs(offset) < 0.1 || (world dot plane.toward) >= offset - 0.1
+        // The viewer sits on the +normal side of each named view.  Keep the
+        // construction on the far side of a plane pulled into the model.
+        kotlin.math.abs(offset) < 0.1 || (world dot plane.toward) <= offset + 0.1
     }
 private data class EndpointJoinUpdate(val sourceGuides: List<GuideLine>, val targetGuides: List<GuideLine>, val distanceMm: Double)
 /** Plans a true 3D endpoint-to-line join without depending on Compose state. */
