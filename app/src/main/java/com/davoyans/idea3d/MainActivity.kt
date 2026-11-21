@@ -227,12 +227,12 @@ private data class PlaneFrame(val originU: Double, val originV: Double, val widt
 private data class ViewpointLine(val target: ModelPlane, val vertical: Boolean, val position: Float)
 /** A dragged cross-view plane is a one-sided clipping plane.  At its untouched
  * centre position it is only a guide, not a clip. */
-private fun visiblePastMovedPlanes(world: Vec3, current: ModelPlane, frames: Map<ModelPlane, PlaneFrame>): Boolean =
-    ModelPlane.entries.filter { it != current }.all { plane ->
+private fun visiblePastMovedPlanes(world: Vec3, current: ModelPlane, frames: Map<ModelPlane, PlaneFrame>, oppositeSide: Boolean = false): Boolean =
+    ModelPlane.entries.all { plane ->
         val offset = frames[plane]?.normalOffsetMm ?: 0.0
         // The viewer sits on the +normal side of each named view.  Keep the
         // construction on the far side of a plane pulled into the model.
-        kotlin.math.abs(offset) < 0.1 || (world dot plane.toward) <= offset + 0.1
+        kotlin.math.abs(offset) < 0.1 || if (plane == current && oppositeSide) (world dot plane.toward) >= offset - 0.1 else (world dot plane.toward) <= offset + 0.1
     }
 private data class EndpointJoinUpdate(val sourceGuides: List<GuideLine>, val targetGuides: List<GuideLine>, val distanceMm: Double)
 /** Plans a true 3D endpoint-to-line join without depending on Compose state. */
@@ -1743,7 +1743,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val otherGuides = ModelPlane.entries.filter { it != editPlane }.flatMap { planeStash[it]?.guides.orEmpty() }.filterNot { it.hole }.filter { guide ->
             memberSetup.mapping(guide.plane)?.let { own ->
                 val midpoint = (own.model(guide.start, guide.startZMm) + own.model(guide.end, guide.endZMm)) * 0.5
-                visiblePastMovedPlanes(midpoint, memberPlane, planeFrames)
+                visiblePastMovedPlanes(midpoint, memberPlane, planeFrames, memberPlane in mirroredViews)
             } ?: true
         }
         // An object's lines, and its holes' lines, sit on its face.
@@ -2147,7 +2147,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val g = planeGeometry(sel.first).guides.firstOrNull { it.id == sel.second } ?: return null
         val f = faceOffset(sel.first, sel.second)
         val world = own.model(if (sel.third) g.start else g.end, (if (sel.third) g.startZMm else g.endZMm) + f)
-        return here.pixel(world).takeIf { visiblePastMovedPlanes(world, editPlane, planeFrames) }
+        return here.pixel(world).takeIf { visiblePastMovedPlanes(world, editPlane, planeFrames, editPlane in mirroredViews) }
     }
     /** The end point of another view's line nearest [point], within [radius]. */
     fun ghostPointAt(point: Pt, radius: Double): Triple<ModelPlane, Int, Boolean>? =
@@ -2229,6 +2229,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     fun itemOutlineHere(key: Pair<ModelPlane, Int>): List<List<Pt>> {
         val setup = modelSetup(); val here = setup.mapping(editPlane) ?: return emptyList(); val own = setup.mapping(key.first) ?: return emptyList()
+        if (itemGuides(key).all { guide -> ghostPointHere(Triple(key.first, guide.id, true)) == null && ghostPointHere(Triple(key.first, guide.id, false)) == null }) return emptyList()
         val f = itemGuides(key).firstOrNull()?.let { faceOffset(key.first, it.id) } ?: 0.0
         fun loop(at: Double) = itemGuides(key).map { g -> val pts = guidePoints(g); val n = (pts.size - 1).coerceAtLeast(1); pts.mapIndexed { i, p -> here.pixel(own.model(p, at + g.startZMm + (g.endZMm - g.startZMm) * i / n)) } }
         val front = loop(f)
