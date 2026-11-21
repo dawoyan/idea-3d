@@ -5289,7 +5289,15 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                     val selectedCount = if (profiles.isNotEmpty()) profiles.size else pickedPoints.size
                     val selectedSummary = if (selectedCount == 0) "" else "Selected $selectedCount $selectedKind${if (selectedCount == 1) "" else "s"} · "
                     when {
-                        pickedItems.isEmpty() && pickedPoints.isEmpty() -> "Select points, lines, shapes, or objects"
+                        pickedItems.isEmpty() && pickedPoints.isEmpty() -> when (selectionMode) {
+                            // Only what the Select filter lets you pick.
+                            SelectionMode.POINTS -> "Tap points to pick them, or drag a box around them"
+                            SelectionMode.LINES -> "Tap lines to pick them, or drag a box around them"
+                            SelectionMode.SHAPES -> "Tap closed shapes to pick them, or drag a box around them"
+                            SelectionMode.OBJECTS -> "Tap 3D objects to pick them, or drag a box around them"
+                            SelectionMode.VISIBLE -> "Tap what you see to pick it: the whole object first, again for one line"
+                            SelectionMode.ALL -> "Tap points, lines, shapes or objects to pick them"
+                        }
                         profiles.size == 1 && isClosedShape(profiles.first()) -> "${selectedSummary}Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
                         profiles.size >= 2 && profiles.all(::isClosedShape) -> "${selectedSummary}Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
                         else -> "${selectedSummary}Loft needs two closed shapes"
