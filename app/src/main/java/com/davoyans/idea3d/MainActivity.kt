@@ -4406,10 +4406,17 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val moved = (best.onto - best.from).length
         ActionLog.add("fasten: moved ${best.source.first.label} line ${best.source.second} by ${format(moved)} mm; joined as one group")
         pickedItems = emptyList(); pickedPoints = emptyList(); pickedSegments = emptyList()
-        logToast(context, "Joined: ${itemNameLate(best.source)} moved ${format(moved)} mm to touch the other; they move together now", Toast.LENGTH_LONG).show()
+        logToast(context, if (moved < 0.5) "Joined: they already touch, now fastened together; they move as one" else "Joined: ${itemNameLate(best.source)} moved ${format(moved)} mm to touch the other; they move together now", Toast.LENGTH_LONG).show()
         return true
     }
+    /** Two picked points on two different lines or bars: those two, to be fastened together. */
+    fun twoSticksByPoints(): Pair<Pair<ModelPlane, Int>, Pair<ModelPlane, Int>>? {
+        if (pickedItems.isNotEmpty() || pickedSegments.isNotEmpty() || pickedPoints.size != 2) return null
+        val (a, b) = pickedPoints.map { it.first to it.second }
+        return if (sameItem(a, b) || itemGuides(a).any { g -> itemGuides(b).any { it.id == g.id && it.plane == g.plane } }) null else a to b
+    }
     fun mergePicked() {
+        twoSticksByPoints()?.let { (a, b) -> fastenLines(a, b); return }
         if (pickedItems.size < 2) { logToast(context, "Pick at least two items", Toast.LENGTH_SHORT).show(); return }
         if (pickedItems.any(::itemLocked)) { logToast(context, "Unlock locked items before merging", Toast.LENGTH_SHORT).show(); return }
         val first = pickedItems.first(); val rest = pickedItems.drop(1)
@@ -4450,6 +4457,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         ActionLog.add("join: ${endSel.first.label} line ${source.id} endpoint → ${targetKey.first.label} line ${targetGuides.first().id}; moved ${format(update.distanceMm)} mm")
         pickedItems = emptyList(); pickedPoints = emptyList()
         logToast(context, "Joined in 3D: the endpoint was moved onto the selected line", Toast.LENGTH_LONG).show()
+    }
+    fun joinPicked() {
+        twoSticksByPoints()?.let { (a, b) -> if (!fastenLines(a, b)) logToast(context, "Could not join these two", Toast.LENGTH_SHORT).show(); return }
+        joinPickedLineToEndpoint()
     }
     /**
      * Makes a new, closed face from selected vertices.  It deliberately does not reuse the
@@ -5356,6 +5367,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         }
                         profiles.size == 1 && isClosedShape(profiles.first()) -> "${selectedSummary}Loft 1/2: pick the second closed shape. Use Loft level to put this profile forward/back first."
                         profiles.size >= 2 && profiles.all(::isClosedShape) -> "${selectedSummary}Loft ${profiles.size}: first set each profile's Loft level one at a time (for example 0, 50, 100). Then select them all and tap Loft."
+                        twoSticksByPoints() != null -> "${selectedSummary}on two different pieces: tap Join to fasten them together"
                         // Otherwise: what is picked and what the toolbar does with it.
                         else -> "${selectedSummary}tap a picked one again to unpick it"
                     }
@@ -5508,8 +5520,8 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                         ActionIcon("Loft level", R.drawable.ic_move_point, enabled = n == 1 && pickedPoints.isEmpty() && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftLevelItems = distinctPicked() }
                         ActionIcon(if (n == 1) "Loft 1/2" else "Loft $n", R.drawable.ic_cube, enabled = n >= 2 && pickedItems.all(::isClosedShape) && !pickedItems.any(::itemLocked)) { loftPicked() }
                         ActionIcon("Lofts ${lofts.size}", R.drawable.ic_join, enabled = lofts.isNotEmpty()) { showLofts = true }
-                        ActionIcon("Join", R.drawable.ic_join, enabled = n == 1 && pickedPoints.size == 1 && !pickedItems.any(::itemLocked) && !pickedPoints.any(::pointLocked), onClick = ::joinPickedLineToEndpoint)
-                        ActionIcon("Merge", R.drawable.ic_merge, enabled = n >= 2, onClick = ::mergePicked)
+                        ActionIcon("Join", R.drawable.ic_join, enabled = (n == 1 && pickedPoints.size == 1 || twoSticksByPoints() != null) && !pickedItems.any(::itemLocked) && !pickedPoints.any(::pointLocked), onClick = ::joinPicked)
+                        ActionIcon("Merge", R.drawable.ic_merge, enabled = n >= 2 || twoSticksByPoints() != null, onClick = ::mergePicked)
                         ActionIcon("Cut 1st", R.drawable.ic_cut, enabled = n >= 2, onClick = ::cutPicked)
                         ActionIcon("Common", R.drawable.ic_join, enabled = n >= 2, onClick = ::commonPicked)
                         ActionIcon("Intersect", R.drawable.ic_cube, enabled = n >= 1 && pickedItems.all(::isClosedShape), onClick = ::intersectPicked)
