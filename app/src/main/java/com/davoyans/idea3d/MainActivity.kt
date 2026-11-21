@@ -235,21 +235,6 @@ private fun visiblePastMovedPlanes(world: Vec3, current: ModelPlane, frames: Map
         kotlin.math.abs(offset) < 0.1 || if (plane == current && oppositeSide) (world dot plane.toward) >= offset - 0.1 else (world dot plane.toward) <= offset + 0.1
     }
 
-/** Guides are the editable drawing too, so they must use the very same
- * one-sided viewpoint clipping as overlays and picking. */
-private fun guidesVisibleFromViewpoint(
-    guides: List<GuideLine>,
-    current: ModelPlane,
-    setup: ModelSetup,
-    frames: Map<ModelPlane, PlaneFrame>,
-    oppositeSide: Boolean
-): List<GuideLine> = guides.filter { guide ->
-    val mapping = setup.mapping(guide.plane) ?: return@filter true
-    val start = mapping.model(guide.start, guide.startZMm)
-    val end = mapping.model(guide.end, guide.endZMm)
-    visiblePastMovedPlanes(start, current, frames, oppositeSide) ||
-        visiblePastMovedPlanes(end, current, frames, oppositeSide)
-}
 private data class EndpointJoinUpdate(val sourceGuides: List<GuideLine>, val targetGuides: List<GuideLine>, val distanceMm: Double)
 /** Plans a true 3D endpoint-to-line join without depending on Compose state. */
 private fun joinEndpointToLine(sourcePlane: ModelPlane, sourceId: Int, sourceStart: Boolean, sourceAll: List<GuideLine>, targetPlane: ModelPlane, targetIds: Set<Int>, targetAll: List<GuideLine>, setup: ModelSetup, jointId: Int): EndpointJoinUpdate? {
@@ -5168,8 +5153,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
 
     if (presentation && bitmap != null) {
         Box(Modifier.fillMaxSize()) {
-            run {
-            val guides = guidesVisibleFromViewpoint(guides, editPlane, modelSetup(), planeFrames, editPlane in mirroredViews)
             ImageEditor(
                 modifier = Modifier.fillMaxSize(), bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
                 pickedOutlines = if (selectMode) pickedItems.flatMap { key -> val whole = itemGuides(key).size > 1 || isClosedShape(key) || extrusionOf(key) != null; itemOutlineHere(key).map { it to whole } } + pickedSegments.map { segmentOutlineHere(it) to false }.filter { it.first.size >= 2 } else emptyList(), itemRect = itemRectStart?.let { a -> itemRectEnd?.let { a to it } },
@@ -5180,7 +5163,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
                 selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null || selectedForeign != null || selectedModelId != null), onNudge = ::nudgeSelected
             )
-            }
             IconButton(onClick = { setPresentation(false) }, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).background(Color(0xCC17211E), CircleShape)) {
                 Icon(painterResource(R.drawable.ic_fullscreen_exit), contentDescription = "Exit full screen", tint = Color.White)
             }
@@ -5546,8 +5528,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             else {
             CalibrationBanner(remember(lines, unit) { calibrationOf(lines, unit) })
             Box(Modifier.fillMaxWidth().weight(1f)) {
-            run {
-            val guides = guidesVisibleFromViewpoint(guides, editPlane, modelSetup(), planeFrames, editPlane in mirroredViews)
             ImageEditor(
                 modifier = Modifier.fillMaxSize(),
                 bitmap = planeCanvas!!, lines = lines, guides = guides, ghosts = foreign.map { it.argb to it.canvas } + memberGhosts, showSizes = showSizes, minZoom = minZoomForContent(), growArrows = growHandles().map { it.anchor to it.dir }, rimHandles = ovalHandles().map { it.first }, growOn = growMode, dragToDraw = tool == Tool.LINES && (lineDrawing == LineDrawing.RECTANGLE || lineDrawing == LineDrawing.CIRCLE || lineDrawing == LineDrawing.TRIANGLE || draftStart != null), lineDraftDrag = tool == Tool.LINES && draftStart != null && (lineDrawing == LineDrawing.STRAIGHT || lineDrawing == LineDrawing.BROKEN || lineDrawing == LineDrawing.CURVE), draftShape = if (tool == Tool.LINES) lineDrawing else null, triangleApex = triangleApex, mirrorX = editPlane in mirroredViews && editPlane != ModelPlane.TOP, mirrorY = editPlane == ModelPlane.TOP && editPlane in mirroredViews, sections = memberSections(), memberBands = memberBands(), models = modelOutlines, selectedModelId = selectedModelId, foreignOverlay = if (tool == Tool.ADJUST) foreignOverlay() else null, joinPick = joinPick, blankCanvas = isBlankCanvas(), materialNames = materials.associate { it.id to it.name }, ghostLines = ghostLines, loftLines = if (showLoftGuides) loftGuideLines(lofts, allGuides(), modelSetup(), editPlane) else emptyList(), viewpointLines = viewpointLinesFor(editPlane, planeFrames, modelSetup()), onViewpointDragStart = { point, radius -> viewpointTargetAt(viewpointLinesFor(editPlane, planeFrames, modelSetup()), point, radius)?.let { target -> pushUndo(); draggingViewpointPlane = target; ActionLog.add("viewpoint drag start: ${target.label} plane from ${editPlane.label}"); true } ?: false }, onViewpointDrag = { point -> draggingViewpointPlane?.let { target -> modelSetup().mapping(editPlane)?.let { map -> planeFrames = planeFrames + (target to frameOf(target).copy(normalOffsetMm = map.model(point, 0.0) dot target.toward)) } } }, onViewpointDragEnd = { draggingViewpointPlane?.let { target -> ActionLog.add("viewpoint moved: ${target.label} plane") }; draggingViewpointPlane = null }, ghostNoDots = remember(planeStash) { ModelPlane.entries.flatMap { p -> planeStash[p]?.guides.orEmpty().let { g -> smoothOutlineIds(g).map { p to it } } }.toSet() }, highlightGhost = crossViewSelection, ghostPointMark = selectedGhostPoint?.let(::ghostPointHere),
@@ -5558,7 +5538,6 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 onJunction = ::onJunction, onAddPoint = ::addGuidePoint, onTap = ::handleTap, onLongPress = ::handleLongPress, onDragStart = ::handleDragStart, onDrag = ::handleDrag, onDragEnd = ::handleDragEnd, onDragCancel = ::handleDragCancel, onCropStart = ::startCrop, onCropDrag = ::dragCrop, onCropEnd = ::finishCropDrag,
                 selectedCurveId = selectedCurveId, selectedLabelId = selectedLabelId, selectedWholeLineId = selectedWholeLineId, selectedGuideEndpoint = selectedGuideEndpoint, selectedWholeGuideId = selectedWholeGuideId, selectedVertices = selectedVertices, selectionStart = selectionStart, selectionEnd = selectionEnd, panOnEmptyDrag = panOnEmptyDrag, showFineControls = tool == Tool.ADJUST && (selectMode && (pickedItems.isNotEmpty() || pickedPoints.isNotEmpty()) || selectedGhostPoints.isNotEmpty() || selectedGhostPoint != null || selectedForeignPoint != null || selectedVertices.isNotEmpty() || selectedCurveId != null || selectedExtrusionId != null || selectedEndpoint != null || selectedLabelId != null || selectedWholeLineId != null || selectedGuideEndpoint != null || selectedWholeGuideId != null || selectedForeign != null || selectedModelId != null), onNudge = ::nudgeSelected
             )
-            }
             // This stays above the canvas instead of in a scrolling toolbar: it must be discoverable while drawing.
             if (tool == Tool.LINES && !selectMode) AssistChip(
                 onClick = {
