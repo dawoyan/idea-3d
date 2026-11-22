@@ -319,7 +319,7 @@ private data class MasterExportSnapshot(
     val joints: List<Joint>,
     val joinTypes: List<JoinType>,
     val guideLengthsMm: Map<Pair<ModelPlane, Int>, Double>,
-    val modelSegments: List<Pair<Vec3, Vec3>>,
+    val modelSegments: List<Triple<Vec3, Vec3, Int>>,
     val source: Bitmap?
 )
 
@@ -330,7 +330,7 @@ private object MasterExport {
         val points = guidePoints(g)
         return points.zipWithNext().sumOf { (a, b) -> hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble()) }
     }
-    private fun drawingSvg(title: String, guides: List<GuideLine>): String {
+    private fun drawingSvg(title: String, guides: List<GuideLine>, materials: Map<String, Material>): String {
         val points = guides.flatMap { guidePoints(it) }
         val left = (points.minOfOrNull { it.x } ?: 0f) - 30f; val top = (points.minOfOrNull { it.y } ?: 0f) - 30f
         val right = (points.maxOfOrNull { it.x } ?: 100f) + 30f; val bottom = (points.maxOfOrNull { it.y } ?: 100f) + 30f
@@ -338,16 +338,22 @@ private object MasterExport {
         return buildString {
             append("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"${n(left)} ${n(top)} ${n(right-left)} ${n(bottom-top)}\">\n")
             append("<rect x=\"$left\" y=\"$top\" width=\"${right-left}\" height=\"${bottom-top}\" fill=\"white\"/><text x=\"$left\" y=\"${top+18}\" font-family=\"sans-serif\" font-size=\"12\">${esc(title)}</text>\n")
+            closedGuideShapes(guides).forEach { shape ->
+                val color = shape.firstNotNullOfOrNull { it.materialId?.let(materials::get) }?.argb ?: return@forEach
+                val hex = "#%06X".format(color and 0x00ffffff); val p = shapePoints(shape)
+                if (p.size > 2) append("<path d=\"M ${p.joinToString(" L ") { "${n(it.x)} ${n(it.y)}" }} Z\" fill=\"$hex\" fill-opacity=\".45\" stroke=\"$hex\" stroke-width=\"3\"/>\n")
+            }
             guides.forEach { g ->
                 val p = guidePoints(g)
-                if (p.size > 1) append("<path d=\"M ${p.joinToString(" L ") { "${n(it.x)} ${n(it.y)}" }}\" fill=\"none\" stroke=\"#263936\" stroke-width=\"2\"/>\n")
+                val material = g.materialId?.let(materials::get); val hex = material?.let { "#%06X".format(it.argb and 0x00ffffff) } ?: "#263936"
+                if (p.size > 1) append("<path d=\"M ${p.joinToString(" L ") { "${n(it.x)} ${n(it.y)}" }}\" fill=\"none\" stroke=\"$hex\" stroke-width=\"${if (material == null) 2 else 7}\"/>\n")
                 p.forEach { append("<circle cx=\"${n(it.x)}\" cy=\"${n(it.y)}\" r=\"2.4\" fill=\"#8b5e3c\"/>\n") }
             }
             append("</svg>")
         }
     }
     /** Raster companion for people who only have a phone gallery or messaging app. */
-    private fun drawingPng(title: String, guides: List<GuideLine>): ByteArray {
+    private fun drawingPng(title: String, guides: List<GuideLine>, materials: Map<String, Material>): ByteArray {
         val points = guides.flatMap { guidePoints(it) }
         val minX = points.minOfOrNull { it.x } ?: 0f; val maxX = points.maxOfOrNull { it.x } ?: 100f
         val minY = points.minOfOrNull { it.y } ?: 0f; val maxY = points.maxOfOrNull { it.y } ?: 100f
@@ -362,28 +368,36 @@ private object MasterExport {
             drawText(title, margin, margin * .58f, text)
             val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(62, 76, 71); style = Paint.Style.STROKE; strokeWidth = 5f; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
             val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(139, 94, 60) }
+            closedGuideShapes(guides).forEach { shape ->
+                val color = shape.firstNotNullOfOrNull { it.materialId?.let(materials::get) }?.argb ?: return@forEach
+                val p = shapePoints(shape); if (p.size > 2) {
+                    val path = android.graphics.Path().apply { moveTo(x(p.first().x), y(p.first().y)); p.drop(1).forEach { lineTo(x(it.x), y(it.y)) }; close() }
+                    drawPath(path, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = (color and 0x00ffffff) or 0x55000000; style = Paint.Style.FILL })
+                }
+            }
             guides.forEach { g ->
                 val path = guidePoints(g)
+                g.materialId?.let(materials::get)?.let { material -> stroke.color = material.argb; stroke.strokeWidth = 18f }.also { if (it == null) { stroke.color = AndroidColor.rgb(62, 76, 71); stroke.strokeWidth = 5f } }
                 path.zipWithNext().forEach { (a, b) -> drawLine(x(a.x), y(a.y), x(b.x), y(b.y), stroke) }
                 path.forEach { p -> drawCircle(x(p.x), y(p.y), 5.5f, dot) }
             }
         }
         return ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 100, out); out.toByteArray() }
     }
-    private fun isometricSvg(title: String, segments: List<Pair<Vec3, Vec3>>): String {
-        fun p(v: Vec3) = Pair((v.x - v.z * 0.72).toFloat(), (v.y + (v.x + v.z) * 0.36).toFloat())
+    private fun isometricSvg(title: String, segments: List<Triple<Vec3, Vec3, Int>>): String {
+        fun p(v: Vec3) = Pair((v.x - v.z * 0.72).toFloat(), (-v.y + (v.x + v.z) * 0.36).toFloat())
         val points = segments.flatMap { listOf(p(it.first), p(it.second)) }
         val left = (points.minOfOrNull { it.first } ?: 0f) - 20f; val top = (points.minOfOrNull { it.second } ?: 0f) - 30f
         val right = (points.maxOfOrNull { it.first } ?: 100f) + 20f; val bottom = (points.maxOfOrNull { it.second } ?: 100f) + 20f
         fun n(v: Float) = DecimalFormat("0.##").format(v)
         return buildString {
             append("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"${n(left)} ${n(top)} ${n(right-left)} ${n(bottom-top)}\"><rect x=\"$left\" y=\"$top\" width=\"${right-left}\" height=\"${bottom-top}\" fill=\"white\"/><text x=\"$left\" y=\"${top+18}\" font-family=\"sans-serif\" font-size=\"12\">${esc(title)}</text>")
-            segments.forEach { (a, b) -> val x = p(a); val y = p(b); append("<line x1=\"${n(x.first)}\" y1=\"${n(x.second)}\" x2=\"${n(y.first)}\" y2=\"${n(y.second)}\" stroke=\"#61442f\" stroke-width=\"2\"/>") }
+            segments.forEach { (a, b, color) -> val x = p(a); val y = p(b); append("<line x1=\"${n(x.first)}\" y1=\"${n(x.second)}\" x2=\"${n(y.first)}\" y2=\"${n(y.second)}\" stroke=\"#%06X\" stroke-width=\"7\"/>".format(color and 0x00ffffff)) }
             append("</svg>")
         }
     }
-    private fun isometricPng(title: String, segments: List<Pair<Vec3, Vec3>>): ByteArray {
-        fun p(v: Vec3) = Pair((v.x - v.z * 0.72).toFloat(), (v.y + (v.x + v.z) * 0.36).toFloat())
+    private fun isometricPng(title: String, segments: List<Triple<Vec3, Vec3, Int>>): ByteArray {
+        fun p(v: Vec3) = Pair((v.x - v.z * 0.72).toFloat(), (-v.y + (v.x + v.z) * 0.36).toFloat())
         val points = segments.flatMap { listOf(p(it.first), p(it.second)) }
         val minX = points.minOfOrNull { it.first } ?: 0f; val maxX = points.maxOfOrNull { it.first } ?: 100f
         val minY = points.minOfOrNull { it.second } ?: 0f; val maxY = points.maxOfOrNull { it.second } ?: 100f
@@ -396,8 +410,8 @@ private object MasterExport {
             drawColor(AndroidColor.WHITE)
             val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(32, 53, 48); textSize = 34f; typeface = android.graphics.Typeface.DEFAULT_BOLD }
             drawText(title, margin, margin * .58f, text)
-            val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(97, 68, 47); style = Paint.Style.STROKE; strokeWidth = 5f; strokeCap = Paint.Cap.ROUND }
-            segments.forEach { (a, b) -> val from = p(a); val to = p(b); drawLine(x(from.first), y(from.second), x(to.first), y(to.second), stroke) }
+            val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 18f; strokeCap = Paint.Cap.ROUND }
+            segments.forEach { (a, b, color) -> val from = p(a); val to = p(b); stroke.color = color; drawLine(x(from.first), y(from.second), x(to.first), y(to.second), stroke) }
         }
         return ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 100, out); out.toByteArray() }
     }
@@ -452,7 +466,7 @@ private object MasterExport {
             })
             ModelPlane.entries.forEach { plane ->
                 val view = snapshot.guides.filter { it.plane == plane }; val base = "views/${plane.name.lowercase()}"
-                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", view)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", view))
+                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", view, materialById)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", view, materialById))
             }
             text("views/3d-wireframe.svg", isometricSvg("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
             binary("views/3d-wireframe.png", isometricPng("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
@@ -1863,10 +1877,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
         val segments = guideSnapshot.flatMap { g ->
             val mapping = setup.mapping(g.plane) ?: return@flatMap emptyList()
             val points = guidePoints(g); val steps = (points.size - 1).coerceAtLeast(1)
+            val color = g.materialId?.let { id -> materials.firstOrNull { it.id == id }?.argb } ?: 0xFF61442F.toInt()
             points.withIndex().zipWithNext().map { (a, b) ->
                 val za = g.startZMm + (g.endZMm - g.startZMm) * a.index / steps
                 val zb = g.startZMm + (g.endZMm - g.startZMm) * b.index / steps
-                mapping.model(a.value, za) to mapping.model(b.value, zb)
+                Triple(mapping.model(a.value, za), mapping.model(b.value, zb), color)
             }
         }
         val snapshot = MasterExportSnapshot(projectName.ifBlank { "Idea 3D project" }, unit, guideSnapshot, materials, joinUi.joints, joinUi.types, lengths, segments, bitmap)
