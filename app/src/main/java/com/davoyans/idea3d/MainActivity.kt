@@ -346,6 +346,30 @@ private object MasterExport {
             append("</svg>")
         }
     }
+    /** Raster companion for people who only have a phone gallery or messaging app. */
+    private fun drawingPng(title: String, guides: List<GuideLine>): ByteArray {
+        val points = guides.flatMap { guidePoints(it) }
+        val minX = points.minOfOrNull { it.x } ?: 0f; val maxX = points.maxOfOrNull { it.x } ?: 100f
+        val minY = points.minOfOrNull { it.y } ?: 0f; val maxY = points.maxOfOrNull { it.y } ?: 100f
+        val width = 1600; val height = 1100; val margin = 92f
+        val scale = min((width - margin * 2) / (maxX - minX).coerceAtLeast(1f), (height - margin * 2 - 52f) / (maxY - minY).coerceAtLeast(1f))
+        fun x(v: Float) = margin + (v - minX) * scale
+        fun y(v: Float) = margin + 52f + (v - minY) * scale
+        val image = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        AndroidCanvas(image).apply {
+            drawColor(AndroidColor.WHITE)
+            val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(32, 53, 48); textSize = 34f; typeface = android.graphics.Typeface.DEFAULT_BOLD }
+            drawText(title, margin, margin * .58f, text)
+            val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(62, 76, 71); style = Paint.Style.STROKE; strokeWidth = 5f; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
+            val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(139, 94, 60) }
+            guides.forEach { g ->
+                val path = guidePoints(g)
+                path.zipWithNext().forEach { (a, b) -> drawLine(x(a.x), y(a.y), x(b.x), y(b.y), stroke) }
+                path.forEach { p -> drawCircle(x(p.x), y(p.y), 5.5f, dot) }
+            }
+        }
+        return ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 100, out); out.toByteArray() }
+    }
     private fun isometricSvg(title: String, segments: List<Pair<Vec3, Vec3>>): String {
         fun p(v: Vec3) = Pair((v.x - v.z * 0.72).toFloat(), (v.y + (v.x + v.z) * 0.36).toFloat())
         val points = segments.flatMap { listOf(p(it.first), p(it.second)) }
@@ -357,6 +381,25 @@ private object MasterExport {
             segments.forEach { (a, b) -> val x = p(a); val y = p(b); append("<line x1=\"${n(x.first)}\" y1=\"${n(x.second)}\" x2=\"${n(y.first)}\" y2=\"${n(y.second)}\" stroke=\"#61442f\" stroke-width=\"2\"/>") }
             append("</svg>")
         }
+    }
+    private fun isometricPng(title: String, segments: List<Pair<Vec3, Vec3>>): ByteArray {
+        fun p(v: Vec3) = Pair((v.x - v.z * 0.72).toFloat(), (v.y + (v.x + v.z) * 0.36).toFloat())
+        val points = segments.flatMap { listOf(p(it.first), p(it.second)) }
+        val minX = points.minOfOrNull { it.first } ?: 0f; val maxX = points.maxOfOrNull { it.first } ?: 100f
+        val minY = points.minOfOrNull { it.second } ?: 0f; val maxY = points.maxOfOrNull { it.second } ?: 100f
+        val width = 1600; val height = 1100; val margin = 92f
+        val scale = min((width - margin * 2) / (maxX - minX).coerceAtLeast(1f), (height - margin * 2 - 52f) / (maxY - minY).coerceAtLeast(1f))
+        fun x(v: Float) = margin + (v - minX) * scale
+        fun y(v: Float) = margin + 52f + (v - minY) * scale
+        val image = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        AndroidCanvas(image).apply {
+            drawColor(AndroidColor.WHITE)
+            val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(32, 53, 48); textSize = 34f; typeface = android.graphics.Typeface.DEFAULT_BOLD }
+            drawText(title, margin, margin * .58f, text)
+            val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(97, 68, 47); style = Paint.Style.STROKE; strokeWidth = 5f; strokeCap = Paint.Cap.ROUND }
+            segments.forEach { (a, b) -> val from = p(a); val to = p(b); drawLine(x(from.first), y(from.second), x(to.first), y(to.second), stroke) }
+        }
+        return ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 100, out); out.toByteArray() }
     }
     fun write(file: File, snapshot: MasterExportSnapshot) {
         val materialById = snapshot.materials.associateBy { it.id }
@@ -407,11 +450,15 @@ private object MasterExport {
                 appendLine("join,type,detail,count,first_part,second_part")
                 snapshot.joints.forEach { j -> val type = snapshot.joinTypes.firstOrNull { it.id == j.typeId }; appendLine("${j.id},${csv(type?.name ?: j.typeId)},${csv(type?.detail.orEmpty())},${j.count},${j.a.first.label} ${j.a.second},${j.b.first.label} ${j.b.second}") }
             })
-            ModelPlane.entries.forEach { plane -> text("views/${plane.name.lowercase()}.svg", drawingSvg("${snapshot.name} — ${plane.label} view", snapshot.guides.filter { it.plane == plane })) }
+            ModelPlane.entries.forEach { plane ->
+                val view = snapshot.guides.filter { it.plane == plane }; val base = "views/${plane.name.lowercase()}"
+                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", view)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", view))
+            }
             text("views/3d-wireframe.svg", isometricSvg("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
+            binary("views/3d-wireframe.png", isometricPng("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
             // The front image is useful to a workshop as a visual reference alongside the vector cut drawings.
             snapshot.source?.let { image -> ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 92, out); binary("reference-picture.png", out.toByteArray()) } }
-            text("report.html", """<!doctype html><meta charset=\"utf-8\"><title>${esc(snapshot.name)} — Master package</title><h1>${esc(snapshot.name)}</h1><p>Open <b>README.txt</b> for quantities, purchase units, waste and joins. The drawings below are printable vector views.</p><ul><li><a href=\"materials-and-cut-list.csv\">Materials and cut list</a></li><li><a href=\"joins-and-fasteners.csv\">Joins and fasteners</a></li><li><a href=\"views/front.svg\">Front view</a></li><li><a href=\"views/top.svg\">Top view</a></li><li><a href=\"views/profile.svg\">Profile view</a></li><li><a href=\"views/3d-wireframe.svg\">3D wireframe view</a></li></ul>""")
+            text("report.html", """<!doctype html><meta charset=\"utf-8\"><title>${esc(snapshot.name)} — Master package</title><h1>${esc(snapshot.name)}</h1><p>Open <b>README.txt</b> for quantities, purchase units, waste and joins. Each view is supplied as both SVG and ordinary PNG.</p><ul><li><a href=\"materials-and-cut-list.csv\">Materials and cut list</a></li><li><a href=\"joins-and-fasteners.csv\">Joins and fasteners</a></li><li><a href=\"views/front.png\">Front view PNG</a></li><li><a href=\"views/top.png\">Top view PNG</a></li><li><a href=\"views/profile.png\">Profile view PNG</a></li><li><a href=\"views/3d-wireframe.png\">3D wireframe PNG</a></li></ul>""")
         }
     }
 }
