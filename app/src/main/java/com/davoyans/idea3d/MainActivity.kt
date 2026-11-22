@@ -315,6 +315,7 @@ private data class MasterExportSnapshot(
     val name: String,
     val unit: String,
     val guides: List<GuideLine>,
+    val measurements: List<MeasureLine>,
     val materials: List<Material>,
     val joints: List<Joint>,
     val joinTypes: List<JoinType>,
@@ -330,8 +331,8 @@ private object MasterExport {
         val points = guidePoints(g)
         return points.zipWithNext().sumOf { (a, b) -> hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble()) }
     }
-    private fun drawingSvg(title: String, guides: List<GuideLine>, materials: Map<String, Material>): String {
-        val points = guides.flatMap { guidePoints(it) }
+    private fun drawingSvg(title: String, unit: String, guides: List<GuideLine>, measurements: List<MeasureLine>, materials: Map<String, Material>): String {
+        val points = guides.flatMap { guidePoints(it) } + measurements.flatMap { listOf(it.start, it.end) }
         val left = (points.minOfOrNull { it.x } ?: 0f) - 30f; val top = (points.minOfOrNull { it.y } ?: 0f) - 30f
         val right = (points.maxOfOrNull { it.x } ?: 100f) + 30f; val bottom = (points.maxOfOrNull { it.y } ?: 100f) + 30f
         fun n(v: Float) = DecimalFormat("0.##").format(v)
@@ -349,12 +350,17 @@ private object MasterExport {
                 if (p.size > 1) append("<path d=\"M ${p.joinToString(" L ") { "${n(it.x)} ${n(it.y)}" }}\" fill=\"none\" stroke=\"$hex\" stroke-width=\"${if (material == null) 2 else 7}\"/>\n")
                 p.forEach { append("<circle cx=\"${n(it.x)}\" cy=\"${n(it.y)}\" r=\"2.4\" fill=\"#8b5e3c\"/>\n") }
             }
+            measurements.forEach { m ->
+                val label = listOf(m.label.takeIf { it.isNotBlank() }, "${DecimalFormat("0.##").format(m.value)} $unit").filterNotNull().joinToString(" · ")
+                val mx = (m.start.x + m.end.x) / 2; val my = (m.start.y + m.end.y) / 2 - 5
+                append("<line x1=\"${n(m.start.x)}\" y1=\"${n(m.start.y)}\" x2=\"${n(m.end.x)}\" y2=\"${n(m.end.y)}\" stroke=\"#1463b8\" stroke-width=\"2\" stroke-dasharray=\"5 3\"/><text x=\"${n(mx)}\" y=\"${n(my)}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#0d4d91\">${esc(label)}</text>\n")
+            }
             append("</svg>")
         }
     }
     /** Raster companion for people who only have a phone gallery or messaging app. */
-    private fun drawingPng(title: String, guides: List<GuideLine>, materials: Map<String, Material>): ByteArray {
-        val points = guides.flatMap { guidePoints(it) }
+    private fun drawingPng(title: String, unit: String, guides: List<GuideLine>, measurements: List<MeasureLine>, materials: Map<String, Material>): ByteArray {
+        val points = guides.flatMap { guidePoints(it) } + measurements.flatMap { listOf(it.start, it.end) }
         val minX = points.minOfOrNull { it.x } ?: 0f; val maxX = points.maxOfOrNull { it.x } ?: 100f
         val minY = points.minOfOrNull { it.y } ?: 0f; val maxY = points.maxOfOrNull { it.y } ?: 100f
         val width = 1600; val height = 1100; val margin = 92f
@@ -380,6 +386,14 @@ private object MasterExport {
                 g.materialId?.let(materials::get)?.let { material -> stroke.color = material.argb; stroke.strokeWidth = 18f }.also { if (it == null) { stroke.color = AndroidColor.rgb(62, 76, 71); stroke.strokeWidth = 5f } }
                 path.zipWithNext().forEach { (a, b) -> drawLine(x(a.x), y(a.y), x(b.x), y(b.y), stroke) }
                 path.forEach { p -> drawCircle(x(p.x), y(p.y), 5.5f, dot) }
+            }
+            val dimension = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(20, 99, 184); style = Paint.Style.STROKE; strokeWidth = 3f; pathEffect = android.graphics.DashPathEffect(floatArrayOf(12f, 8f), 0f) }
+            val dimensionText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(13, 77, 145); textSize = 25f; textAlign = Paint.Align.CENTER; typeface = android.graphics.Typeface.DEFAULT_BOLD }
+            measurements.forEach { m ->
+                drawLine(x(m.start.x), y(m.start.y), x(m.end.x), y(m.end.y), dimension)
+                drawCircle(x(m.start.x), y(m.start.y), 5f, dimension); drawCircle(x(m.end.x), y(m.end.y), 5f, dimension)
+                val label = listOf(m.label.takeIf { it.isNotBlank() }, "${DecimalFormat("0.##").format(m.value)} $unit").filterNotNull().joinToString(" · ")
+                drawText(label, (x(m.start.x) + x(m.end.x)) / 2, (y(m.start.y) + y(m.end.y)) / 2 - 12f, dimensionText)
             }
         }
         return ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 100, out); out.toByteArray() }
@@ -466,7 +480,8 @@ private object MasterExport {
             })
             ModelPlane.entries.forEach { plane ->
                 val view = snapshot.guides.filter { it.plane == plane }; val base = "views/${plane.name.lowercase()}"
-                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", view, materialById)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", view, materialById))
+                val dimensions = snapshot.measurements.filter { it.plane == plane }
+                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById))
             }
             text("views/3d-wireframe.svg", isometricSvg("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
             binary("views/3d-wireframe.png", isometricPng("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
@@ -1884,7 +1899,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 Triple(mapping.model(a.value, za), mapping.model(b.value, zb), color)
             }
         }
-        val snapshot = MasterExportSnapshot(projectName.ifBlank { "Idea 3D project" }, unit, guideSnapshot, materials, joinUi.joints, joinUi.types, lengths, segments, bitmap)
+        val snapshot = MasterExportSnapshot(projectName.ifBlank { "Idea 3D project" }, unit, guideSnapshot, allLines(), materials, joinUi.joints, joinUi.types, lengths, segments, bitmap)
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching { MasterExport.write(File(context.cacheDir, "idea3d-master-package.zip"), snapshot) } }
             result.onSuccess {
