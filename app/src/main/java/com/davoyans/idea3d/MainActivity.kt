@@ -321,17 +321,21 @@ private data class MasterExportSnapshot(
     val joinTypes: List<JoinType>,
     val guideLengthsMm: Map<Pair<ModelPlane, Int>, Double>,
     val modelSegments: List<Triple<Vec3, Vec3, Int>>,
+    val pieceNames: Map<Pair<ModelPlane, Int>, String>,
+    val jointMarks: Map<ModelPlane, List<Pair<Pt, String>>>,
     val source: Bitmap?
 )
 
 private object MasterExport {
-    private fun csv(value: String) = '"' + value.replace("\"", "\"\"") + '"'
-    private fun esc(value: String) = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+    private val armenianLatin = mapOf('ա' to "a", 'բ' to "b", 'գ' to "g", 'դ' to "d", 'ե' to "e", 'զ' to "z", 'է' to "e", 'ը' to "y", 'թ' to "t", 'ժ' to "zh", 'ի' to "i", 'լ' to "l", 'խ' to "kh", 'ծ' to "ts", 'կ' to "k", 'հ' to "h", 'ձ' to "dz", 'ղ' to "gh", 'ճ' to "ch", 'մ' to "m", 'յ' to "y", 'ն' to "n", 'շ' to "sh", 'ո' to "o", 'չ' to "ch", 'պ' to "p", 'ջ' to "j", 'ռ' to "r", 'ս' to "s", 'վ' to "v", 'տ' to "t", 'ր' to "r", 'ց' to "ts", 'ւ' to "u", 'փ' to "p", 'ք' to "k", 'և' to "ev", 'օ' to "o", 'ֆ' to "f")
+    private fun latin(value: String) = buildString { value.forEach { c -> val lower = armenianLatin[c.lowercaseChar()]; append(if (lower == null) c else if (c.isUpperCase()) lower.replaceFirstChar { it.uppercase() } else lower) } }
+    private fun csv(value: String) = '"' + latin(value).replace("\"", "\"\"") + '"'
+    private fun esc(value: String) = latin(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
     private fun lengthOf(g: GuideLine): Double {
         val points = guidePoints(g)
         return points.zipWithNext().sumOf { (a, b) -> hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble()) }
     }
-    private fun drawingSvg(title: String, unit: String, guides: List<GuideLine>, measurements: List<MeasureLine>, materials: Map<String, Material>): String {
+    private fun drawingSvg(title: String, unit: String, guides: List<GuideLine>, measurements: List<MeasureLine>, materials: Map<String, Material>, pieceNames: Map<Pair<ModelPlane, Int>, String>, joints: List<Pair<Pt, String>>): String {
         val points = guides.flatMap { guidePoints(it) } + measurements.flatMap { listOf(it.start, it.end) }
         val left = (points.minOfOrNull { it.x } ?: 0f) - 30f; val top = (points.minOfOrNull { it.y } ?: 0f) - 30f
         val right = (points.maxOfOrNull { it.x } ?: 100f) + 30f; val bottom = (points.maxOfOrNull { it.y } ?: 100f) + 30f
@@ -349,17 +353,19 @@ private object MasterExport {
                 val material = g.materialId?.let(materials::get); val hex = material?.let { "#%06X".format(it.argb and 0x00ffffff) } ?: "#263936"
                 if (p.size > 1) append("<path d=\"M ${p.joinToString(" L ") { "${n(it.x)} ${n(it.y)}" }}\" fill=\"none\" stroke=\"$hex\" stroke-width=\"${if (material == null) 2 else 7}\"/>\n")
                 p.forEach { append("<circle cx=\"${n(it.x)}\" cy=\"${n(it.y)}\" r=\"2.4\" fill=\"#8b5e3c\"/>\n") }
+                pieceNames[g.plane to g.id]?.let { name -> p.firstOrNull()?.let { at -> append("<text x=\"${n(at.x)}\" y=\"${n(at.y - 7)}\" font-family=\"sans-serif\" font-size=\"10\" font-weight=\"bold\" fill=\"#202020\">${esc(name)}</text>\n") } }
             }
             measurements.forEach { m ->
                 val label = listOf(m.label.takeIf { it.isNotBlank() }, "${DecimalFormat("0.##").format(m.value)} $unit").filterNotNull().joinToString(" · ")
                 val mx = (m.start.x + m.end.x) / 2; val my = (m.start.y + m.end.y) / 2 - 5
                 append("<line x1=\"${n(m.start.x)}\" y1=\"${n(m.start.y)}\" x2=\"${n(m.end.x)}\" y2=\"${n(m.end.y)}\" stroke=\"#1463b8\" stroke-width=\"2\" stroke-dasharray=\"5 3\"/><text x=\"${n(mx)}\" y=\"${n(my)}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#0d4d91\">${esc(label)}</text>\n")
             }
+            joints.forEach { (at, name) -> append("<circle cx=\"${n(at.x)}\" cy=\"${n(at.y)}\" r=\"7\" fill=\"#d34716\" stroke=\"white\" stroke-width=\"2\"/><text x=\"${n(at.x)}\" y=\"${n(at.y + 3)}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"7\" font-weight=\"bold\" fill=\"white\">${esc(name)}</text>\n") }
             append("</svg>")
         }
     }
     /** Raster companion for people who only have a phone gallery or messaging app. */
-    private fun drawingPng(title: String, unit: String, guides: List<GuideLine>, measurements: List<MeasureLine>, materials: Map<String, Material>): ByteArray {
+    private fun drawingPng(title: String, unit: String, guides: List<GuideLine>, measurements: List<MeasureLine>, materials: Map<String, Material>, pieceNames: Map<Pair<ModelPlane, Int>, String>, joints: List<Pair<Pt, String>>): ByteArray {
         val points = guides.flatMap { guidePoints(it) } + measurements.flatMap { listOf(it.start, it.end) }
         val minX = points.minOfOrNull { it.x } ?: 0f; val maxX = points.maxOfOrNull { it.x } ?: 100f
         val minY = points.minOfOrNull { it.y } ?: 0f; val maxY = points.maxOfOrNull { it.y } ?: 100f
@@ -395,6 +401,11 @@ private object MasterExport {
                 val label = listOf(m.label.takeIf { it.isNotBlank() }, "${DecimalFormat("0.##").format(m.value)} $unit").filterNotNull().joinToString(" · ")
                 drawText(label, (x(m.start.x) + x(m.end.x)) / 2, (y(m.start.y) + y(m.end.y)) / 2 - 12f, dimensionText)
             }
+            val pieceText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.DKGRAY; textSize = 24f; typeface = android.graphics.Typeface.DEFAULT_BOLD }
+            guides.forEach { g -> pieceNames[g.plane to g.id]?.let { name -> guidePoints(g).firstOrNull()?.let { p -> drawText(latin(name), x(p.x) + 8f, y(p.y) - 10f, pieceText) } } }
+            val jointDot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(211, 71, 22) }
+            val jointText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.WHITE; textSize = 18f; textAlign = Paint.Align.CENTER; typeface = android.graphics.Typeface.DEFAULT_BOLD }
+            joints.forEach { (at, name) -> drawCircle(x(at.x), y(at.y), 15f, jointDot); drawText(latin(name), x(at.x), y(at.y) + 7f, jointText) }
         }
         return ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 100, out); out.toByteArray() }
     }
@@ -429,6 +440,14 @@ private object MasterExport {
         }
         return ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 100, out); out.toByteArray() }
     }
+    private fun hasVisibleReference(image: Bitmap): Boolean {
+        val stepX = (image.width / 20).coerceAtLeast(1); val stepY = (image.height / 20).coerceAtLeast(1)
+        for (y in 0 until image.height step stepY) for (x in 0 until image.width step stepX) {
+            val c = image.getPixel(x, y)
+            if (AndroidColor.alpha(c) > 16 && (AndroidColor.red(c) < 238 || AndroidColor.green(c) < 238 || AndroidColor.blue(c) < 238)) return true
+        }
+        return false
+    }
     fun write(file: File, snapshot: MasterExportSnapshot) {
         val materialById = snapshot.materials.associateBy { it.id }
         val barCuts = snapshot.guides.mapNotNull { g ->
@@ -447,46 +466,47 @@ private object MasterExport {
             fun binary(path: String, bytes: ByteArray) { zip.putNextEntry(ZipEntry(path)); zip.write(bytes); zip.closeEntry() }
             val report = buildString {
                 appendLine("IDEA 3D — MASTER WORK PACKAGE")
-                appendLine(snapshot.name); appendLine("Units: ${snapshot.unit}"); appendLine()
+                appendLine(latin(snapshot.name)); appendLine("Units: ${snapshot.unit}"); appendLine()
                 appendLine("Open report.html first. It links the printable Front, Top and Profile drawings.")
                 appendLine("MATERIAL PURCHASE")
                 barCuts.groupBy { it.first.id }.values.forEach { group ->
                     val m = group.first().first; val required = group.sumOf { it.third }; val stock = m.stockLengthMm
                     val units = stock?.let { kotlin.math.ceil(required / it).toInt() }
-                    appendLine("- ${m.name}: ${DecimalFormat("0.#").format(required)} mm total" + if (units != null) "; buy $units × ${DecimalFormat("0.#").format(stock)} mm; offcut ${DecimalFormat("0.#").format(units * stock - required)} mm" else "")
+                    appendLine("- ${latin(m.name)}: ${DecimalFormat("0.#").format(required)} mm total" + if (units != null) "; buy $units × ${DecimalFormat("0.#").format(stock)} mm; offcut ${DecimalFormat("0.#").format(units * stock - required)} mm" else "")
                 }
                 sheetShapes.groupBy { it.first.id }.values.forEach { group ->
                     val m = group.first().first; val required = group.sumOf { it.third }; val stockArea = (m.stockWidthMm ?: 0.0) * (m.stockHeightMm ?: 0.0)
                     val units = stockArea.takeIf { it > 0 }?.let { kotlin.math.ceil(required / it).toInt() }
-                    appendLine("- ${m.name}: ${DecimalFormat("0.#").format(required)} square drawing-px" + if (units != null) "; buy $units sheet(s); unused ${DecimalFormat("0.#").format(units * stockArea - required)} square drawing-px" else "")
+                    appendLine("- ${latin(m.name)}: ${DecimalFormat("0.#").format(required)} square drawing-px" + if (units != null) "; buy $units sheet(s); unused ${DecimalFormat("0.#").format(units * stockArea - required)} square drawing-px" else "")
                 }
                 appendLine(); appendLine("JOINS / FASTENERS")
                 snapshot.joints.groupBy { it.typeId }.forEach { (id, list) ->
                     val type = snapshot.joinTypes.firstOrNull { it.id == id }
-                    appendLine("- ${type?.name ?: id}: ${list.sumOf { it.count }} (${type?.detail.orEmpty()})")
+                    appendLine("- ${latin(type?.name ?: id)}: ${list.sumOf { it.count }} (${latin(type?.detail.orEmpty())})")
                 }
                 if (snapshot.joints.isEmpty()) appendLine("- No joins were recorded.")
             }
             text("README.txt", report)
             text("materials-and-cut-list.csv", buildString {
                 appendLine("material,part,view,cut_length_drawing_px,stock_length_mm")
-                barCuts.forEachIndexed { i, (m, g, length) -> appendLine("${csv(m.name)},${csv("Bar ${i+1}")},${g.plane.label},${DecimalFormat("0.##").format(length)},${m.stockLengthMm ?: ""}") }
+                barCuts.forEachIndexed { i, (m, g, length) -> appendLine("${csv(m.name)},${csv(snapshot.pieceNames[g.plane to g.id] ?: "P${i+1}")},${g.plane.label},${DecimalFormat("0.##").format(length)},${m.stockLengthMm ?: ""}") }
                 appendLine(); appendLine("sheet_material,view,area_drawing_px,stock_width_mm,stock_height_mm")
                 sheetShapes.forEach { (m, plane, area) -> appendLine("${csv(m.name)},${plane.label},${DecimalFormat("0.##").format(area)},${m.stockWidthMm ?: ""},${m.stockHeightMm ?: ""}") }
             })
             text("joins-and-fasteners.csv", buildString {
                 appendLine("join,type,detail,count,first_part,second_part")
-                snapshot.joints.forEach { j -> val type = snapshot.joinTypes.firstOrNull { it.id == j.typeId }; appendLine("${j.id},${csv(type?.name ?: j.typeId)},${csv(type?.detail.orEmpty())},${j.count},${j.a.first.label} ${j.a.second},${j.b.first.label} ${j.b.second}") }
+                snapshot.joints.forEach { j -> val type = snapshot.joinTypes.firstOrNull { it.id == j.typeId }; val a = snapshot.pieceNames[j.a] ?: "${j.a.first.label} ${j.a.second}"; val b = snapshot.pieceNames[j.b] ?: "${j.b.first.label} ${j.b.second}"; appendLine("J${j.id},${csv(type?.name ?: j.typeId)},${csv(type?.detail.orEmpty())},${j.count},${csv(a)},${csv(b)}") }
             })
             ModelPlane.entries.forEach { plane ->
                 val view = snapshot.guides.filter { it.plane == plane }; val base = "views/${plane.name.lowercase()}"
                 val dimensions = snapshot.measurements.filter { it.plane == plane }
-                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById))
+                val joints = snapshot.jointMarks[plane].orEmpty()
+                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById, snapshot.pieceNames, joints)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById, snapshot.pieceNames, joints))
             }
             text("views/3d-wireframe.svg", isometricSvg("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
             binary("views/3d-wireframe.png", isometricPng("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
             // The front image is useful to a workshop as a visual reference alongside the vector cut drawings.
-            snapshot.source?.let { image -> ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 92, out); binary("reference-picture.png", out.toByteArray()) } }
+            snapshot.source?.takeIf(::hasVisibleReference)?.let { image -> ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 92, out); binary("reference-picture.png", out.toByteArray()) } }
             text("report.html", """<!doctype html><meta charset=\"utf-8\"><title>${esc(snapshot.name)} — Master package</title><h1>${esc(snapshot.name)}</h1><p>Open <b>README.txt</b> for quantities, purchase units, waste and joins. Each view is supplied as both SVG and ordinary PNG.</p><ul><li><a href=\"materials-and-cut-list.csv\">Materials and cut list</a></li><li><a href=\"joins-and-fasteners.csv\">Joins and fasteners</a></li><li><a href=\"views/front.png\">Front view PNG</a></li><li><a href=\"views/top.png\">Top view PNG</a></li><li><a href=\"views/profile.png\">Profile view PNG</a></li><li><a href=\"views/3d-wireframe.png\">3D wireframe PNG</a></li></ul>""")
         }
     }
@@ -1899,7 +1919,11 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 Triple(mapping.model(a.value, za), mapping.model(b.value, zb), color)
             }
         }
-        val snapshot = MasterExportSnapshot(projectName.ifBlank { "Idea 3D project" }, unit, guideSnapshot, allLines(), materials, joinUi.joints, joinUi.types, lengths, segments, bitmap)
+        val pieceNames = guideSnapshot.filter { it.materialId != null }.mapIndexed { index, g -> (g.plane to g.id) to "P${index + 1}" }.toMap()
+        val jointMarks = ModelPlane.entries.associateWith { plane ->
+            setup.mapping(plane)?.let { mapping -> joinUi.joints.map { joint -> mapping.pixel(joint.at) to "J${joint.id}" } }.orEmpty()
+        }
+        val snapshot = MasterExportSnapshot(projectName.ifBlank { "Idea 3D project" }, unit, guideSnapshot, allLines(), materials, joinUi.joints, joinUi.types, lengths, segments, pieceNames, jointMarks, bitmap)
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching { MasterExport.write(File(context.cacheDir, "idea3d-master-package.zip"), snapshot) } }
             result.onSuccess {
