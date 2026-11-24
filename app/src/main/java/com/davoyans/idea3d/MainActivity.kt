@@ -156,6 +156,14 @@ import com.davoyans.idea3d.core.Mesh
 import com.davoyans.idea3d.core.SweepBuilder
 import com.davoyans.idea3d.core.Triangle
 import com.davoyans.idea3d.core.ModelPlane
+import com.davoyans.idea3d.core.CutBar
+import com.davoyans.idea3d.core.CutKind
+import com.davoyans.idea3d.core.CutList
+import com.davoyans.idea3d.core.CutListResult
+import com.davoyans.idea3d.core.Connection
+import com.davoyans.idea3d.core.EndCut
+import com.davoyans.idea3d.core.PieceCut
+import com.davoyans.idea3d.core.RecordedJoin
 import com.davoyans.idea3d.core.formatLength
 import com.davoyans.idea3d.core.parseLengthMm
 import com.davoyans.idea3d.core.projectedLengthForFixedTrue
@@ -323,7 +331,9 @@ private data class MasterExportSnapshot(
     val modelSegments: List<Triple<Vec3, Vec3, Int>>,
     val pieceNames: Map<Pair<ModelPlane, Int>, String>,
     val jointMarks: Map<ModelPlane, List<Pair<Pt, String>>>,
-    val source: Bitmap?
+    val source: Bitmap?,
+    val workshop: Workshop,
+    val view: JoinViewState
 )
 
 private object MasterExport {
@@ -448,66 +458,100 @@ private object MasterExport {
         }
         return false
     }
+    private fun table(head: List<String>, rows: List<List<String>>) = "<table><tr>" + head.joinToString("") { "<th>${esc(it)}</th>" } + "</tr>" +
+        rows.joinToString("") { r -> "<tr>" + r.joinToString("") { "<td>${esc(it)}</td>" } + "</tr>" } + "</table>"
+    private fun isWeld(c: Connection) = c.typeName.contains("weld", ignoreCase = true) || c.recorded?.typeId == "weld"
     fun write(file: File, snapshot: MasterExportSnapshot) {
         val materialById = snapshot.materials.associateBy { it.id }
-        val barCuts = snapshot.guides.mapNotNull { g ->
-            val m = g.materialId?.let(materialById::get)?.takeUnless { it.isSheet } ?: return@mapNotNull null
-            Triple(m, g, snapshot.guideLengthsMm[g.plane to g.id] ?: lengthOf(g))
+        val w = snapshot.workshop
+        val pieces = w.cut.pieces
+        val joins = w.cut.connections
+        val d = DecimalFormat("0.#")
+        fun end(e: EndCut) = listOf(e.kind.label, d.format(e.angleDeg), d.format(e.sawDeg), e.face, e.partner?.let(w::nameOf).orEmpty())
+        val profileOf = pieces.associate { it.bar.key to it.bar.profile }
+        // Weld seams: round the end of the piece that stops at the joint, at its cut angle.
+        fun seamMm(c: Connection): Double {
+            val ends = pieces.flatMap { p -> listOf(p.start, p.end).filter { it.partner == c.a || it.partner == c.b }.filter { p.bar.key == c.a || p.bar.key == c.b }.map { p.bar.profile to it } }
+            val (profile, cut) = ends.minByOrNull { it.second.angleDeg } ?: return CutList.weldSeamMm(profileOf[c.a] ?: profileOf[c.b] ?: return 0.0, c.angleDeg ?: 90.0)
+            return CutList.weldSeamMm(profile, if (cut.kind == CutKind.THROUGH) 90.0 else cut.angleDeg)
         }
-        val sheetShapes = ModelPlane.entries.flatMap { plane ->
-            closedGuideShapes(snapshot.guides.filter { it.plane == plane }).mapNotNull { path ->
-                val m = path.firstNotNullOfOrNull { it.materialId?.let(materialById::get) }?.takeIf { it.isSheet } ?: return@mapNotNull null
-                val p = shapePoints(path); val area = abs(p.indices.sumOf { i -> val a = p[i]; val b = p[(i + 1) % p.size]; (a.x * b.y - b.x * a.y).toDouble() }) / 2
-                Triple(m, plane, area)
-            }
-        }
+        data class Total(val name: String, val detail: String, val count: Int, val joins: List<Int>, val seamMm: Double)
+        val totals = joins.groupBy { it.typeName to it.detail }.map { (k, list) -> Total(k.first, k.second, list.sumOf { it.count }, list.map { it.number }, if (list.all(::isWeld)) list.sumOf(::seamMm) else 0.0) }
         ZipOutputStream(file.outputStream().buffered()).use { zip ->
             fun text(path: String, content: String) { zip.putNextEntry(ZipEntry(path)); zip.write(content.toByteArray(Charsets.UTF_8)); zip.closeEntry() }
             fun binary(path: String, bytes: ByteArray) { zip.putNextEntry(ZipEntry(path)); zip.write(bytes); zip.closeEntry() }
             val report = buildString {
                 appendLine("IDEA 3D — MASTER WORK PACKAGE")
-                appendLine(latin(snapshot.name)); appendLine("Units: ${snapshot.unit}"); appendLine()
-                appendLine("Open report.html first. It links the printable Front, Top and Profile drawings.")
-                appendLine("MATERIAL PURCHASE")
-                barCuts.groupBy { it.first.id }.values.forEach { group ->
-                    val m = group.first().first; val required = group.sumOf { it.third }; val stock = m.stockLengthMm
+                appendLine(latin(snapshot.name)); appendLine("All sizes in mm, angles in degrees."); appendLine()
+                appendLine("Open report.html first. views/joins.png shows every join by its number.")
+                appendLine("Cut angles are measured between the piece's axis and the cut face: 90 = square. Saw = mitre-saw setting (0 = square).")
+                appendLine("W / H = the slope shows across the profile's width / height side. Cut length is along the centre line; long point = longest edge.")
+                appendLine(); appendLine("MATERIAL PURCHASE")
+                pieces.groupBy { it.bar.material }.forEach { (name, group) ->
+                    val m = snapshot.materials.firstOrNull { it.name == name }
+                    val required = group.sumOf { it.longPointMm }; val stock = m?.stockLengthMm
                     val units = stock?.let { kotlin.math.ceil(required / it).toInt() }
-                    appendLine("- ${latin(m.name)}: ${DecimalFormat("0.#").format(required)} mm total" + if (units != null) "; buy $units × ${DecimalFormat("0.#").format(stock)} mm; offcut ${DecimalFormat("0.#").format(units * stock - required)} mm" else "")
+                    appendLine("- ${latin(name)}: ${group.size} pieces, ${d.format(required)} mm total" + if (units != null && stock != null) "; buy $units × ${d.format(stock)} mm; offcut ${d.format(units * stock - required)} mm" else "")
                 }
-                sheetShapes.groupBy { it.first.id }.values.forEach { group ->
-                    val m = group.first().first; val required = group.sumOf { it.third }; val stockArea = (m.stockWidthMm ?: 0.0) * (m.stockHeightMm ?: 0.0)
+                w.sheets.groupBy { it.material.id }.values.forEach { group ->
+                    val m = group.first().material; val required = group.sumOf { it.areaMm2 }; val stockArea = (m.stockWidthMm ?: 0.0) * (m.stockHeightMm ?: 0.0)
                     val units = stockArea.takeIf { it > 0 }?.let { kotlin.math.ceil(required / it).toInt() }
-                    appendLine("- ${latin(m.name)}: ${DecimalFormat("0.#").format(required)} square drawing-px" + if (units != null) "; buy $units sheet(s); unused ${DecimalFormat("0.#").format(units * stockArea - required)} square drawing-px" else "")
+                    appendLine("- ${latin(m.name)}: ${d.format(required / 1e6)} m²" + if (units != null) "; buy $units sheet(s); unused ${d.format((units * stockArea - required) / 1e6)} m²" else "")
                 }
-                appendLine(); appendLine("JOINS / FASTENERS")
-                snapshot.joints.groupBy { it.typeId }.forEach { (id, list) ->
-                    val type = snapshot.joinTypes.firstOrNull { it.id == id }
-                    appendLine("- ${latin(type?.name ?: id)}: ${list.sumOf { it.count }} (${latin(type?.detail.orEmpty())})")
-                }
-                if (snapshot.joints.isEmpty()) appendLine("- No joins were recorded.")
+                appendLine(); appendLine("PIECES AND CUTS")
+                pieces.forEach { p -> appendLine("- ${p.bar.name}: ${latin(w.pieceInfo(p))}") }
+                if (pieces.isEmpty()) appendLine("- No bars or pipes with a material.")
+                appendLine(); appendLine("JOINS (numbers as in views/joins.png)")
+                joins.forEach { c -> appendLine("- ${c.number}. ${latin(w.joinInfo(c))}") }
+                if (joins.isEmpty()) appendLine("- No joins.")
+                appendLine(); appendLine("FASTENERS / WELDS / GLUE")
+                totals.forEach { t -> appendLine("- ${latin(t.name)}${if (t.detail.isNotBlank()) " (${latin(t.detail)})" else ""}: ${t.count}" + (if (t.seamMm > 0) ", seam ≈ ${d.format(t.seamMm)} mm" else "") + " — joins ${t.joins.joinToString(", ")}") }
+                if (totals.any { it.name == "Not set" }) appendLine("  'Not set' joins have no fastening chosen yet: use Join in Idea 3D to pick screw, weld, glue …")
             }
             text("README.txt", report)
-            text("materials-and-cut-list.csv", buildString {
-                appendLine("material,part,view,cut_length_drawing_px,stock_length_mm")
-                barCuts.forEachIndexed { i, (m, g, length) -> appendLine("${csv(m.name)},${csv(snapshot.pieceNames[g.plane to g.id] ?: "P${i+1}")},${g.plane.label},${DecimalFormat("0.##").format(length)},${m.stockLengthMm ?: ""}") }
-                appendLine(); appendLine("sheet_material,view,area_drawing_px,stock_width_mm,stock_height_mm")
-                sheetShapes.forEach { (m, plane, area) -> appendLine("${csv(m.name)},${plane.label},${DecimalFormat("0.##").format(area)},${m.stockWidthMm ?: ""},${m.stockHeightMm ?: ""}") }
+            text("pieces-and-cuts.csv", buildString {
+                appendLine("piece,material,view,cut_length_mm,long_point_mm,short_point_mm,start_cut,start_angle_deg,start_saw_deg,start_side,start_meets,end_cut,end_angle_deg,end_saw_deg,end_side,end_meets,bent")
+                pieces.forEach { p -> appendLine((listOf(p.bar.name, p.bar.material, p.bar.key.first.label, d.format(p.cutMm), d.format(p.longPointMm), d.format(p.shortPointMm)) + end(p.start) + end(p.end) + listOf(if (p.bar.curved) "yes" else "")).joinToString(",") { csv(it) }) }
             })
-            text("joins-and-fasteners.csv", buildString {
-                appendLine("join,type,detail,count,first_part,second_part")
-                snapshot.joints.forEach { j -> val type = snapshot.joinTypes.firstOrNull { it.id == j.typeId }; val a = snapshot.pieceNames[j.a] ?: "${j.a.first.label} ${j.a.second}"; val b = snapshot.pieceNames[j.b] ?: "${j.b.first.label} ${j.b.second}"; appendLine("J${j.id},${csv(type?.name ?: j.typeId)},${csv(type?.detail.orEmpty())},${j.count},${csv(a)},${csv(b)}") }
+            text("joins.csv", buildString {
+                appendLine("join,kind,angle_deg,piece_a,piece_b,fastening,detail,count,set_by,x_mm,y_mm,z_mm")
+                joins.forEach { c -> appendLine(listOf("${c.number}", c.kind, c.angleDeg?.let(d::format).orEmpty(), w.nameOf(c.a), w.nameOf(c.b), c.typeName, c.detail, "${c.count}", if (c.recorded != null) "user" else "auto", d.format(c.at.x), d.format(c.at.y), d.format(c.at.z)).joinToString(",") { csv(it) }) }
+            })
+            text("fasteners.csv", buildString {
+                appendLine("fastening,detail,total_count,weld_seam_mm,joins")
+                totals.forEach { t -> appendLine(listOf(t.name, t.detail, "${t.count}", if (t.seamMm > 0) d.format(t.seamMm) else "", t.joins.joinToString(" ")).joinToString(",") { csv(it) }) }
+            })
+            text("sheets.csv", buildString {
+                appendLine("sheet,material,view,area_m2,stock_width_mm,stock_height_mm")
+                w.sheets.forEach { s -> appendLine(listOf(s.name, s.material.name, s.plane.label, DecimalFormat("0.###").format(s.areaMm2 / 1e6), s.material.stockWidthMm?.let(d::format).orEmpty(), s.material.stockHeightMm?.let(d::format).orEmpty()).joinToString(",") { csv(it) }) }
             })
             ModelPlane.entries.forEach { plane ->
                 val view = snapshot.guides.filter { it.plane == plane }; val base = "views/${plane.name.lowercase()}"
                 val dimensions = snapshot.measurements.filter { it.plane == plane }
-                val joints = snapshot.jointMarks[plane].orEmpty()
-                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById, snapshot.pieceNames, joints)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById, snapshot.pieceNames, joints))
+                val marks = snapshot.jointMarks[plane].orEmpty()
+                text("$base.svg", drawingSvg("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById, snapshot.pieceNames, marks)); binary("$base.png", drawingPng("${snapshot.name} — ${plane.label} view", snapshot.unit, view, dimensions, materialById, snapshot.pieceNames, marks))
             }
+            text("views/joins.svg", joinSceneSvg(w.scene, snapshot.view, "${latin(snapshot.name)} — joins", ::esc))
+            binary("views/joins.png", joinScenePng(w.scene, snapshot.view, "${latin(snapshot.name)} — joins"))
             text("views/3d-wireframe.svg", isometricSvg("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
             binary("views/3d-wireframe.png", isometricPng("${snapshot.name} — 3D wireframe", snapshot.modelSegments))
             // The front image is useful to a workshop as a visual reference alongside the vector cut drawings.
             snapshot.source?.takeIf(::hasVisibleReference)?.let { image -> ByteArrayOutputStream().use { out -> image.compress(Bitmap.CompressFormat.PNG, 92, out); binary("reference-picture.png", out.toByteArray()) } }
-            text("report.html", """<!doctype html><meta charset=\"utf-8\"><title>${esc(snapshot.name)} — Master package</title><h1>${esc(snapshot.name)}</h1><p>Open <b>README.txt</b> for quantities, purchase units, waste and joins. Each view is supplied as both SVG and ordinary PNG.</p><ul><li><a href=\"materials-and-cut-list.csv\">Materials and cut list</a></li><li><a href=\"joins-and-fasteners.csv\">Joins and fasteners</a></li><li><a href=\"views/front.png\">Front view PNG</a></li><li><a href=\"views/top.png\">Top view PNG</a></li><li><a href=\"views/profile.png\">Profile view PNG</a></li><li><a href=\"views/3d-wireframe.png\">3D wireframe PNG</a></li></ul>""")
+            text("report.html", buildString {
+                append("<!doctype html><meta charset=\"utf-8\"><title>${esc(snapshot.name)} — Master package</title>")
+                append("<style>body{font-family:sans-serif;margin:16px}table{border-collapse:collapse;margin:8px 0 20px}td,th{border:1px solid #bbb;padding:3px 6px;font-size:13px;text-align:left}th{background:#eef2f1}img{max-width:100%;border:1px solid #ccc}</style>")
+                append("<h1>${esc(snapshot.name)}</h1><p>Sizes in mm, angles in degrees. Cut angle is between the piece's axis and the cut face (90 = square); saw = mitre-saw setting. W / H: the slope shows across the width / height side.</p>")
+                append("<h2>Joins view</h2><img src=\"views/joins.png\">")
+                append("<h2>Pieces and cuts</h2>")
+                append(table(listOf("Piece", "Material", "Cut length", "Long point", "Start cut", "End cut", "Meets"), pieces.map { p -> listOf(p.bar.name, p.bar.material, d.format(p.cutMm), d.format(p.longPointMm), endCutText(p.start), endCutText(p.end), listOfNotNull(p.start.partner, p.end.partner).joinToString(", ", transform = w::nameOf)) }))
+                append("<h2>Joins</h2>")
+                append(table(listOf("№", "Kind", "Pieces", "Fastening", "Detail", "Count"), joins.map { c -> listOf("${c.number}", connectionKind(c), "${w.nameOf(c.a)} + ${w.nameOf(c.b)}", c.typeName, c.detail, "${c.count}") }))
+                append("<h2>Fasteners, welds, glue</h2>")
+                append(table(listOf("Fastening", "Detail", "Total", "Weld seam ≈ mm", "Joins"), totals.map { t -> listOf(t.name, t.detail, "${t.count}", if (t.seamMm > 0) d.format(t.seamMm) else "", t.joins.joinToString(", ")) }))
+                if (w.sheets.isNotEmpty()) append("<h2>Sheets</h2>" + table(listOf("Sheet", "Material", "View", "Area m²"), w.sheets.map { listOf(it.name, it.material.name, it.plane.label, DecimalFormat("0.###").format(it.areaMm2 / 1e6)) }))
+                append("<h2>Drawings</h2><ul><li><a href=\"views/front.png\">Front</a></li><li><a href=\"views/top.png\">Top</a></li><li><a href=\"views/profile.png\">Profile</a></li><li><a href=\"views/3d-wireframe.png\">3D wireframe</a></li></ul>")
+                append("<p>Tables as CSV: <a href=\"pieces-and-cuts.csv\">pieces-and-cuts.csv</a>, <a href=\"joins.csv\">joins.csv</a>, <a href=\"fasteners.csv\">fasteners.csv</a>, <a href=\"sheets.csv\">sheets.csv</a>.</p>")
+            })
         }
     }
 }
@@ -604,11 +648,11 @@ private class JoinUi {
 @Composable private fun JoinDialogs(ui: JoinUi, projectId: String?, nameOf: (Pair<ModelPlane, Int>) -> String) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { ui.types = JoinLibrary.load(context); ui.showLabels = context.getSharedPreferences("join-library", Context.MODE_PRIVATE).getBoolean("labels", true) }
-    LaunchedEffect(projectId) { ui.joints = projectId?.let { JointStore.load(context, it) }.orEmpty(); ui.jointsFor = projectId }
+    LaunchedEffect(projectId) { ui.joints = projectId?.let { JointStore.load(context, it) }.orEmpty(); ui.jointsFor = projectId; joinView.load(context, projectId) }
     LaunchedEffect(ui.joints) { val id = projectId; if (id != null && ui.jointsFor == id) JointStore.save(context, id, ui.joints) }
     ui.pending?.let { run -> JoinTypeDialog(ui.types, JoinLibrary.last(context), onJoin = { t, n -> ui.pending = null; run(t, n) }, onLibrary = { ui.showLibrary = true }, onDismiss = { ui.pending = null }) }
     if (ui.showLibrary) JoinLibraryDialog(ui.types, ui.showLabels, { on -> ui.showLabels = on; context.getSharedPreferences("join-library", Context.MODE_PRIVATE).edit().putBoolean("labels", on).apply() }, ui.joints.map { j -> "${ui.label(j)} · ${nameOf(j.a)} + ${nameOf(j.b)}" },
-        onSave = { list -> ui.types = list; JoinLibrary.save(context, list) }, onDeleteJoint = { i -> ui.joints = ui.joints.filterIndexed { k, _ -> k != i } }, onDismiss = { ui.showLibrary = false })
+        onSave = { list -> ui.types = list; JoinLibrary.save(context, list) }, onDeleteJoint = { i -> ui.joints = ui.joints.filterIndexed { k, _ -> k != i } }, onDismiss = { ui.showLibrary = false }, onJoinView = { ui.showLibrary = false; joinView.open = true })
 }
 @Composable private fun JoinTypeDialog(types: List<JoinType>, lastId: String?, onJoin: (JoinType, Int) -> Unit, onLibrary: () -> Unit, onDismiss: () -> Unit) {
     var chosen by remember(types) { mutableStateOf(types.firstOrNull { it.id == lastId } ?: types.firstOrNull()) }
@@ -632,13 +676,14 @@ private class JoinUi {
     }, confirmButton = { TextButton(enabled = chosen != null, onClick = { chosen?.let { onJoin(it, count) } }) { Text("Join") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
-@Composable private fun JoinLibraryDialog(types: List<JoinType>, showLabels: Boolean, onLabels: (Boolean) -> Unit, jointsText: List<String>, onSave: (List<JoinType>) -> Unit, onDeleteJoint: (Int) -> Unit, onDismiss: () -> Unit) {
+@Composable private fun JoinLibraryDialog(types: List<JoinType>, showLabels: Boolean, onLabels: (Boolean) -> Unit, jointsText: List<String>, onSave: (List<JoinType>) -> Unit, onDeleteJoint: (Int) -> Unit, onDismiss: () -> Unit, onJoinView: () -> Unit = {}) {
     var list by remember { mutableStateOf(types) }
     AlertDialog(onDismissRequest = { onSave(list.filter { it.name.isNotBlank() }); onDismiss() }, title = { Text("Join library") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState())) {
             Row(Modifier.fillMaxWidth().clickable { onLabels(!showLabels) }, verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = showLabels, onCheckedChange = onLabels); Text("Show joint names on the drawing (Sizes off hides them too)", fontSize = 13.sp)
             }
+            OutlinedButton(onClick = { onSave(list.filter { it.name.isNotBlank() }); onJoinView() }, modifier = Modifier.fillMaxWidth()) { Text("Join view (numbered joins, see-through pieces)") }
             Text("Ways of joining you pick from on each Join. Edit them to match your screws, bolts and brackets.", fontSize = 12.sp, color = Color(0xFF4D5A57))
             list.forEachIndexed { i, t ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1919,11 +1964,14 @@ private fun backgroundDoneNotification(context: Context, text: String) {
                 Triple(mapping.model(a.value, za), mapping.model(b.value, zb), color)
             }
         }
-        val pieceNames = guideSnapshot.filter { it.materialId != null }.mapIndexed { index, g -> (g.plane to g.id) to "P${index + 1}" }.toMap()
+        val workshop = workshopOf(guideSnapshot, materials, setup, joinUi.joints, joinUi.types)
+        val pieceNames = workshop.names
+        joinView.load(context, projectId)
+        // The drawings show the joins by the same numbers as the join list and the join view.
         val jointMarks = ModelPlane.entries.associateWith { plane ->
-            setup.mapping(plane)?.let { mapping -> joinUi.joints.map { joint -> mapping.pixel(joint.at) to "J${joint.id}" } }.orEmpty()
+            setup.mapping(plane)?.let { mapping -> workshop.cut.connections.filter { joinView.joinShown(it.stableKey) }.map { c -> mapping.pixel(c.at) to if (joinView.joinNumberShown(c.stableKey)) "${c.number}" else "" } }.orEmpty()
         }
-        val snapshot = MasterExportSnapshot(projectName.ifBlank { "Idea 3D project" }, unit, guideSnapshot, allLines(), materials, joinUi.joints, joinUi.types, lengths, segments, pieceNames, jointMarks, bitmap)
+        val snapshot = MasterExportSnapshot(projectName.ifBlank { "Idea 3D project" }, unit, guideSnapshot, allLines(), materials, joinUi.joints, joinUi.types, lengths, segments, pieceNames, jointMarks, bitmap, workshop, joinView.copyForExport())
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching { MasterExport.write(File(context.cacheDir, "idea3d-master-package.zip"), snapshot) } }
             result.onSuccess {
@@ -6538,6 +6586,10 @@ private fun backgroundDoneNotification(context: Context, text: String) {
             dismissButton = { TextButton(onClick = { surfaceEditId = null }) { Text("Cancel") } })
     } ?: run { surfaceEditId = null } }
     JoinDialogs(joinUi, projectId) { itemNameLate(it) }
+    if (joinView.open) Scoped {
+        val scene = remember { workshopOf(allGuides(), materials, modelSetup(), joinUi.joints, joinUi.types).scene }
+        JoinViewDialog(scene) { joinView.open = false }
+    }
     lineMaterialId?.let { id -> guides.firstOrNull { it.id == id }?.let { guide ->
         var chosen by remember(id) { mutableStateOf(guide.materialId) }
         var turn by remember(id) { mutableStateOf(guide.materialTurnDeg) }
@@ -6814,7 +6866,7 @@ private fun backgroundDoneNotification(context: Context, text: String) {
     }
     // This is also the project menu for a blank drawing: importing a 3D object must not
     // require a reference photo first.
-    if (showPictureEdit) PictureEditDialog(projectName, unit, pictureOptions, scale != null, bitmap != null, onExportForMaster = { showPictureEdit = false; exportForMaster() }, onExportImage = {
+    if (showPictureEdit) PictureEditDialog(projectName, unit, pictureOptions, scale != null, bitmap != null, onExportForMaster = { showPictureEdit = false; exportForMaster() }, onJoinView = { showPictureEdit = false; joinView.open = true }, onExportImage = {
         bitmap?.let { image -> exportAnnotated(context, image, lines, guides, exportGuides, unit, unitVisibility, levelRotation, pictureOptions, extrusions); logToast(context, "Saved to Pictures/Idea 3D", Toast.LENGTH_SHORT).show() }
     }, onExportDxf = { showPictureEdit = false; showDxfExport = true }, onImportModel = { showPictureEdit = false; modelPicker.launch(arrayOf("*/*")) }, onMaterialList = { showPictureEdit = false; showMaterialList = true }, onMeasurements = { showPictureEdit = false; showMeasurements = true }, onCalibrate = { showPictureEdit = false; tool = Tool.CALIBRATE; logToast(context, "Tap two points of a known distance", Toast.LENGTH_LONG).show() }, onSaveMaterial = {
         // The selected shape, or else the biggest closed shape that isn't a hole inside another one.
@@ -9077,7 +9129,7 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
     }, confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onSave(name.trim()) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, hasPicture: Boolean, onExportForMaster: () -> Unit, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onCalibrate: () -> Unit = {}, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
+@Composable private fun PictureEditDialog(currentName: String, currentUnit: String, currentOptions: PictureOptions, hasScale: Boolean, hasPicture: Boolean, onExportForMaster: () -> Unit, onExportImage: () -> Unit, onExport3d: () -> Unit, onExportDxf: () -> Unit, onImportModel: () -> Unit, onSaveMaterial: () -> Unit, onMaterialList: () -> Unit, onMeasurements: () -> Unit, onCalibrate: () -> Unit = {}, onJoinView: () -> Unit = {}, onDismiss: () -> Unit, onSave: (String, String, Map<String, Int>, PictureOptions) -> Unit) {
     var name by remember { mutableStateOf(currentName) }
     var unit by remember { mutableStateOf(currentUnit) }
     var unitMenuOpen by remember { mutableStateOf(false) }
@@ -9090,7 +9142,8 @@ private fun DrawScope.drawMagnifier(bitmap: Bitmap, p: Pt, center: Offset) {
             Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Project name") }, singleLine = true)
                 Button(onClick = onExportForMaster, modifier = Modifier.fillMaxWidth()) { Text("Export for master") }
-                Text("Materials to buy, offcuts, cut list, joins / fasteners and Front, Top, Profile drawings in one ZIP.", fontSize = 12.sp, color = Color(0xFF53615D))
+                Text("Materials to buy, pieces with cut lengths and angles, numbered joins, screws / welds / glue, join view and Front, Top, Profile drawings in one ZIP.", fontSize = 12.sp, color = Color(0xFF53615D))
+                OutlinedButton(onClick = onJoinView, modifier = Modifier.fillMaxWidth()) { Text("Join view") }
                 if (hasPicture) OutlinedButton(onClick = onExportImage) { Text("Export picture") }
                 OutlinedButton(onClick = onExport3d) { Text("Export 3D model (STL or 3MF)") }
                 OutlinedButton(onClick = onExportDxf) { Text("Export 2D drawing (DXF)") }
@@ -9792,6 +9845,59 @@ private fun buildSolidSpecs(guides: List<GuideLine>, extrusions: List<Extrusion>
     if (solidCount == 0) error("Nothing is 3D yet: select a shape, then Modify → Grow, or give it a sheet material")
     if (issues.isNotEmpty()) throw MeshException(issues)
     return specs
+}
+
+
+/** What the workshop needs: every bar or pipe with its cut ends, every join numbered, and the sheets. */
+private class Workshop(val cut: CutListResult, val scene: JoinScene, val names: Map<Pair<ModelPlane, Int>, String>, val sheets: List<SheetPiece>) {
+    fun nameOf(key: Pair<ModelPlane, Int>) = names[key] ?: "${key.first.label} ${key.second}"
+    fun pieceInfo(p: PieceCut) = "${p.bar.material} · cut ${mmText(p.cutMm)} mm" + (if (abs(p.longPointMm - p.cutMm) > 0.5) " (long point ${mmText(p.longPointMm)})" else "") +
+        " · ends ${endCutText(p.start)} / ${endCutText(p.end)}" + if (p.bar.curved) " · bent" else ""
+    fun joinInfo(c: Connection) = "${connectionKind(c)} · ${nameOf(c.a)} + ${nameOf(c.b)} · ${c.typeName}${if (c.count > 1) " ×${c.count}" else ""}${if (c.detail.isNotBlank()) " (${c.detail})" else ""}"
+}
+private data class SheetPiece(val name: String, val material: Material, val plane: ModelPlane, val areaMm2: Double)
+private fun mmText(v: Double) = DecimalFormat("0.#").format(v)
+private fun degText(v: Double) = DecimalFormat("0.#").format(v)
+/** One end of a piece in words: 90° square, or the angle off the axis with the saw setting and the side it slopes on. */
+private fun endCutText(e: EndCut): String = when {
+    e.kind == CutKind.COPE -> "cope ${degText(e.angleDeg)}°"
+    e.square -> if (e.kind == CutKind.THROUGH) "90° (runs through)" else "90°"
+    else -> "${degText(e.angleDeg)}° ${e.kind.label.lowercase()} (saw ${degText(e.sawDeg)}°${if (e.face.isNotEmpty()) ", ${e.face}" else ""})"
+}
+private fun connectionKind(c: Connection): String = when (c.kind) {
+    "Miter" -> "Miter ${degText(c.angleDeg ?: 0.0)}° (${degText((c.angleDeg ?: 0.0) / 2)}° + ${degText((c.angleDeg ?: 0.0) / 2)}°)"
+    "In line" -> "In line"
+    else -> c.angleDeg?.let { "${c.kind} ${degText(it)}°" } ?: c.kind
+}
+private fun workshopOf(guides: List<GuideLine>, materials: List<Material>, setup: ModelSetup, joints: List<Joint>, types: List<JoinType>): Workshop {
+    val byId = materials.associateBy { it.id }
+    val bars = mutableListOf<CutBar>()
+    guides.forEach { g ->
+        val m = g.materialId?.let(byId::get)?.takeIf { !it.isSheet && g.surfaceMm == null } ?: return@forEach
+        val mapping = setup.mapping(g.plane) ?: return@forEach
+        val steps = if (g.curveMid == null) 1 else 12
+        val points = (0..steps).map { i -> val t = i.toFloat() / steps; mapping.model(guidePointAt(g, t), g.startZMm + (g.endZMm - g.startZMm) * t) }
+        if ((points.last() - points.first()).length < 1e-6 && g.curveMid == null) return@forEach
+        bars += CutBar(g.plane to g.id, "P${bars.size + 1}", m.name, points, g.plane.toward, m.profile, g.materialTurnDeg,
+            g.pathId?.let { Triple(g.plane, it, g.materialId) }, g.groupId, g.id * 3 + g.plane.ordinal, g.curveMid != null, m.argb)
+    }
+    val recorded = joints.map { j -> val t = types.firstOrNull { it.id == j.typeId }; RecordedJoin(j.id, j.a, j.b, j.at, j.typeId, t?.name ?: j.typeId, t?.detail.orEmpty(), j.count) }
+    val cut = CutList.compute(bars, recorded)
+    val names = bars.associate { it.key to it.name }
+    val sheets = ModelPlane.entries.flatMap { plane ->
+        val mapping = setup.mapping(plane) ?: return@flatMap emptyList()
+        closedGuideShapes(guides.filter { it.plane == plane }).mapNotNull { path ->
+            val m = path.firstNotNullOfOrNull { it.materialId?.let(byId::get) }?.takeIf { it.isSheet } ?: return@mapNotNull null
+            val p = shapePoints(path).map { mapping.model(it, 0.0) }
+            val n = p.indices.fold(Vec3.ZERO) { acc, i -> acc + (p[i] cross p[(i + 1) % p.size]) }
+            m to (plane to n.length / 2)
+        }
+    }.mapIndexed { i, (m, pa) -> SheetPiece("S${i + 1}", m, pa.first, pa.second) }
+    val w = Workshop(cut, JoinScene(emptyList(), emptyList()), names, sheets)
+    val scene = JoinScene(
+        cut.pieces.map { p -> JoinViewBar("${p.bar.key.first.name}:${p.bar.key.second}", p.bar.name, p.bar.points, CutList.halfMax(p.bar.profile), p.bar.argb, w.pieceInfo(p)) },
+        cut.connections.map { c -> JoinViewJoin(c.stableKey, c.number, c.at, c.radiusMm, w.joinInfo(c)) })
+    return Workshop(cut, scene, names, sheets)
 }
 
 /**
